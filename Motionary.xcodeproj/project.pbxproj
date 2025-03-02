@@ -29,9 +29,33 @@
 		8C70C7D52D7225A80070BD08 /* MotionaryUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MotionaryUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		DEC873082D7437500076890F /* Exceptions for "Motionary" folder in "Motionary" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				.swift,
+			);
+			target = 8C70C7BA2D7225A60070BD08 /* Motionary */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+		DEC873092D7437500076890F /* Exceptions for "Motionary" folder in "Compile Sources" phase from "Motionary" target */ = {
+			isa = PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet;
+			buildPhase = 8C70C7B72D7225A60070BD08 /* Sources */;
+			membershipExceptions = (
+				.swift,
+			);
+		};
+/* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		8C70C7BD2D7225A60070BD08 /* Motionary */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				DEC873082D7437500076890F /* Exceptions for "Motionary" folder in "Motionary" target */,
+				DEC873092D7437500076890F /* Exceptions for "Motionary" folder in "Compile Sources" phase from "Motionary" target */,
+			);
 			path = Motionary;
 			sourceTree = "<group>";
 		};
@@ -396,7 +420,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
-				DEVELOPMENT_TEAM = 84TRSZD4QB;
+				DEVELOPMENT_TEAM = 7US535ZNLG;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Motionary;
@@ -411,7 +435,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = lian.Motionary;
+				PRODUCT_BUNDLE_IDENTIFIER = Motionary;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -427,7 +451,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
-				DEVELOPMENT_TEAM = 84TRSZD4QB;
+				DEVELOPMENT_TEAM = 7US535ZNLG;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Motionary;
@@ -442,7 +466,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = lian.Motionary;
+				PRODUCT_BUNDLE_IDENTIFIER = Motionary;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
