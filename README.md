@@ -2,7 +2,7 @@
   <!-- TITLE -->
   <img src="/Motionary/Assets/icon.png" alt="logo" width="20%"/>
   <h1>Motionary</h1>
-  <p>A powerful, easy-to-use video editing app for iOS and Android. Fast, intuitive, and built with the tools editors actually need.</p>
+  <p>A powerful, easy-to-use video editing app for iOS. Fast, intuitive, and built with the tools editors actually need.</p>
 
   <!-- BADGES -->
   <a href="https://github.com/Guavary/Motionary/releases"><img src="https://img.shields.io/badge/Version-0.1-green" alt="Version"></a>
