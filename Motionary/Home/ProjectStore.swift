@@ -38,7 +38,7 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    private func save() {
+    func save() {
         guard !isLoading else { return }
         do {
             let data = try JSONEncoder().encode(projects)
@@ -48,3 +48,4 @@ final class ProjectStore: ObservableObject {
         }
     }
 }
+

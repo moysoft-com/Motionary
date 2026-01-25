@@ -62,10 +62,15 @@ struct HomeView: View {
                                 // Title display or inline renaming TextField
                                 VStack(alignment: .leading, spacing: 8) {
                                     if editingProjectID == project.id {
-                                        TextField("Project Title", text: $project.title) {
+                                        TextField("Project Title", text: $project.title, onCommit: {
                                             editingProjectID = nil
-                                        }
+                                            projectStore.save()
+                                        })
                                         .textFieldStyle(RoundedBorderTextFieldStyle())
+                                        .onSubmit {
+                                            editingProjectID = nil
+                                            projectStore.save()
+                                        }
                                     } else {
                                         Text(project.title)
                                             .font(.headline)
@@ -125,3 +130,4 @@ struct HomeView: View {
         }
     }
 }
+

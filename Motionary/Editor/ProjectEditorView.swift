@@ -388,22 +388,33 @@ struct ProjectEditorView: View {
         let composition = AVMutableComposition()
         let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video,
                                                                 preferredTrackID: kCMPersistentTrackID_Invalid)
-        let compositionAudioTrack = composition.addMutableTrack(withMediaType: .audio,
-                                                                preferredTrackID: kCMPersistentTrackID_Invalid)
+        var mainAudioTrack: AVMutableCompositionTrack? = nil
         var currentCompTime = CMTime.zero
+
         for clip in clips {
             let asset = AVAsset(url: clip.sourceURL)
             let start = CMTimeMakeWithSeconds(clip.startTime, preferredTimescale: 600)
             let duration = CMTimeMakeWithSeconds(clip.endTime - clip.startTime, preferredTimescale: 600)
             let timeRange = CMTimeRange(start: start, duration: duration)
             do {
-                if clip.mediaType == .video, let assetVideoTrack = asset.tracks(withMediaType: .video).first {
-                    try compositionVideoTrack?.insertTimeRange(timeRange, of: assetVideoTrack, at: currentCompTime)
+                if clip.mediaType == .video {
+                    if let assetVideoTrack = asset.tracks(withMediaType: .video).first {
+                        try compositionVideoTrack?.insertTimeRange(timeRange, of: assetVideoTrack, at: currentCompTime)
+                    }
+                    if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                        if mainAudioTrack == nil {
+                            mainAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                        }
+                        try mainAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: currentCompTime)
+                    }
+                    currentCompTime = currentCompTime + duration
+                } else {
+                    // Audio-only clip: mix under the whole timeline starting at 0 by using a separate audio track.
+                    if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                        let extraAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                        try extraAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: .zero)
+                    }
                 }
-                if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
-                    try compositionAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: currentCompTime)
-                }
-                currentCompTime = currentCompTime + duration
             } catch {
                 print("Error inserting clip: \(error)")
             }
@@ -559,24 +570,29 @@ struct ProjectEditorView: View {
         isExporting = true
         exportProgress = 0.0
 
-        guard let newSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+        let hasVideo = !composition.tracks(withMediaType: .video).isEmpty && composition.tracks(withMediaType: .video).first?.segments.isEmpty == false
+        let presetName = hasVideo ? AVAssetExportPresetHighestQuality : AVAssetExportPresetAppleM4A
+
+        guard let newSession = AVAssetExportSession(asset: composition, presetName: presetName) else {
             isExporting = false
             exportError = "Could not create export session."
             return
         }
         exportSession = newSession
         guard let exportSession = exportSession else { return }
-        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)_export.mov")
+
+        let filename = hasVideo ? "\(UUID().uuidString)_export.mov" : "\(UUID().uuidString)_export.m4a"
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try? FileManager.default.removeItem(at: outputURL)
         }
         exportSession.outputURL = outputURL
-        exportSession.outputFileType = .mov
+        exportSession.outputFileType = hasVideo ? .mov : .m4a
         exportSession.shouldOptimizeForNetworkUse = true
-        if let videoComposition = makeVideoComposition(for: composition) {
+        if hasVideo, let videoComposition = makeVideoComposition(for: composition) {
             exportSession.videoComposition = videoComposition
         }
-        
+
         exportSession.exportAsynchronously {
             DispatchQueue.main.async {
                 if exportSession.status == .completed {
@@ -590,7 +606,7 @@ struct ProjectEditorView: View {
                 self.exportSession = nil
             }
         }
-        
+
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
             DispatchQueue.main.async {
                 self.exportProgress = Double(exportSession.progress)

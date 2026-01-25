@@ -102,7 +102,9 @@ struct EditedTimelineView: View {
                         }
                         .coordinateSpace(name: "timeline-scroll")
                         .onPreferenceChange(TimelineScrollOffsetKey.self) { offset in
-                            handleScroll(offset: offset)
+                            // Adjust for the leading padding so that the playhead remains centered
+                            let adjusted = max(0, offset - leadingPadding)
+                            handleScroll(offset: adjusted)
                         }
                         .onChange(of: currentTime) { _ in
                             guard !isUserScrolling else { return }
@@ -212,3 +214,4 @@ struct EditedTimelineView: View {
         return String(format: "%d:%02d", minutes, seconds)
     }
 }
+
