@@ -7,9 +7,13 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    private let storageKey = "savedProjects"
+    private let storageURL: URL
+    private var isLoading = false
 
     init() {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        storageURL = (documentsURL ?? FileManager.default.temporaryDirectory)
+            .appendingPathComponent("projects.json")
         load()
     }
 
@@ -24,7 +28,9 @@ final class ProjectStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
+        isLoading = true
+        defer { isLoading = false }
+        guard let data = try? Data(contentsOf: storageURL) else { return }
         do {
             projects = try JSONDecoder().decode([Project].self, from: data)
         } catch {
@@ -33,9 +39,10 @@ final class ProjectStore: ObservableObject {
     }
 
     private func save() {
+        guard !isLoading else { return }
         do {
             let data = try JSONEncoder().encode(projects)
-            UserDefaults.standard.set(data, forKey: storageKey)
+            try data.write(to: storageURL, options: [.atomic])
         } catch {
             print("Failed to save projects: \(error)")
         }

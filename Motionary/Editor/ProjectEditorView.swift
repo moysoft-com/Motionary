@@ -1,8 +1,6 @@
 import SwiftUI
-import AVKit
 import AVFoundation
 import PhotosUI
-import Photos
 import UniformTypeIdentifiers
 import CoreImage
 import CoreImage.CIFilterBuiltins
@@ -47,6 +45,9 @@ struct ProjectEditorView: View {
     @State private var isExporting: Bool = false
     @State private var exportProgress: Double = 0.0
     @State private var exportError: String? = nil
+    @State private var exportURL: URL? = nil
+    @State private var isShareSheetPresented = false
+    @State private var exportSession: AVAssetExportSession? = nil
 
     // MARK: - Effects / Keyframes
     @State private var selectedEffect: VideoEffect = .none
@@ -61,7 +62,7 @@ struct ProjectEditorView: View {
                 if let player = player {
                     // Video preview with export button overlay at top-right.
                     ZStack(alignment: .topTrailing) {
-                        VideoPlayer(player: player)
+                        PreviewRendererView(player: player)
                             .frame(height: 300)
                             .cornerRadius(12)
                             .padding()
@@ -98,41 +99,38 @@ struct ProjectEditorView: View {
                     }
                     .padding(.horizontal, 40)
                     
-                    // Timeline view wrapped in a horizontal scroll view.
-                    ScrollView(.horizontal, showsIndicators: true) {
-                        EditedTimelineView(
-                            clips: clips,
-                            currentTime: currentTime,
-                            totalTime: totalTime,
-                            selectedClipID: selectedClipID,
-                            onSelectClip: { clip in
-                                selectedClipID = clip?.id
-                            },
-                            onScrubStart: {
-                                wasPlayingBeforeScrub = isPlaying
-                                player.pause()
-                                isPlaying = false
-                                isScrubbing = true
-                            },
-                            onScrubChanged: { newTime in
-                                seekPlayer(to: newTime)
-                            },
-                            onScrubEnd: { newTime in
-                                seekPlayer(to: newTime)
-                                isScrubbing = false
-                                if wasPlayingBeforeScrub {
-                                    if newTime >= totalTime {
-                                        seekPlayer(to: 0)
-                                    }
-                                    player.play()
-                                    isPlaying = true
+                    EditedTimelineView(
+                        clips: clips,
+                        currentTime: currentTime,
+                        totalTime: totalTime,
+                        selectedClipID: selectedClipID,
+                        onSelectClip: { clip in
+                            selectedClipID = clip?.id
+                        },
+                        onScrubStart: {
+                            wasPlayingBeforeScrub = isPlaying
+                            player.pause()
+                            isPlaying = false
+                            isScrubbing = true
+                        },
+                        onScrubChanged: { newTime in
+                            seekPlayer(to: newTime)
+                        },
+                        onScrubEnd: { newTime in
+                            seekPlayer(to: newTime)
+                            isScrubbing = false
+                            if wasPlayingBeforeScrub {
+                                if newTime >= totalTime {
+                                    seekPlayer(to: 0)
                                 }
-                            },
-                            onMoveClip: { fromIndex, toIndex in
-                                moveClip(from: fromIndex, to: toIndex)
+                                player.play()
+                                isPlaying = true
                             }
-                        )
-                    }
+                        },
+                        onMoveClip: { fromIndex, toIndex in
+                            moveClip(from: fromIndex, to: toIndex)
+                        }
+                    )
                     .frame(height: 120)
 
                     VStack(alignment: .leading, spacing: 12) {
@@ -258,6 +256,13 @@ struct ProjectEditorView: View {
         } message: {
             Text(audioImportError ?? "Unknown error.")
         }
+        .sheet(isPresented: $isShareSheetPresented, onDismiss: {
+            exportURL = nil
+        }) {
+            if let exportURL = exportURL {
+                ActivityView(activityItems: [exportURL])
+            }
+        }
         .onAppear { setupInitialComposition() }
         .onChange(of: extraFootageItem) { newItem in
             Task {
@@ -358,8 +363,19 @@ struct ProjectEditorView: View {
     }
 
     func setupInitialComposition() {
+        configureAudioSession()
         clips = [Clip(sourceURL: initialVideoURL, startTime: 0, endTime: initialDuration, mediaType: .video)]
         rebuildComposition(seekTo: 0)
+    }
+
+    func configureAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .moviePlayback, options: [])
+            try session.setActive(true)
+        } catch {
+            print("Failed to configure audio session: \(error.localizedDescription)")
+        }
     }
 
     func appendExtraClip(from url: URL, duration: Double, mediaType: ClipMediaType = .video) {
@@ -403,6 +419,8 @@ struct ProjectEditorView: View {
         }
         if player == nil {
             player = AVPlayer(playerItem: newItem)
+            player?.isMuted = false
+            player?.volume = 1.0
         } else {
             player?.replaceCurrentItem(with: newItem)
         }
@@ -540,13 +558,18 @@ struct ProjectEditorView: View {
         guard let composition = buildComposition() else { return }
         isExporting = true
         exportProgress = 0.0
-        
-        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+
+        guard let newSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
             isExporting = false
             exportError = "Could not create export session."
             return
         }
+        exportSession = newSession
+        guard let exportSession = exportSession else { return }
         let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)_export.mov")
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
         exportSession.shouldOptimizeForNetworkUse = true
@@ -557,29 +580,14 @@ struct ProjectEditorView: View {
         exportSession.exportAsynchronously {
             DispatchQueue.main.async {
                 if exportSession.status == .completed {
-                    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-                        DispatchQueue.main.async {
-                            if status == .authorized || status == .limited {
-                                PHPhotoLibrary.shared().performChanges({
-                                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
-                                }) { success, error in
-                                    DispatchQueue.main.async {
-                                        self.isExporting = false
-                                        if !success {
-                                            self.exportError = error?.localizedDescription ?? "Export failed to save."
-                                        }
-                                    }
-                                }
-                            } else {
-                                self.isExporting = false
-                                self.exportError = "Photo Library access denied."
-                            }
-                        }
-                    }
+                    self.isExporting = false
+                    self.exportURL = outputURL
+                    self.isShareSheetPresented = true
                 } else {
                     self.isExporting = false
                     self.exportError = exportSession.error?.localizedDescription ?? "Export failed."
                 }
+                self.exportSession = nil
             }
         }
         
@@ -593,4 +601,3 @@ struct ProjectEditorView: View {
         }
     }
 }
-
