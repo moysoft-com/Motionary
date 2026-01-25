@@ -12,7 +12,7 @@ struct HomeView: View {
     @State private var editingProjectID: UUID? = nil
     
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 // Black background
                 Color.black
@@ -110,21 +110,14 @@ struct HomeView: View {
                     }
                     .padding(.horizontal)
                     
-                    // Navigation link to the project detail view.
-                    NavigationLink(
-                        destination: Group {
-                            if let project = selectedProject {
-                                ProjectDetailView(project: project, projectStore: projectStore)
-                            } else {
-                                EmptyView()
-                            }
-                        },
-                        isActive: $showEditor
-                    ) {
-                        EmptyView()
-                    }
-                    
                     Spacer()
+                }
+            }
+            .navigationDestination(isPresented: $showEditor) {
+                if let project = selectedProject {
+                    ProjectDetailView(project: project, projectStore: projectStore)
+                } else {
+                    EmptyView()
                 }
             }
         }

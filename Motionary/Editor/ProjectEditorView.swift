@@ -60,158 +60,17 @@ struct ProjectEditorView: View {
             Color.black.ignoresSafeArea()
             VStack(spacing: 20) {
                 Spacer()
-                if let player = player {
-                    PreviewRendererView(player: player)
-                        .frame(height: 300)
-                        .cornerRadius(12)
-                        .padding()
-                    
-                    // Control buttons: Cut and Play/Pause.
-                    HStack {
-                        Button {
-                            performCut(at: currentTime)
-                        } label: {
-                            Image(systemName: "scissors")
-                                .font(.title2)
-                                .foregroundColor(.white)
-                        }
-                        Spacer()
-                        Button {
-                            togglePlayPause()
-                        } label: {
-                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                                .font(.title2)
-                                .foregroundColor(.white)
-                        }
-                        Spacer()
-                    }
-                    .padding(.horizontal, 40)
-                    
-                    EditedTimelineView(
-                        clips: clips,
-                        currentTime: currentTime,
-                        totalTime: totalTime,
-                        selectedClipID: selectedClipID,
-                        onSelectClip: { clip in
-                            selectedClipID = clip?.id
-                        },
-                        onScrubStart: {
-                            wasPlayingBeforeScrub = isPlaying
-                            player.pause()
-                            isPlaying = false
-                            isScrubbing = true
-                        },
-                        onScrubChanged: { newTime in
-                            seekPlayer(to: newTime)
-                        },
-                        onScrubEnd: { newTime in
-                            seekPlayer(to: newTime)
-                            isScrubbing = false
-                            if wasPlayingBeforeScrub {
-                                if newTime >= totalTime {
-                                    seekPlayer(to: 0)
-                                }
-                                player.play()
-                                isPlaying = true
-                            }
-                        },
-                        onMoveClip: { fromIndex, toIndex in
-                            moveClip(from: fromIndex, to: toIndex)
-                        }
-                    )
-                    .frame(height: 120)
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Effects & Keyframes")
-                            .font(.headline)
-                            .foregroundColor(.white)
-
-                        Picker("Effect", selection: $selectedEffect) {
-                            ForEach(VideoEffect.allCases) { effect in
-                                Text(effect.rawValue).tag(effect)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-
-                        HStack {
-                            Text("Intensity")
-                                .foregroundColor(.white)
-                            Slider(value: $effectIntensity, in: 0...1)
-                                .disabled(selectedEffect == .none || selectedEffect == .noir || selectedEffect == .chrome)
-                        }
-
-                        HStack {
-                            Button("Add Keyframe") {
-                                addKeyframe()
-                            }
-                            .disabled(selectedEffect == .none || totalTime == 0)
-                            .buttonStyle(.borderedProminent)
-
-                            Spacer()
-
-                            Button("Clear Keyframes") {
-                                keyframes.removeAll()
-                                rebuildComposition(seekTo: currentTime)
-                            }
-                            .buttonStyle(.bordered)
-                        }
-
-                        KeyframeGraphView(keyframes: keyframes, totalTime: totalTime)
-                            .frame(height: 80)
-                    }
-                    .padding(.horizontal, 20)
-                } else {
-                    Text("Loading video...")
-                        .foregroundColor(.white)
-                }
+                playerSection
                 Spacer()
             }
             .padding(.bottom, 60)
             .contentShape(Rectangle())
             .onTapGesture { selectedClipID = nil }
-            
-            // ClipActionMenuView anchored at the bottom.
-            VStack {
-                Spacer()
-                if selectedClipID != nil {
-                    ClipActionMenuView(onDelete: {
-                        if let selID = selectedClipID {
-                            deleteClip(with: selID)
-                        }
-                    })
-                    .transition(.move(edge: .bottom))
-                    .animation(.default, value: selectedClipID)
-                }
-            }
-            .edgesIgnoringSafeArea(.bottom)
-            
-            // Export progress overlay.
-            if isExporting {
-                VStack(spacing: 10) {
-                    ProgressView(value: exportProgress)
-                        .progressViewStyle(LinearProgressViewStyle())
-                        .padding(.horizontal, 20)
-                    Text("Exporting: \(Int(exportProgress * 100))%")
-                        .foregroundColor(.white)
-                }
-                .padding()
-                .background(Color.black.opacity(0.8))
-                .cornerRadius(10)
-            }
-            
-            // Extra footage importing overlay.
-            if isExtraImporting {
-                VStack(spacing: 10) {
-                    ProgressView(value: extraImportProgress)
-                        .progressViewStyle(LinearProgressViewStyle())
-                        .padding(.horizontal, 20)
-                    Text("Importing extra footage: \(Int(extraImportProgress * 100))%")
-                        .foregroundColor(.white)
-                }
-                .padding()
-                .background(Color.black.opacity(0.8))
-                .cornerRadius(10)
-            }
+
+            bottomClipActionMenu
+
+            exportOverlay
+            importOverlay
         }
         .toolbar {
             // Extra footage import plus button on the right.
@@ -259,7 +118,7 @@ struct ProjectEditorView: View {
         }
         .onAppear { setupInitialComposition() }
         .onDisappear { persistContent() }
-        .onChange(of: extraFootageItem) { newItem in
+        .onChange(of: extraFootageItem) { oldValue, newItem in
             Task {
                 guard let newItem = newItem else { return }
                 isExtraImporting = true
@@ -287,8 +146,9 @@ struct ProjectEditorView: View {
                         if let data = try await newItem.loadTransferable(type: Data.self) {
                             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mov")
                             try data.write(to: tempURL)
-                            let asset = AVAsset(url: tempURL)
-                            let duration = CMTimeGetSeconds(asset.duration)
+                            let asset = AVURLAsset(url: tempURL)
+                            let loadedDuration: CMTime = try await asset.load(.duration)
+                            let duration = CMTimeGetSeconds(loadedDuration)
                             progressTask.cancel()
                             extraImportProgress = 1.0
                             appendExtraClip(from: tempURL, duration: duration)
@@ -301,22 +161,28 @@ struct ProjectEditorView: View {
                 isExtraImporting = false
             }
         }
-        .onChange(of: selectedEffect) { _ in
+        .onChange(of: selectedEffect) { oldValue, _ in
             guard !isRestoring else { return }
-            rebuildComposition(seekTo: currentTime)
+            Task {
+                await rebuildCompositionAsync(seekTo: currentTime)
+            }
             persistContent()
         }
-        .onChange(of: effectIntensity) { _ in
+        .onChange(of: effectIntensity) { oldValue, _ in
             guard !isRestoring else { return }
-            rebuildComposition(seekTo: currentTime)
+            Task {
+                await rebuildCompositionAsync(seekTo: currentTime)
+            }
             persistContent()
         }
-        .onChange(of: keyframes) { _ in
+        .onChange(of: keyframes) { oldValue, _ in
             guard !isRestoring else { return }
-            rebuildComposition(seekTo: currentTime)
+            Task {
+                await rebuildCompositionAsync(seekTo: currentTime)
+            }
             persistContent()
         }
-        .onChange(of: clips) { _ in
+        .onChange(of: clips) { oldValue, _ in
             guard !isRestoring else { return }
             persistContent()
         }
@@ -333,12 +199,128 @@ struct ProjectEditorView: View {
                     try FileManager.default.removeItem(at: tempURL)
                 }
                 try FileManager.default.copyItem(at: url, to: tempURL)
-                let asset = AVAsset(url: tempURL)
-                let duration = CMTimeGetSeconds(asset.duration)
-                appendExtraClip(from: tempURL, duration: duration, mediaType: .audio)
+                let asset = AVURLAsset(url: tempURL)
+                Task {
+                    do {
+                        let loadedDuration: CMTime = try await asset.load(.duration)
+                        let duration = CMTimeGetSeconds(loadedDuration)
+                        appendExtraClip(from: tempURL, duration: duration, mediaType: .audio)
+                    } catch {
+                        audioImportError = error.localizedDescription
+                    }
+                }
             } catch {
                 audioImportError = error.localizedDescription
             }
+        }
+    }
+
+    @ViewBuilder
+    private var playerSection: some View {
+        if let player = player {
+            PreviewRendererView(player: player)
+                .frame(height: 300)
+                .cornerRadius(12)
+                .padding()
+
+            ControlButtonsView(
+                isPlaying: isPlaying,
+                onCut: { performCut(at: currentTime) },
+                onTogglePlay: { togglePlayPause() }
+            )
+
+            EditedTimelineView(
+                clips: clips,
+                currentTime: currentTime,
+                totalTime: totalTime,
+                selectedClipID: selectedClipID,
+                onSelectClip: { clip in selectedClipID = clip?.id },
+                onScrubStart: {
+                    wasPlayingBeforeScrub = isPlaying
+                    player.pause()
+                    isPlaying = false
+                    isScrubbing = true
+                },
+                onScrubChanged: { newTime in seekPlayer(to: newTime) },
+                onScrubEnd: { newTime in
+                    seekPlayer(to: newTime)
+                    isScrubbing = false
+                    if wasPlayingBeforeScrub {
+                        if newTime >= totalTime { seekPlayer(to: 0) }
+                        player.play()
+                        isPlaying = true
+                    }
+                },
+                onMoveClip: { fromIndex, toIndex in moveClip(from: fromIndex, to: toIndex) }
+            )
+            .frame(height: 120)
+
+            EffectsPanelView(
+                selectedEffect: $selectedEffect,
+                effectIntensity: $effectIntensity,
+                keyframes: $keyframes,
+                totalTime: totalTime,
+                canAddKeyframe: selectedEffect != .none && totalTime > 0,
+                onAddKeyframe: { addKeyframe() },
+                onClearKeyframes: {
+                    keyframes.removeAll()
+                    Task {
+                        await rebuildCompositionAsync(seekTo: currentTime)
+                    }
+                }
+            )
+        } else {
+            Text("Loading video...")
+                .foregroundColor(.white)
+        }
+    }
+
+    @ViewBuilder
+    private var bottomClipActionMenu: some View {
+        VStack {
+            Spacer()
+            if selectedClipID != nil {
+                ClipActionMenuView(onDelete: {
+                    if let selID = selectedClipID {
+                        deleteClip(with: selID)
+                    }
+                })
+                .transition(.move(edge: .bottom))
+                .animation(.default, value: selectedClipID)
+            }
+        }
+        .edgesIgnoringSafeArea(.bottom)
+    }
+
+    @ViewBuilder
+    private var exportOverlay: some View {
+        if isExporting {
+            VStack(spacing: 10) {
+                ProgressView(value: exportProgress)
+                    .progressViewStyle(LinearProgressViewStyle())
+                    .padding(.horizontal, 20)
+                Text("Exporting: \(Int(exportProgress * 100))%")
+                    .foregroundColor(.white)
+            }
+            .padding()
+            .background(Color.black.opacity(0.8))
+            .cornerRadius(10)
+        }
+    }
+
+    @ViewBuilder
+    private var importOverlay: some View {
+        if isExtraImporting {
+            VStack(spacing: 10) {
+                ProgressView(value: extraImportProgress)
+                    .progressViewStyle(LinearProgressViewStyle())
+                    .padding(.horizontal, 20)
+                Text("Importing extra footage: \(Int(extraImportProgress * 100))%")
+                    .foregroundColor(.white)
+            }
+            .padding()
+            .background(Color.black.opacity(0.8))
+            .cornerRadius(10)
         }
     }
 
@@ -376,8 +358,10 @@ struct ProjectEditorView: View {
         keyframes = initialContent.keyframes
         selectedEffect = initialContent.selectedEffect
         effectIntensity = initialContent.effectIntensity
-        rebuildComposition(seekTo: 0)
-        isRestoring = false
+        Task {
+            await rebuildCompositionAsync(seekTo: 0)
+            isRestoring = false
+        }
     }
 
     func configureAudioSession() {
@@ -394,10 +378,12 @@ struct ProjectEditorView: View {
         let storedURL = projectStore.storeMedia(from: url, projectID: projectID)
         let newClip = Clip(sourceURL: storedURL, startTime: 0, endTime: duration, mediaType: mediaType)
         clips.append(newClip)
-        rebuildComposition(seekTo: currentTime)
+        Task {
+            await rebuildCompositionAsync(seekTo: currentTime)
+        }
     }
 
-    func buildComposition() -> AVMutableComposition? {
+    func buildComposition() async -> AVMutableComposition? {
         let composition = AVMutableComposition()
         var compositionVideoTrack: AVMutableCompositionTrack? = nil
         var mainAudioTrack: AVMutableCompositionTrack? = nil
@@ -405,7 +391,7 @@ struct ProjectEditorView: View {
         let hasVideoClips = clips.contains { $0.mediaType == .video }
 
         for clip in clips {
-            let asset = AVAsset(url: clip.sourceURL)
+            let asset = AVURLAsset(url: clip.sourceURL)
             let start = CMTimeMakeWithSeconds(clip.startTime, preferredTimescale: 600)
             let duration = CMTimeMakeWithSeconds(clip.endTime - clip.startTime, preferredTimescale: 600)
             let timeRange = CMTimeRange(start: start, duration: duration)
@@ -415,10 +401,12 @@ struct ProjectEditorView: View {
                         compositionVideoTrack = composition.addMutableTrack(withMediaType: .video,
                                                                             preferredTrackID: kCMPersistentTrackID_Invalid)
                     }
-                    if let assetVideoTrack = asset.tracks(withMediaType: .video).first {
+                    let videoTracks = try? await asset.loadTracks(withMediaType: .video)
+                    if let assetVideoTrack = videoTracks?.first {
                         try compositionVideoTrack?.insertTimeRange(timeRange, of: assetVideoTrack, at: currentCompTime)
                     }
-                    if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                    let audioTracks = try? await asset.loadTracks(withMediaType: .audio)
+                    if let assetAudioTrack = audioTracks?.first {
                         if mainAudioTrack == nil {
                             mainAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
                         }
@@ -427,7 +415,8 @@ struct ProjectEditorView: View {
                     currentCompTime = currentCompTime + duration
                 } else {
                     // Audio-only clip: mix under the timeline when video exists; otherwise, build sequential audio.
-                    if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                    let audioTracks = try? await asset.loadTracks(withMediaType: .audio)
+                    if let assetAudioTrack = audioTracks?.first {
                         let extraAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
                         let startTime = hasVideoClips ? .zero : currentCompTime
                         try extraAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: startTime)
@@ -444,7 +433,13 @@ struct ProjectEditorView: View {
     }
 
     func rebuildComposition(seekTo virtualTime: Double) {
-        guard let composition = buildComposition() else { return }
+        Task {
+            await rebuildCompositionAsync(seekTo: virtualTime)
+        }
+    }
+
+    func rebuildCompositionAsync(seekTo virtualTime: Double) async {
+        guard let composition = await buildComposition() else { return }
         let newItem = AVPlayerItem(asset: composition)
         if let videoComposition = makeVideoComposition(for: composition) {
             newItem.videoComposition = videoComposition
@@ -457,7 +452,7 @@ struct ProjectEditorView: View {
             player?.replaceCurrentItem(with: newItem)
         }
         totalTime = totalVirtualTime()
-        
+
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
             timeObserver = nil
@@ -473,9 +468,9 @@ struct ProjectEditorView: View {
             }
         }
         timeObserver = observer
-        
+
         let cmTime = CMTimeMakeWithSeconds(virtualTime, preferredTimescale: 600)
-        player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+        await player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = virtualTime
     }
 
@@ -496,7 +491,9 @@ struct ProjectEditorView: View {
               clips.indices.contains(toIndex) else { return }
         let movedClip = clips.remove(at: fromIndex)
         clips.insert(movedClip, at: toIndex)
-        rebuildComposition(seekTo: currentTime)
+        Task {
+            await rebuildCompositionAsync(seekTo: currentTime)
+        }
     }
 
     func addKeyframe() {
@@ -509,7 +506,9 @@ struct ProjectEditorView: View {
             keyframes.append(newFrame)
         }
         keyframes.sort { $0.time < $1.time }
-        rebuildComposition(seekTo: currentTime)
+        Task {
+            await rebuildCompositionAsync(seekTo: currentTime)
+        }
     }
 
     func effectIntensity(at time: Double) -> Double {
@@ -531,7 +530,8 @@ struct ProjectEditorView: View {
     func makeVideoComposition(for composition: AVComposition) -> AVVideoComposition? {
         guard !composition.tracks(withMediaType: .video).isEmpty else { return nil }
         guard selectedEffect != .none else { return nil }
-        return AVVideoComposition(asset: composition) { request in
+
+        let videoComposition = AVVideoComposition(asset: composition, applyingCIFiltersWithHandler: { request in
             let sourceImage = request.sourceImage.clampedToExtent()
             let time = CMTimeGetSeconds(request.compositionTime)
             let intensityValue = effectIntensity(at: time)
@@ -555,7 +555,8 @@ struct ProjectEditorView: View {
             }
             let cropped = outputImage.cropped(to: request.sourceImage.extent)
             request.finish(with: cropped, context: nil)
-        }
+        })
+        return videoComposition
     }
 
     func performCut(at virtualTime: Double) {
@@ -578,7 +579,9 @@ struct ProjectEditorView: View {
             }
             cumulative += clipDuration
         }
-        rebuildComposition(seekTo: virtualTime)
+        Task {
+            await rebuildCompositionAsync(seekTo: virtualTime)
+        }
     }
 
     func deleteClip(with id: UUID) {
@@ -589,7 +592,9 @@ struct ProjectEditorView: View {
                 player = nil
             } else {
                 let newVirtualTime = min(currentTime, totalVirtualTime())
-                rebuildComposition(seekTo: newVirtualTime)
+                Task {
+                    await rebuildCompositionAsync(seekTo: newVirtualTime)
+                }
             }
             selectedClipID = nil
         }
@@ -598,7 +603,13 @@ struct ProjectEditorView: View {
     // MARK: - Export Functionality
 
     func exportVideo() {
-        guard let composition = buildComposition() else { return }
+        Task {
+            await exportVideoAsync()
+        }
+    }
+    
+    func exportVideoAsync() async {
+        guard let composition = await buildComposition() else { return }
         isExporting = true
         exportProgress = 0.0
 
@@ -625,27 +636,124 @@ struct ProjectEditorView: View {
             exportSession.videoComposition = videoComposition
         }
 
-        exportSession.exportAsynchronously {
-            DispatchQueue.main.async {
-                if exportSession.status == .completed {
-                    self.isExporting = false
-                    self.exportURL = outputURL
-                    self.isShareSheetPresented = true
-                } else {
-                    self.isExporting = false
-                    self.exportError = exportSession.error?.localizedDescription ?? "Export failed."
-                }
-                self.exportSession = nil
-            }
-        }
+        Task {
+            do {
+                // Start export asynchronously
+                await exportSession.export()
 
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { timer in
-            DispatchQueue.main.async {
-                self.exportProgress = Double(exportSession.progress)
-                if exportSession.status == .completed || exportSession.status == .failed || exportSession.status == .cancelled {
-                    timer.invalidate()
+                // Poll progress until finished/failed/cancelled
+                while true {
+                    try await Task.sleep(nanoseconds: 100_000_000) // 0.1 sec
+                    let status = exportSession.status
+                    let progress = exportSession.progress
+                    await MainActor.run {
+                        self.exportProgress = Double(progress)
+                    }
+                    switch status {
+                    case .completed:
+                        await MainActor.run {
+                            self.isExporting = false
+                            self.exportURL = outputURL
+                            self.isShareSheetPresented = true
+                        }
+                        await MainActor.run { self.exportSession = nil }
+                        return
+                    case .failed:
+                        let errorDescription = exportSession.error?.localizedDescription ?? "Unknown export error."
+                        await MainActor.run {
+                            self.isExporting = false
+                            self.exportError = errorDescription
+                        }
+                        await MainActor.run { self.exportSession = nil }
+                        return
+                    case .cancelled:
+                        await MainActor.run {
+                            self.isExporting = false
+                        }
+                        await MainActor.run { self.exportSession = nil }
+                        return
+                    default:
+                        break
+                    }
                 }
+            } catch {
+                await MainActor.run {
+                    self.isExporting = false
+                    self.exportError = error.localizedDescription
+                }
+                await MainActor.run { self.exportSession = nil }
             }
         }
     }
+    
+    // MARK: - Extracted Subviews to help type-checker
+    private struct ControlButtonsView: View {
+        let isPlaying: Bool
+        let onCut: () -> Void
+        let onTogglePlay: () -> Void
+        var body: some View {
+            HStack {
+                Button(action: onCut) {
+                    Image(systemName: "scissors")
+                        .font(.title2)
+                        .foregroundColor(.white)
+                }
+                Spacer()
+                Button(action: onTogglePlay) {
+                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title2)
+                        .foregroundColor(.white)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 40)
+        }
+    }
+
+    private struct EffectsPanelView: View {
+        @Binding var selectedEffect: VideoEffect
+        @Binding var effectIntensity: Double
+        @Binding var keyframes: [Keyframe]
+        let totalTime: Double
+        let canAddKeyframe: Bool
+        let onAddKeyframe: () -> Void
+        let onClearKeyframes: () -> Void
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Effects & Keyframes")
+                    .font(.headline)
+                    .foregroundColor(.white)
+
+                Picker("Effect", selection: $selectedEffect) {
+                    ForEach(VideoEffect.allCases) { effect in
+                        Text(effect.rawValue).tag(effect)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                HStack {
+                    Text("Intensity")
+                        .foregroundColor(.white)
+                    Slider(value: $effectIntensity, in: 0...1)
+                        .disabled(selectedEffect == .none || selectedEffect == .noir || selectedEffect == .chrome)
+                }
+
+                HStack {
+                    Button("Add Keyframe") { onAddKeyframe() }
+                        .disabled(!canAddKeyframe)
+                        .buttonStyle(.borderedProminent)
+
+                    Spacer()
+
+                    Button("Clear Keyframes") { onClearKeyframes() }
+                        .buttonStyle(.bordered)
+                }
+
+                KeyframeGraphView(keyframes: keyframes, totalTime: totalTime)
+                    .frame(height: 80)
+            }
+            .padding(.horizontal, 20)
+        }
+    }
 }
+

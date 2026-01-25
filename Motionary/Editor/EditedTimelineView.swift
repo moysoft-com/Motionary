@@ -118,7 +118,7 @@ struct EditedTimelineView: View {
                             let centerOffset = max(0, offset + (viewWidth / 2) - leadingPadding)
                             handleScroll(offset: centerOffset)
                         }
-                        .onChange(of: currentTime) { _ in
+                        .onChange(of: currentTime) { oldValue, newValue in
                             guard !isUserScrolling else { return }
                             isAutoScrolling = true
                             withAnimation(.linear(duration: 0.08)) {
@@ -142,7 +142,7 @@ struct EditedTimelineView: View {
                 .onAppear {
                     viewWidth = geometryWidth
                 }
-                .onChange(of: geometry.size.width) { newValue in
+                .onChange(of: geometry.size.width) { oldValue, newValue in
                     viewWidth = max(newValue, 1)
                 }
             }

@@ -51,7 +51,7 @@ struct ImportFootageView: View {
                   message: Text(importError ?? "Unknown error."),
                   dismissButton: .default(Text("OK")))
         }
-        .onChange(of: selectedItem) { newItem in
+        .onChange(of: selectedItem) { oldValue, newItem in
             Task {
                 guard let newItem = newItem else { return }
                 isImporting = true
@@ -91,8 +91,9 @@ struct ImportFootageView: View {
                                 .appendingPathComponent("\(UUID().uuidString).mov")
                             try data.write(to: tempURL)
                             
-                            let asset = AVAsset(url: tempURL)
-                            let duration = CMTimeGetSeconds(asset.duration)
+                            let asset = AVURLAsset(url: tempURL)
+                            let loadedDuration: CMTime = try await asset.load(.duration)
+                            let duration = CMTimeGetSeconds(loadedDuration)
                             onImport(tempURL, duration)
                         } else {
                             progressTask.cancel()
