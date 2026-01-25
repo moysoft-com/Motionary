@@ -1,7 +1,7 @@
 import SwiftUI
 
-struct Keyframe: Identifiable, Equatable {
-    let id = UUID()
+struct Keyframe: Identifiable, Codable, Equatable {
+    var id: UUID = UUID()
     var time: Double
     var value: Double
 }

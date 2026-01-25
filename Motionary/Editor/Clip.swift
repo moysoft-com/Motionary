@@ -5,7 +5,7 @@ enum ClipMediaType: String, Codable {
     case audio
 }
 
-struct Clip: Identifiable, Equatable {
+struct Clip: Identifiable, Codable, Equatable {
     let id: UUID
     var sourceURL: URL
     var startTime: Double   // Startzeit in Sekunden

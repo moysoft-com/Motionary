@@ -114,7 +114,7 @@ struct HomeView: View {
                     NavigationLink(
                         destination: Group {
                             if let project = selectedProject {
-                                ProjectDetailView(project: project)
+                                ProjectDetailView(project: project, projectStore: projectStore)
                             } else {
                                 EmptyView()
                             }
@@ -130,4 +130,3 @@ struct HomeView: View {
         }
     }
 }
-
