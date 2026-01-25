@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 import CoreImage
 import CoreImage.CIFilterBuiltins
 
-enum VideoEffect: String, CaseIterable, Identifiable {
+enum VideoEffect: String, CaseIterable, Identifiable, Codable {
     case none = "None"
     case sepia = "Sepia"
     case noir = "Noir"
@@ -15,9 +15,9 @@ enum VideoEffect: String, CaseIterable, Identifiable {
 }
 
 struct ProjectEditorView: View {
-    // The initial footage becomes the first clip.
-    var initialVideoURL: URL
-    var initialDuration: Double
+    let projectID: UUID
+    @ObservedObject var projectStore: ProjectStore
+    let initialContent: ProjectContent
 
     // MARK: - Player & Timeline State
     @State private var player: AVPlayer? = nil
@@ -53,6 +53,7 @@ struct ProjectEditorView: View {
     @State private var selectedEffect: VideoEffect = .none
     @State private var effectIntensity: Double = 0.6
     @State private var keyframes: [Keyframe] = []
+    @State private var isRestoring = true
 
     var body: some View {
         ZStack {
@@ -60,23 +61,10 @@ struct ProjectEditorView: View {
             VStack(spacing: 20) {
                 Spacer()
                 if let player = player {
-                    // Video preview with export button overlay at top-right.
-                    ZStack(alignment: .topTrailing) {
-                        PreviewRendererView(player: player)
-                            .frame(height: 300)
-                            .cornerRadius(12)
-                            .padding()
-                        Button(action: {
-                            exportVideo()
-                        }) {
-                            Text("Export")
-                                .padding(8)
-                                .background(Color.black.opacity(0.7))
-                                .foregroundColor(.white)
-                                .cornerRadius(4)
-                        }
+                    PreviewRendererView(player: player)
+                        .frame(height: 300)
+                        .cornerRadius(12)
                         .padding()
-                    }
                     
                     // Control buttons: Cut and Play/Pause.
                     HStack {
@@ -228,6 +216,12 @@ struct ProjectEditorView: View {
         .toolbar {
             // Extra footage import plus button on the right.
             ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button {
+                    exportVideo()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundColor(.white)
+                }
                 PhotosPicker(selection: $extraFootageItem, matching: .any(of: [.images, .videos])) {
                     Image(systemName: "plus")
                         .foregroundColor(.white)
@@ -264,6 +258,7 @@ struct ProjectEditorView: View {
             }
         }
         .onAppear { setupInitialComposition() }
+        .onDisappear { persistContent() }
         .onChange(of: extraFootageItem) { newItem in
             Task {
                 guard let newItem = newItem else { return }
@@ -307,10 +302,23 @@ struct ProjectEditorView: View {
             }
         }
         .onChange(of: selectedEffect) { _ in
+            guard !isRestoring else { return }
             rebuildComposition(seekTo: currentTime)
+            persistContent()
         }
         .onChange(of: effectIntensity) { _ in
+            guard !isRestoring else { return }
             rebuildComposition(seekTo: currentTime)
+            persistContent()
+        }
+        .onChange(of: keyframes) { _ in
+            guard !isRestoring else { return }
+            rebuildComposition(seekTo: currentTime)
+            persistContent()
+        }
+        .onChange(of: clips) { _ in
+            guard !isRestoring else { return }
+            persistContent()
         }
         .fileImporter(
             isPresented: $isAudioImporterPresented,
@@ -364,8 +372,12 @@ struct ProjectEditorView: View {
 
     func setupInitialComposition() {
         configureAudioSession()
-        clips = [Clip(sourceURL: initialVideoURL, startTime: 0, endTime: initialDuration, mediaType: .video)]
+        clips = initialContent.clips
+        keyframes = initialContent.keyframes
+        selectedEffect = initialContent.selectedEffect
+        effectIntensity = initialContent.effectIntensity
         rebuildComposition(seekTo: 0)
+        isRestoring = false
     }
 
     func configureAudioSession() {
@@ -379,17 +391,18 @@ struct ProjectEditorView: View {
     }
 
     func appendExtraClip(from url: URL, duration: Double, mediaType: ClipMediaType = .video) {
-        let newClip = Clip(sourceURL: url, startTime: 0, endTime: duration, mediaType: mediaType)
+        let storedURL = projectStore.storeMedia(from: url, projectID: projectID)
+        let newClip = Clip(sourceURL: storedURL, startTime: 0, endTime: duration, mediaType: mediaType)
         clips.append(newClip)
         rebuildComposition(seekTo: currentTime)
     }
 
     func buildComposition() -> AVMutableComposition? {
         let composition = AVMutableComposition()
-        let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video,
-                                                                preferredTrackID: kCMPersistentTrackID_Invalid)
+        var compositionVideoTrack: AVMutableCompositionTrack? = nil
         var mainAudioTrack: AVMutableCompositionTrack? = nil
         var currentCompTime = CMTime.zero
+        let hasVideoClips = clips.contains { $0.mediaType == .video }
 
         for clip in clips {
             let asset = AVAsset(url: clip.sourceURL)
@@ -398,6 +411,10 @@ struct ProjectEditorView: View {
             let timeRange = CMTimeRange(start: start, duration: duration)
             do {
                 if clip.mediaType == .video {
+                    if compositionVideoTrack == nil {
+                        compositionVideoTrack = composition.addMutableTrack(withMediaType: .video,
+                                                                            preferredTrackID: kCMPersistentTrackID_Invalid)
+                    }
                     if let assetVideoTrack = asset.tracks(withMediaType: .video).first {
                         try compositionVideoTrack?.insertTimeRange(timeRange, of: assetVideoTrack, at: currentCompTime)
                     }
@@ -409,10 +426,14 @@ struct ProjectEditorView: View {
                     }
                     currentCompTime = currentCompTime + duration
                 } else {
-                    // Audio-only clip: mix under the whole timeline starting at 0 by using a separate audio track.
+                    // Audio-only clip: mix under the timeline when video exists; otherwise, build sequential audio.
                     if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
                         let extraAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-                        try extraAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: .zero)
+                        let startTime = hasVideoClips ? .zero : currentCompTime
+                        try extraAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: startTime)
+                        if !hasVideoClips {
+                            currentCompTime = currentCompTime + duration
+                        }
                     }
                 }
             } catch {
@@ -456,6 +477,17 @@ struct ProjectEditorView: View {
         let cmTime = CMTimeMakeWithSeconds(virtualTime, preferredTimescale: 600)
         player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = virtualTime
+    }
+
+    func persistContent() {
+        guard !isRestoring else { return }
+        let content = ProjectContent(
+            clips: clips,
+            keyframes: keyframes,
+            selectedEffect: selectedEffect,
+            effectIntensity: effectIntensity
+        )
+        projectStore.saveContent(content, for: projectID)
     }
 
     func moveClip(from fromIndex: Int, to toIndex: Int) {

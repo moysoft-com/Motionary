@@ -30,6 +30,7 @@ struct EditedTimelineView: View {
     @State private var isUserScrolling = false
     @State private var isAutoScrolling = false
     @State private var scrollEndWorkItem: DispatchWorkItem?
+    @State private var viewWidth: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 10) {
@@ -37,8 +38,8 @@ struct EditedTimelineView: View {
                 .foregroundColor(.white)
 
             GeometryReader { geometry in
-                let viewWidth = max(geometry.size.width, 1)
-                let leadingPadding = viewWidth / 2
+                let geometryWidth = max(geometry.size.width, 1)
+                let leadingPadding = geometryWidth / 2
                 let totalSpacing = clipSpacing * CGFloat(max(clips.count - 1, 0))
                 let contentWidth = CGFloat(totalTime) * pixelsPerSecond + totalSpacing
 
@@ -64,18 +65,29 @@ struct EditedTimelineView: View {
                                             onSelectClip(clip)
                                         }
                                         .gesture(
-                                            DragGesture()
+                                            LongPressGesture(minimumDuration: 0.35)
+                                                .sequenced(before: DragGesture())
                                                 .onChanged { value in
-                                                    if draggingClipID == nil {
-                                                        draggingClipID = clip.id
+                                                    switch value {
+                                                    case .second(true, let drag?):
+                                                        if draggingClipID == nil {
+                                                            draggingClipID = clip.id
+                                                        }
+                                                        dragOffset = drag.translation.width
+                                                    default:
+                                                        break
                                                     }
-                                                    dragOffset = value.translation.width
                                                 }
                                                 .onEnded { value in
-                                                    let targetX = max(0, xPos + value.translation.width)
-                                                    let targetTime = time(for: targetX)
-                                                    let targetIndex = indexFor(time: targetTime)
-                                                    onMoveClip(index, targetIndex)
+                                                    switch value {
+                                                    case .second(true, let drag?):
+                                                        let targetX = max(0, xPos + drag.translation.width)
+                                                        let targetTime = time(for: targetX)
+                                                        let targetIndex = indexFor(time: targetTime)
+                                                        onMoveClip(index, targetIndex)
+                                                    default:
+                                                        break
+                                                    }
                                                     draggingClipID = nil
                                                     dragOffset = 0
                                                 }
@@ -103,8 +115,8 @@ struct EditedTimelineView: View {
                         .coordinateSpace(name: "timeline-scroll")
                         .onPreferenceChange(TimelineScrollOffsetKey.self) { offset in
                             // Adjust for the leading padding so that the playhead remains centered
-                            let adjusted = max(0, offset - leadingPadding)
-                            handleScroll(offset: adjusted)
+                            let centerOffset = max(0, offset + (viewWidth / 2) - leadingPadding)
+                            handleScroll(offset: centerOffset)
                         }
                         .onChange(of: currentTime) { _ in
                             guard !isUserScrolling else { return }
@@ -116,13 +128,22 @@ struct EditedTimelineView: View {
                                 isAutoScrolling = false
                             }
                         }
+                        .onAppear {
+                            proxy.scrollTo("timeline-playhead-anchor", anchor: .center)
+                        }
 
                         Rectangle()
                             .fill(Color.white)
                             .frame(width: 2, height: 32)
-                            .position(x: viewWidth / 2, y: 18)
+                            .position(x: geometryWidth / 2, y: 18)
                             .allowsHitTesting(false)
                     }
+                }
+                .onAppear {
+                    viewWidth = geometryWidth
+                }
+                .onChange(of: geometry.size.width) { newValue in
+                    viewWidth = max(newValue, 1)
                 }
             }
             .frame(height: 50)
@@ -214,4 +235,3 @@ struct EditedTimelineView: View {
         return String(format: "%d:%02d", minutes, seconds)
     }
 }
-
