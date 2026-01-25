@@ -4,6 +4,8 @@ import AVFoundation
 import PhotosUI
 import Photos
 import UniformTypeIdentifiers
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
 enum VideoEffect: String, CaseIterable, Identifiable {
     case none = "None"
@@ -591,3 +593,4 @@ struct ProjectEditorView: View {
         }
     }
 }
+
