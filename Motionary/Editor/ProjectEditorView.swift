@@ -3,14 +3,6 @@ import AVKit
 import AVFoundation
 import PhotosUI
 
-// Updated Clip model.
-struct Clip: Identifiable, Equatable {
-    let id = UUID()
-    var sourceURL: URL
-    var startTime: Double   // seconds in source
-    var endTime: Double     // seconds in source
-}
-
 struct ProjectEditorView: View {
     // The initial footage becomes the first clip.
     var initialVideoURL: URL
@@ -178,6 +170,14 @@ struct ProjectEditorView: View {
                         .foregroundColor(.white)
                 }
             }
+        }
+        .alert("Export Error", isPresented: Binding<Bool>(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(exportError ?? "Unknown error.")
         }
         .onAppear { setupInitialComposition() }
         .onChange(of: extraFootageItem) { newItem in
