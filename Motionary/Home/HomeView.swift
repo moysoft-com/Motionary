@@ -1,13 +1,8 @@
 import SwiftUI
 
-struct Project: Identifiable, Equatable {
-    let id = UUID()
-    var title: String
-}
-
 struct HomeView: View {
     // List of projects
-    @State private var projects: [Project] = []
+    @StateObject private var projectStore = ProjectStore()
     
     // Controls navigation to the project detail view
     @State private var showEditor = false
@@ -34,8 +29,7 @@ struct HomeView: View {
                     // White, rounded "Create Project" button
                     Button(action: {
                         // Create a new project
-                        let newProject = Project(title: "Project #\(projects.count + 1)")
-                        projects.append(newProject)
+                        let newProject = projectStore.addProject()
                         
                         // Immediately open the new project detail view
                         selectedProject = newProject
@@ -59,7 +53,7 @@ struct HomeView: View {
                         ],
                         spacing: 20
                     ) {
-                        ForEach($projects) { $project in
+                        ForEach($projectStore.projects) { $project in
                             ZStack(alignment: .topLeading) {
                                 // Rounded white background
                                 RoundedRectangle(cornerRadius: 12)
@@ -89,7 +83,7 @@ struct HomeView: View {
                                             editingProjectID = project.id
                                         }
                                         Button(role: .destructive) {
-                                            projects.removeAll { $0.id == project.id }
+                                            projectStore.deleteProject(with: project.id)
                                         } label: {
                                             Text("Delete")
                                         }

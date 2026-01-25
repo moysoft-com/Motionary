@@ -2,6 +2,17 @@ import SwiftUI
 import AVKit
 import AVFoundation
 import PhotosUI
+import Photos
+import UniformTypeIdentifiers
+
+enum VideoEffect: String, CaseIterable, Identifiable {
+    case none = "None"
+    case sepia = "Sepia"
+    case noir = "Noir"
+    case chrome = "Chrome"
+
+    var id: String { rawValue }
+}
 
 struct ProjectEditorView: View {
     // The initial footage becomes the first clip.
@@ -26,10 +37,19 @@ struct ProjectEditorView: View {
     @State private var isExtraImporting: Bool = false
     @State private var extraImportProgress: Double = 0.0
 
+    // MARK: - Audio Import State
+    @State private var isAudioImporterPresented: Bool = false
+    @State private var audioImportError: String? = nil
+
     // MARK: - Export State
     @State private var isExporting: Bool = false
     @State private var exportProgress: Double = 0.0
     @State private var exportError: String? = nil
+
+    // MARK: - Effects / Keyframes
+    @State private var selectedEffect: VideoEffect = .none
+    @State private var effectIntensity: Double = 0.6
+    @State private var keyframes: [Keyframe] = []
 
     var body: some View {
         ZStack {
@@ -105,10 +125,53 @@ struct ProjectEditorView: View {
                                     player.play()
                                     isPlaying = true
                                 }
+                            },
+                            onMoveClip: { fromIndex, toIndex in
+                                moveClip(from: fromIndex, to: toIndex)
                             }
                         )
                     }
                     .frame(height: 120)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Effects & Keyframes")
+                            .font(.headline)
+                            .foregroundColor(.white)
+
+                        Picker("Effect", selection: $selectedEffect) {
+                            ForEach(VideoEffect.allCases) { effect in
+                                Text(effect.rawValue).tag(effect)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+
+                        HStack {
+                            Text("Intensity")
+                                .foregroundColor(.white)
+                            Slider(value: $effectIntensity, in: 0...1)
+                                .disabled(selectedEffect == .none || selectedEffect == .noir || selectedEffect == .chrome)
+                        }
+
+                        HStack {
+                            Button("Add Keyframe") {
+                                addKeyframe()
+                            }
+                            .disabled(selectedEffect == .none || totalTime == 0)
+                            .buttonStyle(.borderedProminent)
+
+                            Spacer()
+
+                            Button("Clear Keyframes") {
+                                keyframes.removeAll()
+                                rebuildComposition(seekTo: currentTime)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        KeyframeGraphView(keyframes: keyframes, totalTime: totalTime)
+                            .frame(height: 80)
+                    }
+                    .padding(.horizontal, 20)
                 } else {
                     Text("Loading video...")
                         .foregroundColor(.white)
@@ -164,9 +227,15 @@ struct ProjectEditorView: View {
         }
         .toolbar {
             // Extra footage import plus button on the right.
-            ToolbarItem(placement: .navigationBarTrailing) {
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
                 PhotosPicker(selection: $extraFootageItem, matching: .any(of: [.images, .videos])) {
                     Image(systemName: "plus")
+                        .foregroundColor(.white)
+                }
+                Button {
+                    isAudioImporterPresented = true
+                } label: {
+                    Image(systemName: "waveform")
                         .foregroundColor(.white)
                 }
             }
@@ -178,6 +247,14 @@ struct ProjectEditorView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(exportError ?? "Unknown error.")
+        }
+        .alert("Audio Import Error", isPresented: Binding<Bool>(
+            get: { audioImportError != nil },
+            set: { if !$0 { audioImportError = nil } }
+        )) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(audioImportError ?? "Unknown error.")
         }
         .onAppear { setupInitialComposition() }
         .onChange(of: extraFootageItem) { newItem in
@@ -222,6 +299,32 @@ struct ProjectEditorView: View {
                 isExtraImporting = false
             }
         }
+        .onChange(of: selectedEffect) { _ in
+            rebuildComposition(seekTo: currentTime)
+        }
+        .onChange(of: effectIntensity) { _ in
+            rebuildComposition(seekTo: currentTime)
+        }
+        .fileImporter(
+            isPresented: $isAudioImporterPresented,
+            allowedContentTypes: [.audio],
+            allowsMultipleSelection: false
+        ) { result in
+            do {
+                let urls = try result.get()
+                guard let url = urls.first else { return }
+                let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(url.lastPathComponent)
+                if FileManager.default.fileExists(atPath: tempURL.path) {
+                    try FileManager.default.removeItem(at: tempURL)
+                }
+                try FileManager.default.copyItem(at: url, to: tempURL)
+                let asset = AVAsset(url: tempURL)
+                let duration = CMTimeGetSeconds(asset.duration)
+                appendExtraClip(from: tempURL, duration: duration, mediaType: .audio)
+            } catch {
+                audioImportError = error.localizedDescription
+            }
+        }
     }
 
     // MARK: - Helper Functions
@@ -253,30 +356,35 @@ struct ProjectEditorView: View {
     }
 
     func setupInitialComposition() {
-        clips = [Clip(sourceURL: initialVideoURL, startTime: 0, endTime: initialDuration)]
+        clips = [Clip(sourceURL: initialVideoURL, startTime: 0, endTime: initialDuration, mediaType: .video)]
         rebuildComposition(seekTo: 0)
     }
 
-    func appendExtraClip(from url: URL, duration: Double) {
-        let newClip = Clip(sourceURL: url, startTime: 0, endTime: duration)
+    func appendExtraClip(from url: URL, duration: Double, mediaType: ClipMediaType = .video) {
+        let newClip = Clip(sourceURL: url, startTime: 0, endTime: duration, mediaType: mediaType)
         clips.append(newClip)
         rebuildComposition(seekTo: currentTime)
     }
 
     func buildComposition() -> AVMutableComposition? {
         let composition = AVMutableComposition()
-        guard let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video,
-                                                                      preferredTrackID: kCMPersistentTrackID_Invalid)
-        else { return nil }
+        let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video,
+                                                                preferredTrackID: kCMPersistentTrackID_Invalid)
+        let compositionAudioTrack = composition.addMutableTrack(withMediaType: .audio,
+                                                                preferredTrackID: kCMPersistentTrackID_Invalid)
         var currentCompTime = CMTime.zero
         for clip in clips {
             let asset = AVAsset(url: clip.sourceURL)
-            guard let assetVideoTrack = asset.tracks(withMediaType: .video).first else { continue }
             let start = CMTimeMakeWithSeconds(clip.startTime, preferredTimescale: 600)
             let duration = CMTimeMakeWithSeconds(clip.endTime - clip.startTime, preferredTimescale: 600)
             let timeRange = CMTimeRange(start: start, duration: duration)
             do {
-                try compositionVideoTrack.insertTimeRange(timeRange, of: assetVideoTrack, at: currentCompTime)
+                if clip.mediaType == .video, let assetVideoTrack = asset.tracks(withMediaType: .video).first {
+                    try compositionVideoTrack?.insertTimeRange(timeRange, of: assetVideoTrack, at: currentCompTime)
+                }
+                if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                    try compositionAudioTrack?.insertTimeRange(timeRange, of: assetAudioTrack, at: currentCompTime)
+                }
                 currentCompTime = currentCompTime + duration
             } catch {
                 print("Error inserting clip: \(error)")
@@ -288,6 +396,9 @@ struct ProjectEditorView: View {
     func rebuildComposition(seekTo virtualTime: Double) {
         guard let composition = buildComposition() else { return }
         let newItem = AVPlayerItem(asset: composition)
+        if let videoComposition = makeVideoComposition(for: composition) {
+            newItem.videoComposition = videoComposition
+        }
         if player == nil {
             player = AVPlayer(playerItem: newItem)
         } else {
@@ -314,6 +425,74 @@ struct ProjectEditorView: View {
         let cmTime = CMTimeMakeWithSeconds(virtualTime, preferredTimescale: 600)
         player?.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = virtualTime
+    }
+
+    func moveClip(from fromIndex: Int, to toIndex: Int) {
+        guard fromIndex != toIndex,
+              clips.indices.contains(fromIndex),
+              clips.indices.contains(toIndex) else { return }
+        let movedClip = clips.remove(at: fromIndex)
+        clips.insert(movedClip, at: toIndex)
+        rebuildComposition(seekTo: currentTime)
+    }
+
+    func addKeyframe() {
+        guard totalTime > 0 else { return }
+        let clampedTime = min(max(currentTime, 0), totalTime)
+        let newFrame = Keyframe(time: clampedTime, value: effectIntensity)
+        if let index = keyframes.firstIndex(where: { abs($0.time - clampedTime) < 0.05 }) {
+            keyframes[index] = newFrame
+        } else {
+            keyframes.append(newFrame)
+        }
+        keyframes.sort { $0.time < $1.time }
+        rebuildComposition(seekTo: currentTime)
+    }
+
+    func effectIntensity(at time: Double) -> Double {
+        guard !keyframes.isEmpty else { return effectIntensity }
+        let sorted = keyframes.sorted { $0.time < $1.time }
+        if time <= sorted[0].time { return sorted[0].value }
+        if time >= sorted[sorted.count - 1].time { return sorted[sorted.count - 1].value }
+        for index in 0..<(sorted.count - 1) {
+            let left = sorted[index]
+            let right = sorted[index + 1]
+            if time >= left.time && time <= right.time {
+                let ratio = (time - left.time) / max((right.time - left.time), 0.001)
+                return left.value + ratio * (right.value - left.value)
+            }
+        }
+        return effectIntensity
+    }
+
+    func makeVideoComposition(for composition: AVComposition) -> AVVideoComposition? {
+        guard !composition.tracks(withMediaType: .video).isEmpty else { return nil }
+        guard selectedEffect != .none else { return nil }
+        return AVVideoComposition(asset: composition) { request in
+            let sourceImage = request.sourceImage.clampedToExtent()
+            let time = CMTimeGetSeconds(request.compositionTime)
+            let intensityValue = effectIntensity(at: time)
+            let outputImage: CIImage
+            switch selectedEffect {
+            case .sepia:
+                let filter = CIFilter.sepiaTone()
+                filter.inputImage = sourceImage
+                filter.intensity = Float(intensityValue)
+                outputImage = filter.outputImage ?? sourceImage
+            case .noir:
+                let filter = CIFilter.photoEffectNoir()
+                filter.inputImage = sourceImage
+                outputImage = filter.outputImage ?? sourceImage
+            case .chrome:
+                let filter = CIFilter.photoEffectChrome()
+                filter.inputImage = sourceImage
+                outputImage = filter.outputImage ?? sourceImage
+            case .none:
+                outputImage = sourceImage
+            }
+            let cropped = outputImage.cropped(to: request.sourceImage.extent)
+            request.finish(with: cropped, context: nil)
+        }
     }
 
     func performCut(at virtualTime: Double) {
@@ -369,13 +548,34 @@ struct ProjectEditorView: View {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
         exportSession.shouldOptimizeForNetworkUse = true
+        if let videoComposition = makeVideoComposition(for: composition) {
+            exportSession.videoComposition = videoComposition
+        }
         
         exportSession.exportAsynchronously {
             DispatchQueue.main.async {
-                self.isExporting = false
                 if exportSession.status == .completed {
-                    UISaveVideoAtPathToSavedPhotosAlbum(outputURL.path, nil, nil, nil)
+                    PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                        DispatchQueue.main.async {
+                            if status == .authorized || status == .limited {
+                                PHPhotoLibrary.shared().performChanges({
+                                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
+                                }) { success, error in
+                                    DispatchQueue.main.async {
+                                        self.isExporting = false
+                                        if !success {
+                                            self.exportError = error?.localizedDescription ?? "Export failed to save."
+                                        }
+                                    }
+                                }
+                            } else {
+                                self.isExporting = false
+                                self.exportError = "Photo Library access denied."
+                            }
+                        }
+                    }
                 } else {
+                    self.isExporting = false
                     self.exportError = exportSession.error?.localizedDescription ?? "Export failed."
                 }
             }
