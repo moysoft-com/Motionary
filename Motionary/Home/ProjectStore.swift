@@ -18,9 +18,10 @@ final class ProjectStore: ObservableObject {
         load()
     }
 
-    func addProject() -> Project {
-        let newProject = Project(title: "Project #\(projects.count + 1)")
+    func addProject(title: String? = nil) -> Project {
+        let newProject = Project(title: title ?? "Project #\(projects.count + 1)")
         projects.append(newProject)
+        sortProjectsByLastEdited()
         return newProject
     }
 
@@ -34,7 +35,16 @@ final class ProjectStore: ObservableObject {
         defer { isLoading = false }
         guard let data = try? Data(contentsOf: storageURL) else { return }
         do {
-            projects = try JSONDecoder().decode([Project].self, from: data)
+            var loadedProjects = try JSONDecoder().decode([Project].self, from: data)
+            for index in loadedProjects.indices {
+                if let content = loadContent(for: loadedProjects[index].id) {
+                    loadedProjects[index].updatedAt = max(
+                        loadedProjects[index].updatedAt,
+                        content.editorProject.updatedAt
+                    )
+                }
+            }
+            projects = loadedProjects.sorted { $0.updatedAt > $1.updatedAt }
         } catch {
             print("Failed to load projects: \(error)")
         }
@@ -63,6 +73,7 @@ final class ProjectStore: ObservableObject {
         do {
             let data = try JSONEncoder().encode(content)
             try data.write(to: contentURL, options: [.atomic])
+            syncProjectMetadata(projectID: projectID, content: content)
         } catch {
             print("Failed to save project content: \(error)")
         }
@@ -85,6 +96,19 @@ final class ProjectStore: ObservableObject {
             print("Failed to store media: \(error)")
             return url
         }
+    }
+
+    func resolvedMediaURL(_ url: URL, projectID: UUID) -> URL {
+        if fileManager.fileExists(atPath: url.path) {
+            return url
+        }
+
+        let candidate = projectFolderURL(for: projectID).appendingPathComponent(url.lastPathComponent)
+        if fileManager.fileExists(atPath: candidate.path) {
+            return candidate
+        }
+
+        return url
     }
 
     private func deleteContent(for projectID: UUID) {
@@ -110,5 +134,30 @@ final class ProjectStore: ObservableObject {
             try? fileManager.createDirectory(at: folderURL, withIntermediateDirectories: true)
         }
         return folderURL
+    }
+
+    private func syncProjectMetadata(projectID: UUID, content: ProjectContent) {
+        if let index = projects.firstIndex(where: { $0.id == projectID }) {
+            projects[index].updatedAt = content.editorProject.updatedAt
+        } else {
+            projects.append(
+                Project(
+                    id: projectID,
+                    title: content.editorProject.title,
+                    createdAt: content.editorProject.createdAt,
+                    updatedAt: content.editorProject.updatedAt
+                )
+            )
+        }
+        sortProjectsByLastEdited()
+    }
+
+    private func sortProjectsByLastEdited() {
+        projects.sort {
+            if $0.updatedAt == $1.updatedAt {
+                return $0.createdAt > $1.createdAt
+            }
+            return $0.updatedAt > $1.updatedAt
+        }
     }
 }

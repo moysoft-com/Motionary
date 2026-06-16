@@ -1,10 +1,5 @@
 import Foundation
 
-enum ClipMediaType: String, Codable {
-    case video
-    case audio
-}
-
 struct Clip: Identifiable, Codable, Equatable {
     let id: UUID
     var sourceURL: URL

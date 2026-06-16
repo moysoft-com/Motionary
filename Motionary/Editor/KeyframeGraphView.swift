@@ -1,13 +1,7 @@
 import SwiftUI
 
-struct Keyframe: Identifiable, Codable, Equatable {
-    var id: UUID = UUID()
-    var time: Double
-    var value: Double
-}
-
 struct KeyframeGraphView: View {
-    let keyframes: [Keyframe]
+    let keyframes: [Keyframe<Double>]
     let totalTime: Double
 
     var body: some View {
