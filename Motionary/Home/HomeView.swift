@@ -105,9 +105,18 @@ struct HomeView: View {
 
     private var dashboardHeader: some View {
         HStack(alignment: .center, spacing: 14) {
-            Text("Motionary")
-                .font(.largeTitle.weight(.bold))
-                .foregroundStyle(MotionaryTheme.textPrimary)
+            HStack(spacing: 7) {
+                Image("Motionary")
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .scaledToFit()
+                    .frame(height: 48)
+                    .foregroundStyle(MotionaryTheme.textPrimary.opacity(0.5))
+                Text("Projects")
+                    .font(.largeTitle.weight(.bold))
+                    .foregroundStyle(MotionaryTheme.textPrimary)
+            }
 
             Spacer()
 
@@ -122,6 +131,7 @@ struct HomeView: View {
                             .fill(MotionaryTheme.accent)
                             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                    .labelStyle(.titleAndIcon)
             }
             .buttonStyle(.plain)
         }
@@ -249,7 +259,7 @@ private struct ProjectCard: View {
                             .textFieldStyle(.plain)
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(MotionaryTheme.textPrimary)
-                            .lineLimit(2)
+                            .lineLimit(1)
                             .multilineTextAlignment(.leading)
                             .onSubmit(onRenameCommit)
                     } else {
@@ -257,7 +267,7 @@ private struct ProjectCard: View {
                             Text(project.title)
                                 .font(.headline.weight(.semibold))
                                 .foregroundStyle(MotionaryTheme.textPrimary)
-                                .lineLimit(2)
+                                .lineLimit(1)
                                 .multilineTextAlignment(.leading)
                             Spacer()
                             Menu {

@@ -51,29 +51,33 @@ struct ProjectEditorView: View {
                     .frame(height: previewHeight)
                     ZStack {
                         HStack(spacing: 12) {
+                            
+                            Text("\(formatClock(viewModel.currentTime)) / \(formatClock(viewModel.duration))")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(MotionaryTheme.textSecondary)
+                                .lineLimit(1)
+                            Spacer()
+
                             CompactIconButton(
                                 systemName: "arrow.uturn.backward",
                                 title: "Undo",
                                 isProminent: true,
-                                isDisabled: !viewModel.canUndo
-                            ) {
-                                viewModel.undo()
-                            }
+                                isDisabled: !viewModel.canUndo,
+                                isBordered: false,
+                                action: {
+                                    viewModel.undo()
+                                }
+                            )
                             CompactIconButton(
                                 systemName: "arrow.uturn.forward",
                                 title: "Redo",
                                 isProminent: true,
-                                isDisabled: !viewModel.canRedo
-                            ) {
-                                viewModel.redo()
-                            }
-
-                            Spacer()
-
-                            Text("\(formatClock(viewModel.currentTime))/\(formatClock(viewModel.duration))")
-                                .font(.callout.monospacedDigit())
-                                .foregroundStyle(MotionaryTheme.textSecondary)
-                                .lineLimit(1)
+                                isDisabled: !viewModel.canRedo,
+                                isBordered: false,
+                                action: {
+                                    viewModel.redo()
+                                }
+                            )
                         }
                         .padding(.horizontal, 5)
                         HStack {
@@ -2689,6 +2693,7 @@ private struct CompactIconButton: View {
     var isProminent = false
     var isDisabled = false
     var action: () -> Void
+    var isBordered = true
 
     var body: some View {
         ZStack {
@@ -2697,21 +2702,25 @@ private struct CompactIconButton: View {
                 action()
             } label: {
                 Image(systemName: systemName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 40, height: 36)
-                    .foregroundStyle(Color.clear)
+                    .font(.system(size: isBordered ? 16 : 18, weight: .semibold))
+                    .frame(width: isBordered ? 40 : 18, height: isBordered ? 36 : 18)
+                    .foregroundStyle(isBordered ? Color.clear : Color.primary)
                     .background {
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
-                            .fill(isProminent ? MotionaryTheme.accent : Color.white.opacity(0.09))
+                        if isBordered {
+                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .fill(isProminent ? MotionaryTheme.accent : Color.white.opacity(0.09))
+                        }
                     }
             }
             .buttonStyle(.plain)
             .disabled(isDisabled)
             .accessibilityLabel(title)
-            Image(systemName: systemName)
-                .font(.system(size: 16, weight: .semibold))
-                .frame(width: 40, height: 36)
-                .foregroundStyle(isProminent ? Color.black : MotionaryTheme.textPrimary)
+            if isBordered {
+                Image(systemName: systemName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 40, height: 36)
+                    .foregroundStyle(isProminent ? Color.black : MotionaryTheme.textPrimary)
+            }
         }
     }
 }

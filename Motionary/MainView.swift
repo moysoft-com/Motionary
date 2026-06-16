@@ -12,7 +12,17 @@ import SwiftUI
 struct MainView: App {
     var body: some Scene {
         WindowGroup {
-            HomeView()
+            TabView {
+                Tab("Home", systemImage: "rectangle.stack.fill") {
+                    HomeView()
+                }
+
+                Tab("Settings", systemImage: "gearshape.fill") {
+                    EmptyView()
+                }
+            }
+            .labelStyle(.iconOnly)
         }
     }
 }
+
