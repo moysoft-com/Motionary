@@ -1,26 +1,49 @@
-<div align="center">
-  <!-- TITLE -->
-  <img src="/Motionary/Assets/icon.png" alt="logo" width="20%"/>
-  <h1>Motionary</h1>
-  <p>A powerful, easy-to-use video editing app for iOS. Fast, intuitive, and built with the tools editors actually need.</p>
+# Motionary
 
-  <!-- BADGES -->
-  <a href="https://github.com/Guavary/Motionary/releases"><img src="https://img.shields.io/badge/Version-0.1-green" alt="Version"></a>
-  <a href="https://github.com/Guavary/Motionary/commits/master"><img src="https://img.shields.io/github/last-commit/Guavary/Motionary?logo=git" alt="Last commit"></a>
-  <img src="https://img.shields.io/github/languages/code-size/Guavary/Motionary" alt="Code Size">
-  <img src="https://img.shields.io/github/repo-size/Guavary/Motionary" alt="Repo Size">
-  <img src="https://img.shields.io/github/issues/Guavary/Motionary" alt="Issues">
-  <img src="https://img.shields.io/github/stars/Guavary/Motionary" alt="Stars">
-</div>
+Motionary is a native iOS video editor built with SwiftUI, AVFoundation, Core Image, and the Photos picker.
 
-<hr />
+## Requirements
 
-<div align="center">
-  <a href="https://discord.gg/62qygQMG7e"><img src="https://invidget.switchblade.xyz/62qygQMG7e"></a>
-</div>
+- Xcode 17 or newer
+- iOS 26 SDK
+- An iOS 26 simulator or device
 
-# Overview
-## About
-Designed for both beginners and pros, Motionary combines a smooth workflow with pro-level tools, all in an interface that just makes sense. No unnecessary fluff, no steep learning curves—just everything you need to bring your ideas to life.
+The project has no third-party runtime dependencies.
 
-Motionary is a Guava product, and like the fruit, we keep it fresh.
+## Getting started
+
+1. Open `Motionary.xcodeproj`.
+2. Select the `Motionary` scheme.
+3. Choose an iOS simulator or device.
+4. Build and run.
+
+Command-line verification:
+
+```sh
+xcodebuild build \
+  -project Motionary.xcodeproj \
+  -scheme Motionary \
+  -configuration Debug \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO
+
+xcodebuild test \
+  -project Motionary.xcodeproj \
+  -scheme Motionary \
+  -configuration Debug \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+```
+
+Format all Swift sources with the checked-in configuration:
+
+```sh
+xcrun swift-format format --in-place --recursive \
+  --configuration .swift-format \
+  Motionary MotionaryTests MotionaryUITests
+```
+
+## Documentation
+
+- [Architecture](Documentation/ARCHITECTURE.md)
+- [Development conventions](Documentation/DEVELOPMENT.md)
+- [Modernization summary](Documentation/MODERNIZATION.md)

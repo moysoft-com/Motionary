@@ -1,13 +1,17 @@
+// Core Image compositor for layered Motionary video frames.
+
 import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import ImageIO
 
+/// Applies clip ordering, transforms, adjustments, effects, and opacity to each output frame.
 final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     private let renderQueue = DispatchQueue(label: "com.motionary.video-compositor.render")
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var shouldCancelAllRequests = false
 
-    var sourcePixelBufferAttributes: [String: Any]? {
+    var sourcePixelBufferAttributes: [String: any Sendable]? {
         [
             kCVPixelBufferPixelFormatTypeKey as String: [
                 kCVPixelFormatType_32BGRA,
@@ -17,11 +21,11 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         ]
     }
 
-    var requiredPixelBufferAttributesForRenderContext: [String: Any] {
+    var requiredPixelBufferAttributesForRenderContext: [String: any Sendable] {
         [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true,
-            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
         ]
     }
 
@@ -37,14 +41,17 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             }
 
             autoreleasepool {
-                guard let instruction = asyncVideoCompositionRequest.videoCompositionInstruction as? MotionaryVideoCompositionInstruction,
-                      let destinationBuffer = asyncVideoCompositionRequest.renderContext.newPixelBuffer()
+                guard
+                    let instruction = asyncVideoCompositionRequest.videoCompositionInstruction
+                        as? MotionaryVideoCompositionInstruction,
+                    let destinationBuffer = asyncVideoCompositionRequest.renderContext.newPixelBuffer()
                 else {
-                    asyncVideoCompositionRequest.finish(with: NSError(
-                        domain: "MotionaryVideoCompositor",
-                        code: -1,
-                        userInfo: [NSLocalizedDescriptionKey: "Invalid video composition instruction."]
-                    ))
+                    asyncVideoCompositionRequest.finish(
+                        with: NSError(
+                            domain: "MotionaryVideoCompositor",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "Invalid video composition instruction."]
+                        ))
                     return
                 }
 
@@ -90,13 +97,11 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         time >= clip.timelineStart && time < clip.timelineStart + clip.duration
     }
 
-    private func orientedImage(_ image: CIImage, sourceTransform: CGAffineTransform) -> CIImage {
-        let transformed = image.transformed(by: sourceTransform)
-        let extent = transformed.extent
-        guard extent.minX != 0 || extent.minY != 0 else {
-            return transformed
-        }
-        return transformed.transformed(by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY))
+    private func orientedImage(
+        _ image: CIImage,
+        sourceTransform: CGAffineTransform
+    ) -> CIImage {
+        image.transformed(by: sourceTransform)
     }
 
     private func place(_ image: CIImage, clip: RenderClipDescriptor, at time: Double, renderSize: CGSize) -> CIImage {
@@ -104,18 +109,23 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         guard extent.width > 0, extent.height > 0 else { return image }
 
         let fitScale = min(renderSize.width / extent.width, renderSize.height / extent.height)
-        let scale = fitScale * max(clip.transform.scale.value(at: time), 0.01)
+        let scale = clip.transform.scale.value(at: time)
+        let scaleXValue = fitScale * max(scale.x, 0.01)
+        let scaleYValue = fitScale * max(scale.y, 0.01)
+        let scaleX = clip.transform.isFlippedHorizontally ? -scaleXValue : scaleXValue
+        let scaleY = clip.transform.isFlippedVertically ? -scaleYValue : scaleYValue
         let rotation = clip.transform.rotationDegrees.value(at: time) * .pi / 180
         let positionX = clip.transform.positionX.value(at: time) * renderSize.width * 0.5
         let positionY = clip.transform.positionY.value(at: time) * renderSize.height * 0.5
 
         let centered = image.transformed(by: CGAffineTransform(translationX: -extent.midX, y: -extent.midY))
-        let scaled = centered.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaled = centered.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
         let rotated = scaled.transformed(by: CGAffineTransform(rotationAngle: rotation))
-        return rotated.transformed(by: CGAffineTransform(
-            translationX: renderSize.width * 0.5 + positionX,
-            y: renderSize.height * 0.5 + positionY
-        ))
+        return rotated.transformed(
+            by: CGAffineTransform(
+                translationX: renderSize.width * 0.5 + positionX,
+                y: renderSize.height * 0.5 + positionY
+            ))
     }
 
     private func applyAdjustments(_ adjustments: AdjustmentSettings, to image: CIImage, at time: Double) -> CIImage {
@@ -151,11 +161,19 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             case .noir:
                 let filter = CIFilter.photoEffectNoir()
                 filter.inputImage = current
-                return filter.outputImage ?? current
+                return self.blend(
+                    from: current,
+                    to: filter.outputImage ?? current,
+                    amount: intensity
+                )
             case .chrome:
                 let filter = CIFilter.photoEffectChrome()
                 filter.inputImage = current
-                return filter.outputImage ?? current
+                return self.blend(
+                    from: current,
+                    to: filter.outputImage ?? current,
+                    amount: intensity
+                )
             case .blur:
                 let filter = CIFilter.gaussianBlur()
                 filter.inputImage = current.clampedToExtent()
@@ -177,5 +195,15 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         filter.inputImage = image
         filter.aVector = CIVector(x: 0, y: 0, z: 0, w: CGFloat(opacity))
         return filter.outputImage ?? image
+    }
+
+    private func blend(from source: CIImage, to target: CIImage, amount: Double) -> CIImage {
+        guard amount > 0.001 else { return source }
+        guard amount < 0.999 else { return target }
+        let transition = CIFilter.dissolveTransition()
+        transition.inputImage = source
+        transition.targetImage = target
+        transition.time = Float(amount)
+        return transition.outputImage ?? source
     }
 }

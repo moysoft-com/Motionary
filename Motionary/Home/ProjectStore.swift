@@ -1,5 +1,19 @@
+// Project metadata, content, and imported-media persistence.
+
 import Foundation
 
+enum ProjectStoreError: LocalizedError {
+    case mediaCopyFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .mediaCopyFailed(let message):
+            "The media could not be copied into the project: \(message)"
+        }
+    }
+}
+
+/// Owns dashboard projects and their on-disk content directories.
 final class ProjectStore: ObservableObject {
     @Published var projects: [Project] = [] {
         didSet {
@@ -46,7 +60,7 @@ final class ProjectStore: ObservableObject {
             }
             projects = loadedProjects.sorted { $0.updatedAt > $1.updatedAt }
         } catch {
-            print("Failed to load projects: \(error)")
+            AppLogger.persistence.error("Failed to load projects: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -56,7 +70,7 @@ final class ProjectStore: ObservableObject {
             let data = try JSONEncoder().encode(projects)
             try data.write(to: storageURL, options: [.atomic])
         } catch {
-            print("Failed to save projects: \(error)")
+            AppLogger.persistence.error("Failed to save projects: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -75,11 +89,13 @@ final class ProjectStore: ObservableObject {
             try data.write(to: contentURL, options: [.atomic])
             syncProjectMetadata(projectID: projectID, content: content)
         } catch {
-            print("Failed to save project content: \(error)")
+            AppLogger.persistence.error(
+                "Failed to save project content: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
-    func storeMedia(from url: URL, projectID: UUID) -> URL {
+    func storeMedia(from url: URL, projectID: UUID) throws -> URL {
         let folderURL = projectFolderURL(for: projectID)
         if url.deletingLastPathComponent() == folderURL {
             return url
@@ -93,8 +109,8 @@ final class ProjectStore: ObservableObject {
             try fileManager.copyItem(at: url, to: destinationURL)
             return destinationURL
         } catch {
-            print("Failed to store media: \(error)")
-            return url
+            AppLogger.persistence.error("Failed to store media: \(error.localizedDescription, privacy: .public)")
+            throw ProjectStoreError.mediaCopyFailed(error.localizedDescription)
         }
     }
 
@@ -127,7 +143,8 @@ final class ProjectStore: ObservableObject {
     }
 
     private func projectFolderURL(for projectID: UUID) -> URL {
-        let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
+        let documentsURL =
+            fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
         let folderURL = documentsURL.appendingPathComponent("project_\(projectID.uuidString)", isDirectory: true)
         if !fileManager.fileExists(atPath: folderURL.path) {

@@ -1,6 +1,9 @@
+// AVPlayer-backed SwiftUI preview surface.
+
 import AVFoundation
 import SwiftUI
 
+/// Hosts an `AVPlayerLayer` as the view's backing layer.
 final class PreviewPlayerContainerView: UIView {
     override class var layerClass: AnyClass {
         AVPlayerLayer.self
@@ -11,6 +14,7 @@ final class PreviewPlayerContainerView: UIView {
     }
 }
 
+/// Displays an AVFoundation player without introducing SwiftUI video controls.
 struct PreviewRendererView: UIViewRepresentable {
     let player: AVPlayer
 

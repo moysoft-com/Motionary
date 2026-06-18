@@ -1,5 +1,8 @@
+// Project-to-editor navigation adapter.
+
 import SwiftUI
 
+/// Loads persisted project content and presents the editor.
 struct ProjectDetailView: View {
     var project: Project
     @ObservedObject var projectStore: ProjectStore

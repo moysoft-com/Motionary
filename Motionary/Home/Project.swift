@@ -1,5 +1,8 @@
+// Dashboard project metadata persisted separately from editor content.
+
 import Foundation
 
+/// Lightweight project metadata used for dashboard ordering and navigation.
 struct Project: Identifiable, Codable, Equatable, Hashable {
     let id: UUID
     var title: String

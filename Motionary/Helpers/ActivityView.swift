@@ -1,6 +1,9 @@
+// SwiftUI adapter for the system share sheet.
+
 import SwiftUI
 import UIKit
 
+/// Presents `UIActivityViewController` from SwiftUI.
 struct ActivityView: UIViewControllerRepresentable {
     let activityItems: [Any]
     var applicationActivities: [UIActivity]? = nil

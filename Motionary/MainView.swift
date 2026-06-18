@@ -1,20 +1,17 @@
-//
-//  MainView.swift
-//  Motionary
-//
-//  Created by Ryder Thomas on 3/1/25.
-//
-
+// Application entry point and root tab structure.
 
 import SwiftUI
 
 @main
+/// Launches Motionary and installs the project and settings tabs.
 struct MainView: App {
     var body: some Scene {
         WindowGroup {
             TabView {
-                Tab("Home", systemImage: "rectangle.stack.fill") {
+                Tab {
                     HomeView()
+                } label: {
+                    Image("MotionarySF")
                 }
 
                 Tab("Settings", systemImage: "gearshape.fill") {
@@ -25,4 +22,3 @@ struct MainView: App {
         }
     }
 }
-

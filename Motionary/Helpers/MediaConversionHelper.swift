@@ -1,8 +1,60 @@
+// Image normalization and still-image video conversion.
+
 import AVFoundation
+import ImageIO
 import UIKit
 
+/// Converts imported still images into orientation-safe video assets for the shared render pipeline.
 enum MediaConversionHelper {
+    static let stillVideoSourceFrameCount = 1
+
+    /// Loads an image without decoding its full source resolution into memory.
+    static func downsampledImage(at url: URL, maxPixelSize: CGFloat = 4096) throws -> UIImage {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw MediaImportError.invalidImage
+        }
+
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            throw MediaImportError.invalidImage
+        }
+        return UIImage(cgImage: image)
+    }
+
+    /// Redraws an image so its pixels use upright orientation metadata.
+    static func normalizedImage(_ image: UIImage) -> UIImage {
+        guard image.imageOrientation != .up else {
+            return image
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = false
+
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: image.size))
+        }
+    }
+
+    /// Writes a still image as a fixed-duration, single-frame movie.
     static func imageToVideo(image: UIImage, duration: Double, frameRate: Int32 = 30) async throws -> URL {
+        try await writeImageToVideo(
+            image: image,
+            duration: duration,
+            frameRate: frameRate
+        )
+    }
+
+    private static func writeImageToVideo(
+        image: UIImage,
+        duration: Double,
+        frameRate: Int32
+    ) async throws -> URL {
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).mov")
 
@@ -10,95 +62,141 @@ enum MediaConversionHelper {
             try FileManager.default.removeItem(at: outputURL)
         }
 
-        guard let cgImage = image.cgImage else {
+        let normalizedImage = normalizedImage(image)
+        guard let cgImage = normalizedImage.cgImage else {
             throw MediaImportError.invalidImage
         }
 
-        let videoSize = CGSize(width: cgImage.width, height: cgImage.height)
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: videoSize.width,
-            AVVideoHeightKey: videoSize.height
-        ]
-
-        let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        writerInput.expectsMediaDataInRealTime = false
-
-        let sourceBufferAttributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
-            kCVPixelBufferWidthKey as String: videoSize.width,
-            kCVPixelBufferHeightKey as String: videoSize.height
-        ]
-
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: writerInput,
-            sourcePixelBufferAttributes: sourceBufferAttributes
+        let videoSize = CGSize(
+            width: max(cgImage.width - cgImage.width % 2, 2),
+            height: max(cgImage.height - cgImage.height % 2, 2)
         )
+        let frameDuration = CMTime(value: 1, timescale: max(frameRate, 1))
+        let stillDuration = CMTime(
+            seconds: max(duration, CMTimeGetSeconds(frameDuration)),
+            preferredTimescale: 600
+        )
+        let rendererFormat = UIGraphicsImageRendererFormat()
+        rendererFormat.scale = 1
+        rendererFormat.opaque = true
+        let encodedImage = UIGraphicsImageRenderer(
+            size: videoSize,
+            format: rendererFormat
+        ).image { _ in
+            normalizedImage.draw(in: CGRect(origin: .zero, size: videoSize))
+        }
+        guard let jpegData = encodedImage.jpegData(compressionQuality: 0.96) else {
+            throw MediaImportError.invalidImage
+        }
 
-        guard writer.canAdd(writerInput) else {
+        var formatDescription: CMVideoFormatDescription?
+        guard
+            CMVideoFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                codecType: kCMVideoCodecType_JPEG,
+                width: Int32(videoSize.width),
+                height: Int32(videoSize.height),
+                extensions: nil,
+                formatDescriptionOut: &formatDescription
+            ) == noErr,
+            let formatDescription
+        else {
             throw MediaImportError.videoWriterUnavailable
         }
 
-        writer.add(writerInput)
-        writer.startWriting()
-        writer.startSession(atSourceTime: .zero)
-
-        let frameDuration = CMTime(value: 1, timescale: frameRate)
-        let totalFrames = max(Int(duration * Double(frameRate)), 1)
-
-        for frame in 0..<totalFrames {
-            while !writerInput.isReadyForMoreMediaData {
-                try await Task.sleep(nanoseconds: 5_000_000)
-            }
-
-            guard let pixelBufferPool = adaptor.pixelBufferPool else {
-                throw MediaImportError.videoWriterUnavailable
-            }
-
-            var pixelBufferOut: CVPixelBuffer?
-            let status = CVPixelBufferPoolCreatePixelBuffer(nil, pixelBufferPool, &pixelBufferOut)
-            guard status == kCVReturnSuccess, let pixelBuffer = pixelBufferOut else {
-                throw MediaImportError.pixelBufferCreationFailed
-            }
-
-            CVPixelBufferLockBaseAddress(pixelBuffer, [])
-            let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue |
-                CGImageAlphaInfo.premultipliedFirst.rawValue
-            guard let context = CGContext(
-                data: CVPixelBufferGetBaseAddress(pixelBuffer),
-                width: Int(videoSize.width),
-                height: Int(videoSize.height),
-                bitsPerComponent: 8,
-                bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: bitmapInfo
-            ) else {
-                CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-                throw MediaImportError.pixelBufferCreationFailed
-            }
-
-            context.clear(CGRect(origin: .zero, size: videoSize))
-            UIGraphicsPushContext(context)
-            image.draw(in: CGRect(origin: .zero, size: videoSize))
-            UIGraphicsPopContext()
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-
-            let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(frame))
-            adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+        var blockBuffer: CMBlockBuffer?
+        guard
+            CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault,
+                memoryBlock: nil,
+                blockLength: jpegData.count,
+                blockAllocator: kCFAllocatorDefault,
+                customBlockSource: nil,
+                offsetToData: 0,
+                dataLength: jpegData.count,
+                flags: 0,
+                blockBufferOut: &blockBuffer
+            ) == noErr,
+            let blockBuffer
+        else {
+            throw MediaImportError.videoWriterUnavailable
+        }
+        let copyStatus = jpegData.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return kCMBlockBufferBadCustomBlockSourceErr }
+            return CMBlockBufferReplaceDataBytes(
+                with: baseAddress,
+                blockBuffer: blockBuffer,
+                offsetIntoDestination: 0,
+                dataLength: jpegData.count
+            )
+        }
+        guard copyStatus == noErr else {
+            throw MediaImportError.videoWriterUnavailable
         }
 
-        writerInput.markAsFinished()
-        await writer.finishWriting()
+        var timing = CMSampleTimingInfo(
+            duration: stillDuration,
+            presentationTimeStamp: .zero,
+            decodeTimeStamp: .invalid
+        )
+        var sampleSize = jpegData.count
+        var sampleBuffer: CMSampleBuffer?
+        guard
+            CMSampleBufferCreateReady(
+                allocator: kCFAllocatorDefault,
+                dataBuffer: blockBuffer,
+                formatDescription: formatDescription,
+                sampleCount: 1,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timing,
+                sampleSizeEntryCount: 1,
+                sampleSizeArray: &sampleSize,
+                sampleBufferOut: &sampleBuffer
+            ) == noErr,
+            let sampleBuffer
+        else {
+            throw MediaImportError.videoWriterUnavailable
+        }
 
-        if let error = writer.error {
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        let writerInput = AVAssetWriterInput(
+            mediaType: .video,
+            outputSettings: nil,
+            sourceFormatHint: formatDescription
+        )
+        writerInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(writerInput) else {
+            throw MediaImportError.videoWriterUnavailable
+        }
+        writer.add(writerInput)
+        guard writer.startWriting() else {
+            throw writer.error ?? MediaImportError.videoWriterUnavailable
+        }
+        writer.startSession(atSourceTime: .zero)
+
+        do {
+            try Task.checkCancellation()
+            while !writerInput.isReadyForMoreMediaData {
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: 5_000_000)
+            }
+            guard writerInput.append(sampleBuffer) else {
+                throw writer.error ?? MediaImportError.videoWriterUnavailable
+            }
+
+            writer.endSession(atSourceTime: stillDuration)
+            writerInput.markAsFinished()
+            await writer.finishWriting()
+
+            if let error = writer.error {
+                throw error
+            }
+        } catch {
+            writer.cancelWriting()
+            try? FileManager.default.removeItem(at: outputURL)
             throw error
         }
 
         return outputURL
     }
-}
-
-func convertImageToVideo(image: UIImage, duration: Double) async -> URL? {
-    try? await MediaConversionHelper.imageToVideo(image: image, duration: duration)
 }

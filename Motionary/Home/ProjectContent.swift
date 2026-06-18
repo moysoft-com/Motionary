@@ -1,5 +1,8 @@
+// Versioned editor-project storage envelope and legacy decoding boundary.
+
 import Foundation
 
+/// Persists the current editor schema while retaining backward-compatible decoding.
 struct ProjectContent: Codable, Equatable {
     var schemaVersion: Int
     var editorProject: EditorProject
@@ -39,8 +42,10 @@ struct ProjectContent: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         if let editorProject = try container.decodeIfPresent(EditorProject.self, forKey: .editorProject) {
-            self.schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? editorProject.schemaVersion
-            self.editorProject = editorProject
+            var migratedProject = editorProject.removingTemporaryTracks()
+            migratedProject.schemaVersion = EditorProject.currentSchemaVersion
+            self.schemaVersion = EditorProject.currentSchemaVersion
+            self.editorProject = migratedProject
             return
         }
 
@@ -62,6 +67,16 @@ struct ProjectContent: Codable, Equatable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(EditorProject.currentSchemaVersion, forKey: .schemaVersion)
-        try container.encode(editorProject, forKey: .editorProject)
+        try container.encode(editorProject.removingTemporaryTracks(), forKey: .editorProject)
+    }
+}
+
+private extension EditorProject {
+    func removingTemporaryTracks() -> EditorProject {
+        var persistedProject = self
+        persistedProject.tracks.removeAll { track in
+            track.kind == .undefined && track.clips.isEmpty
+        }
+        return persistedProject
     }
 }

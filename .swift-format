@@ -1,0 +1,17 @@
+{
+  "indentation" : {
+    "spaces" : 4
+  },
+  "lineLength" : 120,
+  "maximumBlankLines" : 1,
+  "multiElementCollectionTrailingCommas" : false,
+  "respectsExistingLineBreaks" : true,
+  "rules" : {
+    "AllPublicDeclarationsHaveDocumentation" : false,
+    "FileScopedDeclarationPrivacy" : false,
+    "OrderedImports" : true,
+    "UseTripleSlashForDocumentationComments" : true
+  },
+  "version" : 1
+}
+

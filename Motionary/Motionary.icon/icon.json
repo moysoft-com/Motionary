@@ -1,26 +1,29 @@
 {
-  "fill" : {
-    "linear-gradient" : [
-      "srgb:0.46275,0.83922,1.00000,1.00000",
-      "extended-srgb:0.00000,0.53333,1.00000,1.00000"
-    ]
-  },
+  "fill" : "system-light",
   "groups" : [
     {
-      "blur-material" : 0.5,
+      "blur-material-specializations" : [
+        {
+          "value" : 0.5
+        },
+        {
+          "appearance" : "dark",
+          "value" : null
+        }
+      ],
+      "hidden" : false,
       "layers" : [
         {
           "fill-specializations" : [
             {
-              "value" : "system-light"
+              "value" : {
+                "automatic-gradient" : "display-p3:0.16078,0.38039,0.75686,1.00000"
+              }
             },
             {
               "appearance" : "dark",
               "value" : {
-                "linear-gradient" : [
-                  "srgb:0.46275,0.83922,1.00000,1.00000",
-                  "extended-srgb:0.00000,0.53333,1.00000,1.00000"
-                ]
+                "automatic-gradient" : "display-p3:0.33725,0.52941,0.85882,1.00000"
               }
             },
             {
@@ -28,21 +31,74 @@
               "value" : "system-light"
             }
           ],
-          "glass-specializations" : [
+          "glass" : true,
+          "image-name-specializations" : [
             {
-              "appearance" : "dark",
-              "value" : true
+              "value" : "Motionary2.svg"
+            },
+            {
+              "idiom" : "square",
+              "value" : "Motionary3.svg"
+            },
+            {
+              "idiom" : "watchOS",
+              "value" : "Motionary3.svg"
             }
           ],
-          "image-name" : "Motionary.svg",
-          "name" : "Motionary"
+          "name" : "Motionary3",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            },
+            {
+              "idiom" : "watchOS",
+              "value" : {
+                "scale" : 0.99,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            }
+          ]
         }
       ],
-      "refractivity" : {
-        "depth" : 0.5,
-        "enabled" : false,
-        "strength" : 0
-      },
+      "position-specializations" : [
+        {
+          "idiom" : "square",
+          "value" : {
+            "scale" : 0.92,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "refractivity-specializations" : [
+        {
+          "value" : {
+            "depth" : 0.5,
+            "enabled" : false,
+            "strength" : 0
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "depth" : 0.791171875,
+            "enabled" : false,
+            "strength" : -0.046015625
+          }
+        }
+      ],
       "shadow-specializations" : [
         {
           "value" : {
@@ -54,14 +110,25 @@
           "appearance" : "dark",
           "value" : {
             "kind" : "neutral",
-            "opacity" : 0.4
+            "opacity" : 0.6
           }
         }
       ],
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.65
-      }
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.6
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.6
+          }
+        }
+      ]
     }
   ],
   "supported-platforms" : {
