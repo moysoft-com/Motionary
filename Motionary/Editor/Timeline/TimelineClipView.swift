@@ -71,7 +71,11 @@ struct TimelineClipBlock: View {
             .foregroundStyle(Color.black.opacity(0.88))
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(clip.mediaType == .audio ? MotionaryTheme.audio : MotionaryTheme.video)
+                    .fill(
+                        clip.shape != nil
+                            ? Color.orange
+                            : (clip.mediaType == .audio ? MotionaryTheme.audio : MotionaryTheme.video)
+                    )
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -317,7 +321,9 @@ struct TimelineClipFill: View {
         let waveformCount = quantizedWaveformSampleCount
 
         ZStack {
-            if clip.mediaType == .audio {
+            if clip.shape != nil {
+                Color.orange
+            } else if clip.mediaType == .audio {
                 TimelineWaveformView(samples: activeWaveformSamples)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 5)

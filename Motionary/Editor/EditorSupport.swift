@@ -5,19 +5,54 @@ import UIKit
 
 struct EditorBusyOverlay: View {
     @ObservedObject var viewModel: EditorViewModel
+    let onCancelRequest: () -> Void
+    @State private var showsOverlay = false
 
     var body: some View {
-        if viewModel.isImporting || viewModel.isExporting {
-            VStack(spacing: 12) {
-                ProgressView(value: viewModel.isExporting ? viewModel.exportProgress : nil)
+        ZStack {
+            if showsOverlay, let title = viewModel.longRunningTaskTitle {
+                ZStack {
+                    Color.black.opacity(0.62)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
+                        .onTapGesture(perform: onCancelRequest)
+
+                    VStack(spacing: 12) {
+                        if viewModel.isExporting {
+                            ProgressView(value: viewModel.exportProgress)
+                        } else {
+                            ProgressView()
+                        }
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(MotionaryTheme.textPrimary)
+                        Text("Tap outside to stop")
+                            .font(.caption)
+                            .foregroundStyle(MotionaryTheme.textSecondary)
+                    }
                     .tint(MotionaryTheme.accent)
-                Text(viewModel.isExporting ? "Exporting \(Int(viewModel.exportProgress * 100))%" : "Importing")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(MotionaryTheme.textPrimary)
+                    .padding(18)
+                    .motionaryGlass(cornerRadius: 18)
+                }
+                .zIndex(1_000)
             }
-            .padding(18)
-            .motionaryGlass(cornerRadius: 18)
         }
+        .task(id: busyKey) {
+            showsOverlay = false
+            guard viewModel.isPerformingLongTask else { return }
+            if viewModel.isRenderingPreview && !viewModel.isImporting && !viewModel.isExporting {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+            }
+            guard !Task.isCancelled, viewModel.isPerformingLongTask else { return }
+            showsOverlay = true
+        }
+    }
+
+    private var busyKey: String {
+        if viewModel.isExporting { return "export" }
+        if viewModel.isImporting { return "import" }
+        if viewModel.isRenderingPreview { return "preview" }
+        return "idle"
     }
 }
 

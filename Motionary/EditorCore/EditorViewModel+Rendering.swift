@@ -5,11 +5,15 @@ import SwiftUI
 
 extension EditorViewModel {
     func exportProject(settings: VideoExportSettings) {
-        Task {
+        exportTask = Task { [weak self] in
+            guard let self else { return }
             guard !isExporting else { return }
             isExporting = true
             exportProgress = 0
-            defer { isExporting = false }
+            defer {
+                isExporting = false
+                exportTask = nil
+            }
             do {
                 let url = try await exportService.export(
                     project: project,
@@ -20,8 +24,11 @@ extension EditorViewModel {
                     }
                 }
                 defer { try? FileManager.default.removeItem(at: url) }
+                try Task.checkCancellation()
                 try await PhotoLibraryExportService.saveVideo(at: url)
                 showConfirmation("Video saved to Photos")
+            } catch is CancellationError {
+                return
             } catch {
                 errorMessage = error.localizedDescription
             }

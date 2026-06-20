@@ -10,6 +10,9 @@ enum KeyframeTarget: Hashable, Identifiable {
     case scaleY
     case rotation
     case opacity
+    case shapeWidth
+    case shapeHeight
+    case shapeCornerRadius
     case brightness
     case contrast
     case saturation
@@ -26,6 +29,9 @@ enum KeyframeTarget: Hashable, Identifiable {
         case .scaleY: "transform.scaleY"
         case .rotation: "transform.rotation"
         case .opacity: "transform.opacity"
+        case .shapeWidth: "shape.width"
+        case .shapeHeight: "shape.height"
+        case .shapeCornerRadius: "shape.cornerRadius"
         case .brightness: "adjustments.brightness"
         case .contrast: "adjustments.contrast"
         case .saturation: "adjustments.saturation"
@@ -37,6 +43,7 @@ enum KeyframeTarget: Hashable, Identifiable {
 }
 
 enum KeyframeSection: String, CaseIterable, Identifiable {
+    case shape = "Shape"
     case transform = "Transform"
     case adjust = "Adjust"
     case effects = "Effects"
@@ -46,6 +53,7 @@ enum KeyframeSection: String, CaseIterable, Identifiable {
 }
 
 enum KeyframePropertyGroup: String, CaseIterable, Identifiable {
+    case shape = "Shape"
     case transform = "Transform"
     case adjustments = "Adjustments"
     case effects = "Effects"
@@ -64,6 +72,8 @@ struct KeyframePropertyMetadata {
 
     func formattedValue(_ value: Double) -> String {
         switch group {
+        case .shape:
+            return "\(Int(value.rounded())) px"
         case .audio:
             return "\(Int((value * 100).rounded()))%"
         default:
@@ -101,8 +111,13 @@ struct CanvasRatioPreset: Identifiable, Equatable {
     let width: Int
     let height: Int
 
-    func settings(frameRate: Int32) -> RenderSettings {
-        RenderSettings(width: width, height: height, frameRate: frameRate)
+    func settings(frameRate: Int32, backgroundColor: RGBAColor = .black) -> RenderSettings {
+        RenderSettings(
+            width: width,
+            height: height,
+            frameRate: frameRate,
+            backgroundColor: backgroundColor
+        )
     }
 
     static let presets: [CanvasRatioPreset] = [

@@ -67,6 +67,11 @@ extension EditorViewModel {
                 : -1...1
         }
         switch target {
+        case .shapeCornerRadius:
+            guard let shape = clip.shape else { return 0...4096 }
+            let time = min(max(currentTime - clip.timelineStart, 0), clip.sourceRange.duration)
+            let maximum = min(shape.width.value(at: time), shape.height.value(at: time)) * 0.5
+            return 0...max(maximum, 0)
         case .positionX, .positionY:
             let canvas = project.renderSettings.size
             let source = clip.source.naturalSize?.displaySafeSize ?? canvas

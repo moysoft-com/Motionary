@@ -10,7 +10,8 @@ extension CGSizeValue {
 
 extension TimelineClip {
     var requiredTrackKind: TrackKind {
-        mediaType == .audio ? .audio : .visual
+        if shape != nil { return .shape }
+        return mediaType == .audio ? .audio : .visual
     }
 
     func keyframeMetadata(for target: KeyframeTarget) -> KeyframePropertyMetadata {
@@ -78,6 +79,33 @@ extension TimelineClip {
                 step: 0.01,
                 fractionDigits: 2
             )
+        case .shapeWidth:
+            return KeyframePropertyMetadata(
+                title: "X Size",
+                systemImage: "arrow.left.and.right",
+                group: .shape,
+                range: 1...8192,
+                step: 1,
+                fractionDigits: 0
+            )
+        case .shapeHeight:
+            return KeyframePropertyMetadata(
+                title: "Y Size",
+                systemImage: "arrow.up.and.down",
+                group: .shape,
+                range: 1...8192,
+                step: 1,
+                fractionDigits: 0
+            )
+        case .shapeCornerRadius:
+            return KeyframePropertyMetadata(
+                title: "Corner Radius",
+                systemImage: "rectangle.roundedtop",
+                group: .shape,
+                range: 0...4096,
+                step: 1,
+                fractionDigits: 0
+            )
         case .brightness:
             return KeyframePropertyMetadata(
                 title: "Brightness",
@@ -139,6 +167,11 @@ extension TimelineClip {
     }
 
     var availableKeyframeTargets: [KeyframeTarget] {
+        if let shape {
+            return [.shapeWidth, .shapeHeight]
+                + (shape.kind.supportsCornerRadius ? [.shapeCornerRadius] : [])
+                + [.positionX, .positionY, .scale, .rotation, .opacity]
+        }
         if mediaType == .audio {
             return [.volume]
         }
@@ -159,6 +192,10 @@ extension TimelineClip {
 
     func keyframeTargets(in section: KeyframeSection) -> [KeyframeTarget] {
         switch section {
+        case .shape:
+            guard let shape else { return [] }
+            return [.shapeWidth, .shapeHeight]
+                + (shape.kind.supportsCornerRadius ? [.shapeCornerRadius] : [])
         case .transform:
             guard mediaType != .audio else { return [] }
             return [
@@ -193,6 +230,8 @@ extension TimelineClip {
 
     func keyframeSection(for target: KeyframeTarget) -> KeyframeSection {
         switch target {
+        case .shapeWidth, .shapeHeight, .shapeCornerRadius:
+            .shape
         case .positionX, .positionY, .scale, .scaleX, .scaleY, .rotation:
             .transform
         case .opacity, .brightness, .contrast, .saturation, .exposure:
@@ -206,6 +245,9 @@ extension TimelineClip {
 
     func animatableProperty(for target: KeyframeTarget) -> AnimatableProperty<Double>? {
         switch target {
+        case .shapeWidth: shape?.width
+        case .shapeHeight: shape?.height
+        case .shapeCornerRadius: shape?.cornerRadius
         case .positionX: transform.positionX
         case .positionY: transform.positionY
         case .scale, .scaleX: transform.scale.axisProperty(.x)
@@ -227,6 +269,12 @@ extension TimelineClip {
         for target: KeyframeTarget
     ) {
         switch target {
+        case .shapeWidth:
+            shape?.width = property
+        case .shapeHeight:
+            shape?.height = property
+        case .shapeCornerRadius:
+            shape?.cornerRadius = property
         case .positionX:
             transform.positionX = property
         case .positionY:

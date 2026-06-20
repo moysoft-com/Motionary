@@ -3,6 +3,63 @@
 import SwiftUI
 import UIKit
 
+struct ShapeWorkspaceView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    let clip: TimelineClip?
+
+    var body: some View {
+        PropertyWorkspaceShell(
+            viewModel: viewModel,
+            clip: clip,
+            title: "Shape",
+            systemImage: "slider.horizontal.3",
+            section: .shape
+        ) { clip, isEnabled in
+            if let shape = clip.shape {
+                VStack(spacing: 12) {
+                    PropertyScrubber(
+                        viewModel: viewModel,
+                        clip: clip,
+                        target: .shapeWidth,
+                        isEnabled: isEnabled
+                    )
+                    PropertyScrubber(
+                        viewModel: viewModel,
+                        clip: clip,
+                        target: .shapeHeight,
+                        isEnabled: isEnabled
+                    )
+
+                    if shape.kind.supportsCornerRadius {
+                        PropertyScrubber(
+                            viewModel: viewModel,
+                            clip: clip,
+                            target: .shapeCornerRadius,
+                            isEnabled: isEnabled
+                        )
+                    }
+
+                    HStack(spacing: 8) {
+                        Text("Color")
+                            .font(.callout.weight(.medium))
+                        Spacer()
+                        ColorPicker(
+                            "Color",
+                            selection: Binding(
+                                get: { shape.color.swiftUIColor },
+                                set: { viewModel.setSelectedShape(color: RGBAColor($0)) }
+                            ),
+                            supportsOpacity: true
+                        )
+                        .labelsHidden()
+                    }
+                    .disabled(!isEnabled)
+                }
+            }
+        }
+    }
+}
+
 struct TransformWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let clip: TimelineClip?
@@ -242,7 +299,7 @@ private struct PropertyWorkspaceShell<Content: View>: View {
     let clip: TimelineClip?
     let title: String
     let systemImage: String
-    let section: KeyframeSection
+    let section: KeyframeSection?
     @ViewBuilder let content: (TimelineClip, Bool) -> Content
 
     var body: some View {
@@ -258,12 +315,14 @@ private struct PropertyWorkspaceShell<Content: View>: View {
                             .font(.headline.weight(.semibold))
                             .labelStyle(.titleAndIcon)
                         Spacer()
-                        SectionKeyframeButton(
-                            viewModel: viewModel,
-                            clip: clip,
-                            section: section,
-                            isEnabled: isEnabled
-                        )
+                        if let section {
+                            SectionKeyframeButton(
+                                viewModel: viewModel,
+                                clip: clip,
+                                section: section,
+                                isEnabled: isEnabled
+                            )
+                        }
                     }
                     .frame(height: 22)
 
@@ -882,10 +941,11 @@ struct SelectedLayerMiniTimeline: View {
         let playheadFrame = Int((viewModel.currentTime * frameRate).rounded())
         let sectionValue: Int
         switch activeSection {
-        case .transform: sectionValue = 1
-        case .adjust: sectionValue = 2
-        case .effects: sectionValue = 3
-        case .audio: sectionValue = 4
+        case .shape: sectionValue = 1
+        case .transform: sectionValue = 2
+        case .adjust: sectionValue = 3
+        case .effects: sectionValue = 4
+        case .audio: sectionValue = 5
         case nil: sectionValue = 0
         }
         let graphValue: Int

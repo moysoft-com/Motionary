@@ -49,7 +49,9 @@ extension EditorViewModel {
                         case .success(let imported):
                             importedByIndex[index] = imported
                         case .failure(let error):
-                            failures.append(error.localizedDescription)
+                            if !(error is CancellationError) {
+                                failures.append(error.localizedDescription)
+                            }
                         }
                     }
                 }
@@ -63,6 +65,87 @@ extension EditorViewModel {
                     failures.count == 1
                     ? failures[0]
                     : "\(failures.count) media items could not be imported."
+            }
+        }
+    }
+
+    func replaceSelectedMedia(with item: PhotosPickerItem) {
+        guard let selectedClipID, selectedClip?.mediaType != .audio, !isImporting else { return }
+        isImporting = true
+        importTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                isImporting = false
+                importTask = nil
+            }
+            do {
+                let imported = try await importService.importPhotosItem(
+                    item,
+                    projectID: projectID,
+                    projectStore: projectStore
+                )
+                try Task.checkCancellation()
+                mutateProject { project in
+                    guard let location = project.clipLocation(id: selectedClipID) else { return }
+                    var clip = project.tracks[location.track].clips[location.clip]
+                    let previousDuration = clip.sourceRange.duration
+                    clip.name = imported.storedURL.deletingPathExtension().lastPathComponent
+                    clip.source = imported.source
+                    clip.shape = nil
+                    clip.sourceRange = TimeRangeValue(
+                        start: 0,
+                        duration: imported.source.mediaType == .image
+                            ? previousDuration
+                            : min(previousDuration, imported.source.originalDuration)
+                    )
+                    project.tracks[location.track].clips[location.clip] = clip
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func addShape(_ kind: ClipShapeKind) {
+        guard !isImporting else { return }
+        isImporting = true
+        importTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                isImporting = false
+                importTask = nil
+            }
+            do {
+                let shapeDuration = max(duration - currentTime, 5)
+                let imported = try await importService.makeShapeMedia(
+                    duration: shapeDuration,
+                    canvasSize: project.renderSettings.size,
+                    projectID: projectID,
+                    projectStore: projectStore
+                )
+                try Task.checkCancellation()
+                mutateProject { project in
+                    let trackIndex = project.insertFreshTrack(kind: .shape)
+                    var source = imported.source
+                    source.naturalSize = CGSizeValue(width: 400, height: 400)
+                    let clip = TimelineClip(
+                        name: kind.title,
+                        source: source,
+                        timelineStart: self.currentTime,
+                        sourceRange: TimeRangeValue(start: 0, duration: shapeDuration),
+                        shape: ClipShape(kind: kind)
+                    )
+                    project.tracks[trackIndex].clips.append(clip)
+                    project.tracks[trackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
+                    self.selectedTrackID = project.tracks[trackIndex].id
+                    self.selectedClipID = clip.id
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = error.localizedDescription
             }
         }
     }

@@ -88,6 +88,42 @@ struct LayerManagementTests {
     }
 
     @MainActor
+    @Test func deletingLastClipKeepsItsTypedLayer() async throws {
+        let trackID = UUID()
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Only clip",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/only.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Keep layer",
+            tracks: [
+                TimelineTrack(id: trackID, name: "Layer 1", kind: .visual, clips: [clip])
+            ]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.selectClip(clipID, trackID: trackID)
+
+        viewModel.deleteSelectedClip()
+
+        #expect(viewModel.project.tracks.count == 1)
+        #expect(viewModel.project.tracks[0].id == trackID)
+        #expect(viewModel.project.tracks[0].clips.isEmpty)
+        #expect(viewModel.selectedTrackID == trackID)
+    }
+
+    @MainActor
     @Test func trackReorderUsesVisibleAbsoluteIndicesAcrossKinds() async throws {
         let visualID = UUID()
         let audioID = UUID()

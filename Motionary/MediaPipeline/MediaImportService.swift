@@ -93,7 +93,7 @@ struct MediaImportService {
             }
             defer { try? FileManager.default.removeItem(at: transferred.url) }
 
-            let image = try MediaConversionHelper.downsampledImage(at: transferred.url)
+            let image = try MediaConversionHelper.downsampledImage(at: transferred.url, maxPixelSize: 2560)
             let videoURL = try await MediaConversionHelper.imageToVideo(image: image, duration: 5)
             defer { try? FileManager.default.removeItem(at: videoURL) }
             let storedURL = try projectStore.storeMedia(from: videoURL, projectID: projectID)
@@ -108,6 +108,37 @@ struct MediaImportService {
         }
 
         throw MediaImportError.unsupportedMedia
+    }
+
+    func makeShapeMedia(
+        duration: Double,
+        canvasSize: CGSize,
+        projectID: UUID,
+        projectStore: ProjectStore
+    ) async throws -> ImportedMedia {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16), format: format).image {
+            context in
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        }
+        let videoURL = try await MediaConversionHelper.imageToVideo(
+            image: image,
+            duration: max(duration, 0.1)
+        )
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+        let storedURL = try projectStore.storeMedia(from: videoURL, projectID: projectID)
+        return ImportedMedia(
+            source: ClipSource(
+                url: storedURL,
+                mediaType: .image,
+                originalDuration: max(duration, 0.1),
+                naturalSize: CGSizeValue(canvasSize)
+            ),
+            storedURL: storedURL
+        )
     }
 
     func importAudioFromPhotosItem(

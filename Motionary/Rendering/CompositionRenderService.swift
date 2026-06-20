@@ -43,6 +43,7 @@ struct RenderClipDescriptor {
     var transform: ClipTransform
     var adjustments: AdjustmentSettings
     var effectStack: EffectStack
+    var shape: ClipShape?
     var renderOrder: Int
 }
 
@@ -55,11 +56,18 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
     let passthroughTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
     let clips: [RenderClipDescriptor]
     let renderSize: CGSize
+    let backgroundColor: RGBAColor
 
-    init(timeRange: CMTimeRange, clips: [RenderClipDescriptor], renderSize: CGSize) {
+    init(
+        timeRange: CMTimeRange,
+        clips: [RenderClipDescriptor],
+        renderSize: CGSize,
+        backgroundColor: RGBAColor
+    ) {
         self.timeRange = timeRange
         self.clips = clips.sorted { $0.renderOrder < $1.renderOrder }
         self.renderSize = renderSize
+        self.backgroundColor = backgroundColor
         self.requiredSourceTrackIDs = clips.map { NSNumber(value: $0.trackID) }
         super.init()
     }
@@ -85,7 +93,9 @@ struct CompositionRenderService {
         var audioParameters: [AVAudioMixInputParameters] = []
         var renderOrder = 0
 
-        let visualTracks = project.tracks.filter { $0.kind == .visual && !$0.isMuted }
+        let visualTracks = project.tracks.filter {
+            ($0.kind == .visual || $0.kind == .shape) && !$0.isMuted
+        }
         for track in visualTracks.reversed() {
             for clip in track.clips.sorted(by: { $0.timelineStart < $1.timelineStart }) {
                 guard clip.sourceRange.duration > 0 else { continue }
@@ -133,6 +143,7 @@ struct CompositionRenderService {
                         transform: clip.transform,
                         adjustments: clip.adjustments,
                         effectStack: clip.effectStack,
+                        shape: clip.shape,
                         renderOrder: renderOrder
                     )
                 )
@@ -226,7 +237,8 @@ struct CompositionRenderService {
             MotionaryVideoCompositionInstruction(
                 timeRange: CMTimeRange(start: .zero, duration: cmTime(duration)),
                 clips: clips,
-                renderSize: renderSettings.size
+                renderSize: renderSettings.size,
+                backgroundColor: renderSettings.backgroundColor
             )
         ]
         return AVVideoComposition(configuration: configuration)

@@ -243,6 +243,8 @@ struct HomeView: View {
             if hasOnlyThisVisual, let naturalSize = imported.source.naturalSize?.cgSize {
                 project.renderSettings = RenderSettings(size: naturalSize)
             }
+        case .shape:
+            return
         case .audio:
             let trackIndex: Int
             if let existingTrackIndex = project.tracks.firstIndex(where: { $0.kind == .audio }) {

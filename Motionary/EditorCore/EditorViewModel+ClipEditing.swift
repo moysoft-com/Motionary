@@ -39,8 +39,10 @@ extension EditorViewModel {
         guard let selectedClipID else { return }
         mutateProject { project in
             guard let location = project.clipLocation(id: selectedClipID) else { return }
+            let retainedTrackID = project.tracks[location.track].id
             project.tracks[location.track].clips.remove(at: location.clip)
             self.selectedClipID = nil
+            self.selectedTrackID = retainedTrackID
         }
     }
 

@@ -17,7 +17,10 @@ extension EditorViewModel {
         scrubSeekTask = nil
         importTask?.cancel()
         importTask = nil
+        exportTask?.cancel()
+        exportTask = nil
         isImporting = false
+        isExporting = false
         pendingScrubSeekTime = nil
         isRenderingPreview = false
         if let observer = timeObserver {
@@ -27,6 +30,26 @@ extension EditorViewModel {
         player?.pause()
         player = nil
         isPlaying = false
+    }
+
+    func cancelLongRunningTask() {
+        if isExporting {
+            exportTask?.cancel()
+            exportTask = nil
+            isExporting = false
+            return
+        }
+        if isImporting {
+            importTask?.cancel()
+            importTask = nil
+            isImporting = false
+            return
+        }
+        if isRenderingPreview {
+            rebuildTask?.cancel()
+            rebuildTask = nil
+            isRenderingPreview = false
+        }
     }
 
     func togglePlayback() {

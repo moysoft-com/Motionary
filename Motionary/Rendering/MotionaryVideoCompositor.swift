@@ -4,12 +4,14 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
+import UIKit
 
 /// Applies clip ordering, transforms, adjustments, effects, and opacity to each output frame.
 final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     private let renderQueue = DispatchQueue(label: "com.motionary.video-compositor.render")
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
     private var shouldCancelAllRequests = false
+    private var shapeImageCache: [String: CIImage] = [:]
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [
@@ -57,18 +59,28 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
 
                 let renderSize = instruction.renderSize
                 let canvasRect = CGRect(origin: .zero, size: renderSize)
-                var output = CIImage(color: CIColor(red: 0.015, green: 0.015, blue: 0.018, alpha: 1))
+                let background = instruction.backgroundColor
+                var output = CIImage(color: CIColor(
+                    red: background.red,
+                    green: background.green,
+                    blue: background.blue,
+                    alpha: background.alpha
+                ))
                     .cropped(to: canvasRect)
                 let time = CMTimeGetSeconds(asyncVideoCompositionRequest.compositionTime)
 
                 for clip in instruction.clips where self.isClip(clip, activeAt: time) {
-                    guard let sourceBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: clip.trackID) else {
-                        continue
-                    }
-
                     let localTime = max(0, time - clip.timelineStart)
-                    var image = CIImage(cvPixelBuffer: sourceBuffer)
-                    image = self.orientedImage(image, sourceTransform: clip.sourceTransform)
+                    var image: CIImage
+                    if let shape = clip.shape {
+                        image = self.shapeImage(shape, at: localTime, renderSize: renderSize)
+                    } else {
+                        guard let sourceBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: clip.trackID) else {
+                            continue
+                        }
+                        image = CIImage(cvPixelBuffer: sourceBuffer)
+                        image = self.orientedImage(image, sourceTransform: clip.sourceTransform)
+                    }
                     image = self.applyAdjustments(clip.adjustments, to: image, at: localTime)
                     image = self.applyEffects(clip.effectStack, to: image, at: localTime)
                     image = self.place(image, clip: clip, at: localTime, renderSize: renderSize)
@@ -102,6 +114,62 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         sourceTransform: CGAffineTransform
     ) -> CIImage {
         image.transformed(by: sourceTransform)
+    }
+
+    private func shapeImage(_ shape: ClipShape, at time: Double, renderSize: CGSize) -> CIImage {
+        let resolvedWidth = shape.width.value(at: time)
+        let resolvedHeight = shape.height.value(at: time)
+        let resolvedCornerRadius = shape.cornerRadius.value(at: time)
+        let cacheKey = [
+            shape.kind.rawValue,
+            String(shape.color.red),
+            String(shape.color.green),
+            String(shape.color.blue),
+            String(shape.color.alpha),
+            String(resolvedWidth),
+            String(resolvedHeight),
+            String(resolvedCornerRadius),
+            "\(renderSize.width)",
+            "\(renderSize.height)"
+        ].joined(separator: ":")
+        if let cached = shapeImageCache[cacheKey] {
+            return cached
+        }
+
+        let width = min(max(CGFloat(resolvedWidth), 1), renderSize.width)
+        let height = min(max(CGFloat(resolvedHeight), 1), renderSize.height)
+        let shapeRect = CGRect(
+            x: (renderSize.width - width) * 0.5,
+            y: (renderSize.height - height) * 0.5,
+            width: width,
+            height: height
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let image = UIGraphicsImageRenderer(size: renderSize, format: format).image { context in
+            UIColor(
+                red: CGFloat(shape.color.red),
+                green: CGFloat(shape.color.green),
+                blue: CGFloat(shape.color.blue),
+                alpha: CGFloat(shape.color.alpha)
+            ).setFill()
+            let bounds = shapeRect.insetBy(dx: 1, dy: 1)
+            switch shape.kind {
+            case .rectangle:
+                context.fill(bounds)
+            case .roundedRectangle:
+                UIBezierPath(
+                    roundedRect: bounds,
+                    cornerRadius: min(CGFloat(resolvedCornerRadius), min(width, height) * 0.5)
+                ).fill()
+            case .circle:
+                context.cgContext.fillEllipse(in: bounds)
+            }
+        }
+        let rendered = image.cgImage.map(CIImage.init(cgImage:)) ?? CIImage.empty()
+        shapeImageCache[cacheKey] = rendered
+        return rendered
     }
 
     private func place(_ image: CIImage, clip: RenderClipDescriptor, at time: Double, renderSize: CGSize) -> CIImage {

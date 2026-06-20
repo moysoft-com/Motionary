@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 
 enum CoreEditorPanel: Equatable {
     case timeline
+    case shape
     case transform
     case adjust
     case effects
@@ -22,6 +23,7 @@ struct ProjectEditorView: View {
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedMediaItems: [PhotosPickerItem] = []
+    @State private var selectedReplacementItem: PhotosPickerItem?
     @State private var selectedAudioVideoItem: PhotosPickerItem?
     @State private var isAudioFileImporterPresented = false
     @State private var isExportSettingsPresented = false
@@ -30,6 +32,7 @@ struct ProjectEditorView: View {
     @State private var miniTimelinePixelsPerSecond: CGFloat = 88
     @State private var propertyContextClipID: UUID?
     @State private var graphReturnPanel: CoreEditorPanel = .transform
+    @State private var isCancelTaskConfirmationPresented = false
 
     init(projectID: UUID, projectStore: ProjectStore, initialContent: ProjectContent) {
         self.projectID = projectID
@@ -51,6 +54,7 @@ struct ProjectEditorView: View {
         .toolbar(.hidden, for: .tabBar)
         .navigationTitle(viewModel.project.title)
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(viewModel.isPerformingLongTask)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
@@ -59,7 +63,7 @@ struct ProjectEditorView: View {
                 } label: {
                     Label("Export", systemImage: "square.and.arrow.down")
                 }
-                .disabled(!viewModel.canExportVideo || viewModel.isExporting)
+                .disabled(!viewModel.canExportVideo || viewModel.isPerformingLongTask)
                 .accessibilityLabel("Export")
                 .labelStyle(.titleAndIcon)
             }
@@ -79,6 +83,11 @@ struct ProjectEditorView: View {
             guard let item else { return }
             viewModel.importAudioFromPhotosItem(item)
             selectedAudioVideoItem = nil
+        }
+        .onChange(of: selectedReplacementItem) { _, item in
+            guard let item else { return }
+            viewModel.replaceSelectedMedia(with: item)
+            selectedReplacementItem = nil
         }
         .onChange(of: viewModel.selectedClipID) { _, clipID in
             if let clipID, activePanel.isPropertyPanel || activePanel == .graph {
@@ -148,11 +157,22 @@ struct ProjectEditorView: View {
                 viewModel.exportProject(settings: settings)
             }
         }
+        .confirmationDialog(
+            "Stop the current task?",
+            isPresented: $isCancelTaskConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Stop Task", role: .destructive) {
+                viewModel.cancelLongRunningTask()
+            }
+            Button("Keep Waiting", role: .cancel) {}
+        } message: {
+            Text("The current import, export, or preview preparation will be cancelled.")
+        }
     }
 
     private func editorCanvas(geometry: GeometryProxy) -> some View {
         let availableHeight = max(geometry.size.height - geometry.safeAreaInsets.bottom - 12, 1)
-        let bottomBarHeight: CGFloat = 72
         let showsMiniTimeline = activePanel.isPropertyPanel || activePanel == .graph
         let miniTimelineHeight: CGFloat = showsMiniTimeline ? 52 : 0
         let controlHeight: CGFloat = 42
@@ -164,11 +184,6 @@ struct ProjectEditorView: View {
             previewRatio = 0.31
         }
         let previewHeight = availableHeight * previewRatio
-        let workspaceHeight = max(
-            availableHeight - previewHeight - miniTimelineHeight - controlHeight - bottomBarHeight - 30,
-            170
-        )
-
         return ZStack {
             MotionaryTheme.background(for: colorScheme).ignoresSafeArea()
 
@@ -207,6 +222,7 @@ struct ProjectEditorView: View {
                 CoreToolBar(
                     viewModel: viewModel,
                     selectedMediaItems: $selectedMediaItems,
+                    selectedReplacementItem: $selectedReplacementItem,
                     selectedAudioVideoItem: $selectedAudioVideoItem,
                     isAudioFileImporterPresented: $isAudioFileImporterPresented,
                     activePanel: $activePanel,
@@ -216,7 +232,9 @@ struct ProjectEditorView: View {
             }
             .padding()
 
-            EditorBusyOverlay(viewModel: viewModel)
+            EditorBusyOverlay(viewModel: viewModel) {
+                isCancelTaskConfirmationPresented = true
+            }
 
             if let message = viewModel.confirmationMessage {
                 MotionaryConfirmationToast(message: message)
@@ -237,6 +255,11 @@ struct ProjectEditorView: View {
             CoreTimelineView(
                 viewModel: viewModel,
                 pixelsPerSecond: $pixelsPerSecond
+            )
+        case .shape:
+            ShapeWorkspaceView(
+                viewModel: viewModel,
+                clip: propertyContextClip
             )
         case .transform:
             TransformWorkspaceView(
@@ -366,11 +389,13 @@ private struct EditorPlaybackControlBar: View {
 
 extension CoreEditorPanel {
     var isPropertyPanel: Bool {
-        self == .transform || self == .adjust || self == .effects || self == .audio
+        self == .shape || self == .transform || self == .adjust || self == .effects || self == .audio
     }
 
     var keyframeSection: KeyframeSection? {
         switch self {
+        case .shape:
+            .shape
         case .transform:
             .transform
         case .adjust:

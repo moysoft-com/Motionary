@@ -13,6 +13,7 @@ enum ClipMediaType: String, Codable, CaseIterable {
 enum TrackKind: String, Codable, CaseIterable {
     case undefined
     case visual
+    case shape
     case audio
 }
 

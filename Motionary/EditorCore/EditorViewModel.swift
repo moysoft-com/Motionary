@@ -39,15 +39,33 @@ final class EditorViewModel: ObservableObject {
     var rebuildTask: Task<Void, Never>?
     var scrubSeekTask: Task<Void, Never>?
     var importTask: Task<Void, Never>?
+    var exportTask: Task<Void, Never>?
     var toastTask: Task<Void, Never>?
     var pendingScrubSeekTime: Double?
     var interactiveEditSnapshot: EditorProject?
     let clipRevealEpsilon = 0.01
 
     var duration: Double { project.duration }
+    var longRunningTaskTitle: String? {
+        if isExporting {
+            return "Exporting \(Int(exportProgress * 100))%"
+        }
+        if isImporting {
+            return "Importing"
+        }
+        if isRenderingPreview {
+            return "Preparing Preview"
+        }
+        return nil
+    }
+
+    var isPerformingLongTask: Bool {
+        longRunningTaskTitle != nil
+    }
     var canExportVideo: Bool {
         project.tracks.contains { track in
-            track.kind == .visual && track.clips.contains { $0.mediaType != .audio }
+            (track.kind == .visual || track.kind == .shape)
+                && track.clips.contains { $0.mediaType != .audio }
         }
     }
 

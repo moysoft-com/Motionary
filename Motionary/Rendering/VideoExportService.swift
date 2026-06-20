@@ -99,7 +99,8 @@ struct VideoExportService {
         renderProject.renderSettings = RenderSettings(
             width: settings.width,
             height: settings.height,
-            frameRate: settings.frameRate
+            frameRate: settings.frameRate,
+            backgroundColor: project.renderSettings.backgroundColor
         )
 
         let rendered = try await renderService.makeComposition(for: renderProject)
@@ -230,8 +231,13 @@ struct VideoExportService {
             duration: duration,
             progress: progress
         )
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            DispatchQueue(label: "com.motionary.video-export", qos: .userInitiated).async {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue(label: "com.motionary.video-export", qos: .userInitiated).async {
+                    guard !pipeline.isCancelled else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
                 guard pipeline.reader.startReading() else {
                     continuation.resume(
                         throwing: VideoExportError.exportFailed(
@@ -254,6 +260,10 @@ struct VideoExportService {
                 var failedError: Error?
 
                 while (!videoFinished || !audioFinished) && failedError == nil {
+                    if pipeline.isCancelled {
+                        failedError = CancellationError()
+                        break
+                    }
                     var appendedSample = false
 
                     if !videoFinished, pipeline.videoInput.isReadyForMoreMediaData {
@@ -318,7 +328,9 @@ struct VideoExportService {
                 }
 
                 pipeline.writer.finishWriting {
-                    if pipeline.writer.status == .completed {
+                    if pipeline.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if pipeline.writer.status == .completed {
                         pipeline.progress(1)
                         continuation.resume()
                     } else {
@@ -329,6 +341,9 @@ struct VideoExportService {
                     }
                 }
             }
+            }
+        } onCancel: {
+            pipeline.requestCancellation()
         }
     }
 }
@@ -342,6 +357,12 @@ private final class ExportPipelineState: @unchecked Sendable {
     let audioInput: AVAssetWriterInput?
     let duration: Double
     let progress: @Sendable (Double) -> Void
+    private let cancellationLock = NSLock()
+    private var cancellationRequested = false
+
+    var isCancelled: Bool {
+        cancellationLock.withLock { cancellationRequested }
+    }
 
     init(
         reader: AVAssetReader,
@@ -361,6 +382,14 @@ private final class ExportPipelineState: @unchecked Sendable {
         self.audioInput = audioInput
         self.duration = duration
         self.progress = progress
+    }
+
+    func requestCancellation() {
+        cancellationLock.withLock {
+            cancellationRequested = true
+        }
+        reader.cancelReading()
+        writer.cancelWriting()
     }
 }
 

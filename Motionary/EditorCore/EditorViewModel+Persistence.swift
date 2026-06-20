@@ -66,6 +66,8 @@ extension EditorViewModel {
                 .map(\.timelineEnd)
                 .max() ?? 0
             return visualDuration
+        case .shape:
+            return currentTime
         case .audio:
             return min(currentTime, max(project.duration, currentTime))
         }

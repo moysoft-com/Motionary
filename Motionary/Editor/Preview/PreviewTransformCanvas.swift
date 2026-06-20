@@ -388,6 +388,31 @@ struct PreviewTransformCanvas: View {
     }
 
     private func previewFrame(for clip: TimelineClip) -> PreviewClipFrame? {
+        if let shape = clip.shape {
+            let renderSize = viewModel.project.renderSettings.size
+            guard renderSize.width > 0, renderSize.height > 0,
+                canvasRect.width > 0, canvasRect.height > 0
+            else { return nil }
+            let localTime = localTime(for: clip)
+            let scale = clip.transform.scale.value(at: localTime)
+            let size = CGSize(
+                width: CGFloat(shape.width.value(at: localTime)) * canvasRect.width / renderSize.width
+                    * max(scale.x, 0.01),
+                height: CGFloat(shape.height.value(at: localTime)) * canvasRect.height / renderSize.height
+                    * max(scale.y, 0.01)
+            )
+            let center = previewCenter(for: clip)
+            return PreviewClipFrame(
+                rect: CGRect(
+                    x: center.x - size.width * 0.5,
+                    y: center.y - size.height * 0.5,
+                    width: size.width,
+                    height: size.height
+                ),
+                rotationDegrees: -clip.transform.rotationDegrees.value(at: localTime)
+            )
+        }
+
         let sourceSize = clip.source.naturalSize?.cgSize ?? viewModel.project.renderSettings.size
         guard sourceSize.width > 0, sourceSize.height > 0, canvasRect.width > 0, canvasRect.height > 0 else {
             return nil
@@ -414,6 +439,17 @@ struct PreviewTransformCanvas: View {
     }
 
     private func previewBaseSize(for clip: TimelineClip) -> CGSize? {
+        if let shape = clip.shape {
+            let renderSize = viewModel.project.renderSettings.size
+            guard renderSize.width > 0, renderSize.height > 0,
+                canvasRect.width > 0, canvasRect.height > 0
+            else { return nil }
+            return CGSize(
+                width: CGFloat(shape.width.value(at: localTime(for: clip))) * canvasRect.width / renderSize.width,
+                height: CGFloat(shape.height.value(at: localTime(for: clip))) * canvasRect.height / renderSize.height
+            )
+        }
+
         let sourceSize = clip.source.naturalSize?.cgSize ?? viewModel.project.renderSettings.size
         guard sourceSize.width > 0, sourceSize.height > 0, canvasRect.width > 0, canvasRect.height > 0 else {
             return nil

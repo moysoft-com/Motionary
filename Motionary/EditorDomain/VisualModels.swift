@@ -2,6 +2,7 @@
 
 import CoreGraphics
 import Foundation
+import SwiftUI
 
 struct ScaleValue: Codable, Equatable {
     var x: Double
@@ -321,25 +322,82 @@ struct EffectStack: Codable, Equatable {
     }
 }
 
+struct RGBAColor: Codable, Equatable, Hashable {
+    var red: Double
+    var green: Double
+    var blue: Double
+    var alpha: Double
+
+    static let black = RGBAColor(red: 0, green: 0, blue: 0, alpha: 1)
+    static let white = RGBAColor(red: 1, green: 1, blue: 1, alpha: 1)
+    static let orange = RGBAColor(red: 1, green: 0.48, blue: 0, alpha: 1)
+
+    init(red: Double, green: Double, blue: Double, alpha: Double = 1) {
+        self.red = min(max(red, 0), 1)
+        self.green = min(max(green, 0), 1)
+        self.blue = min(max(blue, 0), 1)
+        self.alpha = min(max(alpha, 0), 1)
+    }
+
+    init(_ color: Color) {
+        let resolved = color.resolve(in: EnvironmentValues())
+        self.init(
+            red: Double(resolved.red),
+            green: Double(resolved.green),
+            blue: Double(resolved.blue),
+            alpha: Double(resolved.opacity)
+        )
+    }
+
+    var swiftUIColor: Color {
+        Color(red: red, green: green, blue: blue, opacity: alpha)
+    }
+}
+
 /// Canvas dimensions and output frame rate.
 struct RenderSettings: Codable, Equatable {
     var width: Int
     var height: Int
     var frameRate: Int32
+    var backgroundColor: RGBAColor
 
     var size: CGSize { CGSize(width: width, height: height) }
 
-    init(width: Int = 1080, height: Int = 1920, frameRate: Int32 = 30) {
+    init(
+        width: Int = 1080,
+        height: Int = 1920,
+        frameRate: Int32 = 30,
+        backgroundColor: RGBAColor = .black
+    ) {
         self.width = width
         self.height = height
         self.frameRate = frameRate
+        self.backgroundColor = backgroundColor
     }
 
-    init(size: CGSize, frameRate: Int32 = 30) {
+    init(size: CGSize, frameRate: Int32 = 30, backgroundColor: RGBAColor = .black) {
         let safeWidth = max(Int(size.width.rounded()), 1)
         let safeHeight = max(Int(size.height.rounded()), 1)
         self.width = safeWidth
         self.height = safeHeight
         self.frameRate = frameRate
+        self.backgroundColor = backgroundColor
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case width
+        case height
+        case frameRate
+        case backgroundColor
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        width = try container.decode(Int.self, forKey: .width)
+        height = try container.decode(Int.self, forKey: .height)
+        frameRate = try container.decode(Int32.self, forKey: .frameRate)
+        backgroundColor =
+            try container.decodeIfPresent(RGBAColor.self, forKey: .backgroundColor)
+            ?? .black
     }
 }

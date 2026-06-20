@@ -6,6 +6,7 @@ import SwiftUI
 struct CoreToolBar: View {
     @ObservedObject var viewModel: EditorViewModel
     @Binding var selectedMediaItems: [PhotosPickerItem]
+    @Binding var selectedReplacementItem: PhotosPickerItem?
     @Binding var selectedAudioVideoItem: PhotosPickerItem?
     @Binding var isAudioFileImporterPresented: Bool
     @Binding var activePanel: CoreEditorPanel
@@ -15,12 +16,41 @@ struct CoreToolBar: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
-                    CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
+                if canReplaceSelectedMedia {
+                    PhotosPicker(
+                        selection: $selectedReplacementItem,
+                        matching: .any(of: [.images, .videos])
+                    ) {
+                        CoreToolButtonContent(
+                            systemName: "arrow.triangle.2.circlepath",
+                            title: "Replace",
+                            isProminent: true
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isImporting)
+                    .accessibilityLabel("Replace selected media")
+                } else {
+                    PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
+                        CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(viewModel.isImporting)
+                    .accessibilityLabel("Import media")
                 }
-                .buttonStyle(.plain)
-                .disabled(viewModel.isImporting)
-                .accessibilityLabel("Import media")
+
+                if viewModel.selectedClip?.shape != nil {
+                    CoreToolButton(
+                        systemName: "slider.horizontal.3",
+                        title: "Edit",
+                        isSelected: activePanel == .shape
+                    ) {
+                        propertyContextClipID = viewModel.selectedClipID
+                        activePanel = activePanel == .shape ? .timeline : .shape
+                    }
+                } else {
+                    ShapeToolMenu(viewModel: viewModel)
+                }
                 
                 AudioImportMenu(
                     viewModel: viewModel,
@@ -140,6 +170,7 @@ struct CoreToolBar: View {
                     .overlay(Color.white.opacity(0.14))
 
                 CanvasRatioMenu(viewModel: viewModel)
+                CanvasColorMenu(viewModel: viewModel)
             }
             .padding(8)
         }
@@ -157,6 +188,11 @@ struct CoreToolBar: View {
         return clip?.mediaType == .audio || clip?.mediaType == .video
     }
 
+    private var canReplaceSelectedMedia: Bool {
+        guard let clip = viewModel.selectedClip else { return false }
+        return clip.mediaType != .audio && clip.shape == nil
+    }
+
     private func propertyToolSystemName(
         for panel: CoreEditorPanel,
         fallback: String
@@ -171,6 +207,27 @@ struct CoreToolBar: View {
         fallback: String
     ) -> String {
         activePanel == .graph && graphReturnPanel == panel ? "Graphs" : fallback
+    }
+}
+
+private struct ShapeToolMenu: View {
+    @ObservedObject var viewModel: EditorViewModel
+
+    var body: some View {
+        Menu {
+            ForEach(ClipShapeKind.allCases) { kind in
+                Button {
+                    viewModel.addShape(kind)
+                } label: {
+                    Label(kind.title, systemImage: kind.systemImage)
+                }
+            }
+        } label: {
+            CoreToolButtonContent(systemName: "square.on.circle", title: "Shape")
+        }
+        .buttonStyle(.plain)
+        .disabled(viewModel.isImporting)
+        .accessibilityLabel("Add shape")
     }
 }
 
@@ -249,5 +306,29 @@ struct CanvasRatioMenu: View {
     private func isSelected(_ preset: CanvasRatioPreset) -> Bool {
         viewModel.project.renderSettings.width == preset.width
             && viewModel.project.renderSettings.height == preset.height
+    }
+}
+
+private struct CanvasColorMenu: View {
+    @ObservedObject var viewModel: EditorViewModel
+
+    var body: some View {
+        Menu {
+            ColorPicker(
+                "Canvas Color",
+                selection: Binding(
+                    get: { viewModel.project.renderSettings.backgroundColor.swiftUIColor },
+                    set: { viewModel.setCanvasBackgroundColor(RGBAColor($0)) }
+                ),
+                supportsOpacity: false
+            )
+            Button("Reset to Black") {
+                viewModel.setCanvasBackgroundColor(.black)
+            }
+        } label: {
+            CoreToolButtonContent(systemName: "paintpalette", title: "Canvas")
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Canvas color")
     }
 }

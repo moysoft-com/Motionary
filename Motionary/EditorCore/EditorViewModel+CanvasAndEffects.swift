@@ -5,7 +5,26 @@ import Foundation
 extension EditorViewModel {
     func setCanvasPreset(_ preset: CanvasRatioPreset) {
         mutateProject {
-            $0.renderSettings = preset.settings(frameRate: $0.renderSettings.frameRate)
+            $0.renderSettings = preset.settings(
+                frameRate: $0.renderSettings.frameRate,
+                backgroundColor: $0.renderSettings.backgroundColor
+            )
+        }
+    }
+
+    func setCanvasBackgroundColor(_ color: RGBAColor) {
+        mutateProject(refreshTimeline: false) {
+            $0.renderSettings.backgroundColor = color
+        }
+    }
+
+    func setSelectedShape(
+        color: RGBAColor? = nil
+    ) {
+        updateSelectedClip { clip in
+            guard var shape = clip.shape else { return }
+            if let color { shape.color = color }
+            clip.shape = shape
         }
     }
 
@@ -21,7 +40,11 @@ extension EditorViewModel {
         else { return }
 
         mutateProject {
-            $0.renderSettings = RenderSettings(size: naturalSize, frameRate: $0.renderSettings.frameRate)
+            $0.renderSettings = RenderSettings(
+                size: naturalSize,
+                frameRate: $0.renderSettings.frameRate,
+                backgroundColor: $0.renderSettings.backgroundColor
+            )
         }
     }
 

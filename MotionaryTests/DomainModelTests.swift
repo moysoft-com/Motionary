@@ -120,4 +120,16 @@ struct DomainModelTests {
 
         #expect(decoded == transform)
     }
+
+    @Test func legacyRenderSettingsDefaultToPureBlackCanvas() async throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "width": 1080,
+            "height": 1920,
+            "frameRate": 30
+        ])
+
+        let settings = try JSONDecoder().decode(RenderSettings.self, from: data)
+
+        #expect(settings.backgroundColor == .black)
+    }
 }

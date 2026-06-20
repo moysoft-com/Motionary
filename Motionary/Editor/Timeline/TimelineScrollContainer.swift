@@ -301,6 +301,8 @@ func timelineTrackIcon(for kind: TrackKind) -> String {
         "square.dashed"
     case .visual:
         "square.stack.3d.up"
+    case .shape:
+        "square.fill"
     case .audio:
         "waveform"
     }
@@ -312,6 +314,8 @@ func timelineTrackColor(for kind: TrackKind) -> Color {
         MotionaryTheme.accent
     case .visual:
         MotionaryTheme.video
+    case .shape:
+        .orange
     case .audio:
         MotionaryTheme.audio
     }

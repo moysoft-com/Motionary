@@ -92,6 +92,10 @@ extension EditorProject {
             let insertionIndex = tracks.firstIndex(where: { $0.kind == .visual }) ?? 0
             tracks.insert(TimelineTrack(name: nextTrackName(for: kind), kind: kind), at: insertionIndex)
             return insertionIndex
+        case .shape:
+            let insertionIndex = tracks.firstIndex(where: { $0.kind == .visual || $0.kind == .shape }) ?? 0
+            tracks.insert(TimelineTrack(name: nextTrackName(for: kind), kind: kind), at: insertionIndex)
+            return insertionIndex
         case .audio:
             tracks.append(TimelineTrack(name: nextTrackName(for: kind), kind: kind))
             return tracks.count - 1
@@ -139,6 +143,7 @@ extension EditorProject {
 
     mutating func renumberTracks() {
         var visualIndex = 1
+        var shapeIndex = 1
         var audioIndex = 1
         for index in tracks.indices {
             switch tracks[index].kind {
@@ -147,6 +152,9 @@ extension EditorProject {
             case .visual:
                 tracks[index].name = "Layer \(visualIndex)"
                 visualIndex += 1
+            case .shape:
+                tracks[index].name = "Shape \(shapeIndex)"
+                shapeIndex += 1
             case .audio:
                 tracks[index].name = "Audio \(audioIndex)"
                 audioIndex += 1
@@ -157,7 +165,12 @@ extension EditorProject {
     private func nextTrackName(for kind: TrackKind) -> String {
         guard kind != .undefined else { return "Layer" }
         let count = tracks.filter { $0.kind == kind }.count + 1
-        return kind == .visual ? "Layer \(count)" : "Audio \(count)"
+        switch kind {
+        case .undefined: return "Layer"
+        case .visual: return "Layer \(count)"
+        case .shape: return "Shape \(count)"
+        case .audio: return "Audio \(count)"
+        }
     }
 
     func resolvedPlacementStart(

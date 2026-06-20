@@ -18,6 +18,8 @@ struct CorePreviewSection: View {
                     let localCanvasRect = CGRect(origin: .zero, size: canvasRect.size)
 
                     ZStack {
+                        viewModel.project.renderSettings.backgroundColor.swiftUIColor
+
                         Color.clear
                             .contentShape(Rectangle())
                             .onTapGesture {
@@ -39,20 +41,25 @@ struct CorePreviewSection: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "film")
-                        .font(.system(size: 34, weight: .regular))
-                        .foregroundStyle(MotionaryTheme.accent)
-                    PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
-                        Label("Import Media", systemImage: "plus")
-                            .font(.subheadline.weight(.semibold))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                            .foregroundStyle(Color.black)
-                            .background(
-                                MotionaryTheme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                ZStack {
+                    viewModel.project.renderSettings.backgroundColor.swiftUIColor
+                    VStack(spacing: 12) {
+                        Image(systemName: "film")
+                            .font(.system(size: 34, weight: .regular))
+                            .foregroundStyle(MotionaryTheme.accent)
+                        PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
+                            Label("Import Media", systemImage: "plus")
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                                .foregroundStyle(Color.black)
+                                .background(
+                                    MotionaryTheme.accent,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
