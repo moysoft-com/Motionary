@@ -88,7 +88,7 @@ struct LayerManagementTests {
     }
 
     @MainActor
-    @Test func deletingLastClipKeepsItsTypedLayer() async throws {
+    @Test func deletingLastClipRemovesItsLayer() async throws {
         let trackID = UUID()
         let clipID = UUID()
         let clip = TimelineClip(
@@ -117,10 +117,9 @@ struct LayerManagementTests {
 
         viewModel.deleteSelectedClip()
 
-        #expect(viewModel.project.tracks.count == 1)
-        #expect(viewModel.project.tracks[0].id == trackID)
-        #expect(viewModel.project.tracks[0].clips.isEmpty)
-        #expect(viewModel.selectedTrackID == trackID)
+        #expect(viewModel.project.tracks.isEmpty)
+        #expect(viewModel.selectedClipID == nil)
+        #expect(viewModel.selectedTrackID == nil)
     }
 
     @MainActor

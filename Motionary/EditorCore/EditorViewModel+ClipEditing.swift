@@ -39,10 +39,19 @@ extension EditorViewModel {
         guard let selectedClipID else { return }
         mutateProject { project in
             guard let location = project.clipLocation(id: selectedClipID) else { return }
-            let retainedTrackID = project.tracks[location.track].id
             project.tracks[location.track].clips.remove(at: location.clip)
             self.selectedClipID = nil
-            self.selectedTrackID = retainedTrackID
+
+            if project.tracks[location.track].clips.isEmpty {
+                project.tracks.remove(at: location.track)
+                let replacementIndex = min(location.track, max(project.tracks.count - 1, 0))
+                self.selectedTrackID =
+                    project.tracks.indices.contains(replacementIndex)
+                    ? project.tracks[replacementIndex].id
+                    : nil
+            } else {
+                self.selectedTrackID = project.tracks[location.track].id
+            }
         }
     }
 

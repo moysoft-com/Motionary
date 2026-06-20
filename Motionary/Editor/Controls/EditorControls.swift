@@ -7,7 +7,7 @@ struct CoreToolBar: View {
     @ObservedObject var viewModel: EditorViewModel
     @Binding var selectedMediaItems: [PhotosPickerItem]
     @Binding var selectedReplacementItem: PhotosPickerItem?
-    @Binding var selectedAudioVideoItem: PhotosPickerItem?
+    @Binding var isAudioVideoPickerPresented: Bool
     @Binding var isAudioFileImporterPresented: Bool
     @Binding var activePanel: CoreEditorPanel
     @Binding var propertyContextClipID: UUID?
@@ -54,7 +54,7 @@ struct CoreToolBar: View {
                 
                 AudioImportMenu(
                     viewModel: viewModel,
-                    selectedAudioVideoItem: $selectedAudioVideoItem,
+                    isAudioVideoPickerPresented: $isAudioVideoPickerPresented,
                     isAudioFileImporterPresented: $isAudioFileImporterPresented
                 )
 
@@ -233,12 +233,14 @@ private struct ShapeToolMenu: View {
 
 private struct AudioImportMenu: View {
     @ObservedObject var viewModel: EditorViewModel
-    @Binding var selectedAudioVideoItem: PhotosPickerItem?
+    @Binding var isAudioVideoPickerPresented: Bool
     @Binding var isAudioFileImporterPresented: Bool
 
     var body: some View {
         Menu {
-            PhotosPicker(selection: $selectedAudioVideoItem, matching: .videos) {
+            Button {
+                isAudioVideoPickerPresented = true
+            } label: {
                 Label("From Video Library", systemImage: "photo.on.rectangle")
             }
 

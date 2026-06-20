@@ -25,6 +25,7 @@ struct ProjectEditorView: View {
     @State private var selectedMediaItems: [PhotosPickerItem] = []
     @State private var selectedReplacementItem: PhotosPickerItem?
     @State private var selectedAudioVideoItem: PhotosPickerItem?
+    @State private var isAudioVideoPickerPresented = false
     @State private var isAudioFileImporterPresented = false
     @State private var isExportSettingsPresented = false
     @State private var activePanel: CoreEditorPanel = .timeline
@@ -151,6 +152,11 @@ struct ProjectEditorView: View {
                 viewModel.errorMessage = error.localizedDescription
             }
         }
+        .photosPicker(
+            isPresented: $isAudioVideoPickerPresented,
+            selection: $selectedAudioVideoItem,
+            matching: .videos
+        )
         .sheet(isPresented: $isExportSettingsPresented) {
             ExportSettingsView(project: viewModel.project) { settings in
                 isExportSettingsPresented = false
@@ -223,7 +229,7 @@ struct ProjectEditorView: View {
                     viewModel: viewModel,
                     selectedMediaItems: $selectedMediaItems,
                     selectedReplacementItem: $selectedReplacementItem,
-                    selectedAudioVideoItem: $selectedAudioVideoItem,
+                    isAudioVideoPickerPresented: $isAudioVideoPickerPresented,
                     isAudioFileImporterPresented: $isAudioFileImporterPresented,
                     activePanel: $activePanel,
                     propertyContextClipID: $propertyContextClipID,
