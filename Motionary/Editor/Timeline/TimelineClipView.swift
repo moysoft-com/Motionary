@@ -87,12 +87,9 @@ struct TimelineClipBlock: View {
             if !isDragSourceHidden && !isDragGhost {
                 TimelineKeyframeMarkers(
                     times: previewClip.allKeyframeTimes,
-                    clipStart: previewClip.timelineStart,
                     duration: previewClip.sourceRange.duration,
                     width: displayWidth,
-                    height: height,
-                    currentTime: currentTime,
-                    tolerance: keyframeTolerance
+                    height: height
                 )
                 .allowsHitTesting(false)
                 .zIndex(2)
@@ -271,24 +268,20 @@ struct TimelineClipBlock: View {
 
 private struct TimelineKeyframeMarkers: View {
     let times: [Double]
-    let clipStart: Double
     let duration: Double
     let width: CGFloat
     let height: CGFloat
-    let currentTime: Double
-    let tolerance: Double
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             ForEach(times, id: \.self) { time in
-                let isCurrent = abs((clipStart + time) - currentTime) <= tolerance
                 KeyframeDiamondShape()
-                    .fill(isCurrent ? Color.white : Color.clear)
+                    .fill(Color.clear)
                     .overlay {
                         KeyframeDiamondShape()
-                            .stroke(Color.white, lineWidth: 1.5)
+                            .stroke(Color.white.opacity(0.72), lineWidth: 1.2)
                     }
-                    .frame(width: 12, height: 12)
+                    .frame(width: 9, height: 9)
                     .position(
                         x: min(
                             max(CGFloat(time / max(duration, 0.001)) * width, 7),

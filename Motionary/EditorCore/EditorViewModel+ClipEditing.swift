@@ -3,8 +3,10 @@
 import Foundation
 
 extension EditorViewModel {
-    func splitSelectedClip() {
-        guard let targetID = selectedClipID else { return }
+    @discardableResult
+    func splitSelectedClip() -> UUID? {
+        guard let targetID = selectedClipID else { return nil }
+        var splitClipID: UUID?
 
         mutateProject { project in
             guard let location = project.clipLocation(id: targetID) else { return }
@@ -28,7 +30,9 @@ extension EditorViewModel {
             project.tracks[location.track].clips[location.clip] = first
             project.tracks[location.track].clips.insert(second, at: location.clip + 1)
             selectedClipID = second.id
+            splitClipID = second.id
         }
+        return splitClipID
     }
 
     func deleteSelectedClip() {

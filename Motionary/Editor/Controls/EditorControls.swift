@@ -10,6 +10,7 @@ struct CoreToolBar: View {
     @Binding var isAudioFileImporterPresented: Bool
     @Binding var activePanel: CoreEditorPanel
     @Binding var propertyContextClipID: UUID?
+    @Binding var graphReturnPanel: CoreEditorPanel
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -39,11 +40,16 @@ struct CoreToolBar: View {
                     .overlay(Color.white.opacity(0.14))
                 
                 CoreToolButton(
-                    systemName: "crop.rotate",
-                    title: "Transform",
-                    isSelected: activePanel == .transform,
+                    systemName: propertyToolSystemName(for: .transform, fallback: "crop.rotate"),
+                    title: propertyToolTitle(for: .transform, fallback: "Transform"),
+                    isSelected: isPropertyToolSelected(.transform),
                     isDisabled: viewModel.selectedClip == nil && propertyContextClipID == nil
                 ) {
+                    if activePanel == .graph, graphReturnPanel == .transform {
+                        viewModel.graphSegment = nil
+                        activePanel = .transform
+                        return
+                    }
                     if let selectedClipID = viewModel.selectedClipID {
                         propertyContextClipID = selectedClipID
                     }
@@ -55,7 +61,11 @@ struct CoreToolBar: View {
                     title: "Split",
                     isDisabled: viewModel.selectedClip == nil
                 ) {
-                    viewModel.splitSelectedClip()
+                    if let splitClipID = viewModel.splitSelectedClip(),
+                        activePanel.isPropertyPanel
+                    {
+                        propertyContextClipID = splitClipID
+                    }
                 }
 
                 CoreToolButton(
@@ -67,11 +77,16 @@ struct CoreToolBar: View {
                 }
                 
                 CoreToolButton(
-                    systemName: "slider.horizontal.3",
-                    title: "Adjust",
-                    isSelected: activePanel == .adjust,
+                    systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
+                    title: propertyToolTitle(for: .adjust, fallback: "Adjust"),
+                    isSelected: isPropertyToolSelected(.adjust),
                     isDisabled: viewModel.selectedClip == nil && propertyContextClipID == nil
                 ) {
+                    if activePanel == .graph, graphReturnPanel == .adjust {
+                        viewModel.graphSegment = nil
+                        activePanel = .adjust
+                        return
+                    }
                     if let selectedClipID = viewModel.selectedClipID {
                         propertyContextClipID = selectedClipID
                     }
@@ -79,15 +94,37 @@ struct CoreToolBar: View {
                 }
 
                 CoreToolButton(
-                    systemName: "sparkles.2",
-                    title: "Effects",
-                    isSelected: activePanel == .effects,
+                    systemName: propertyToolSystemName(for: .effects, fallback: "sparkles.2"),
+                    title: propertyToolTitle(for: .effects, fallback: "Effects"),
+                    isSelected: isPropertyToolSelected(.effects),
                     isDisabled: viewModel.selectedClip == nil && propertyContextClipID == nil
                 ) {
+                    if activePanel == .graph, graphReturnPanel == .effects {
+                        viewModel.graphSegment = nil
+                        activePanel = .effects
+                        return
+                    }
                     if let selectedClipID = viewModel.selectedClipID {
                         propertyContextClipID = selectedClipID
                     }
                     activePanel = activePanel == .effects ? .timeline : .effects
+                }
+
+                CoreToolButton(
+                    systemName: propertyToolSystemName(for: .audio, fallback: "speaker.wave.2"),
+                    title: propertyToolTitle(for: .audio, fallback: "Audio"),
+                    isSelected: isPropertyToolSelected(.audio),
+                    isDisabled: !hasAudioControls
+                ) {
+                    if activePanel == .graph, graphReturnPanel == .audio {
+                        viewModel.graphSegment = nil
+                        activePanel = .audio
+                        return
+                    }
+                    if let selectedClipID = viewModel.selectedClipID {
+                        propertyContextClipID = selectedClipID
+                    }
+                    activePanel = activePanel == .audio ? .timeline : .audio
                 }
 
                 CoreToolButton(
@@ -108,6 +145,32 @@ struct CoreToolBar: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .motionaryGlass(cornerRadius: 20)
+    }
+
+    private func isPropertyToolSelected(_ panel: CoreEditorPanel) -> Bool {
+        activePanel == panel || (activePanel == .graph && graphReturnPanel == panel)
+    }
+
+    private var hasAudioControls: Bool {
+        let clip = viewModel.selectedClip
+            ?? propertyContextClipID.flatMap { viewModel.project.clip(id: $0) }
+        return clip?.mediaType == .audio || clip?.mediaType == .video
+    }
+
+    private func propertyToolSystemName(
+        for panel: CoreEditorPanel,
+        fallback: String
+    ) -> String {
+        activePanel == .graph && graphReturnPanel == panel
+            ? "point.topleft.down.curvedto.point.bottomright.up"
+            : fallback
+    }
+
+    private func propertyToolTitle(
+        for panel: CoreEditorPanel,
+        fallback: String
+    ) -> String {
+        activePanel == .graph && graphReturnPanel == panel ? "Graphs" : fallback
     }
 }
 

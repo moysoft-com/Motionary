@@ -193,7 +193,7 @@ struct KeyframeEditingTests {
     }
 
     @MainActor
-    @Test func autoKeyAndCurveOffsetUsePredictableEditingRules() async throws {
+    @Test func propertyEditsAlwaysCreateAutomaticKeyframes() async throws {
         let clipID = UUID()
         let clip = TimelineClip(
             id: clipID,
@@ -221,18 +221,11 @@ struct KeyframeEditingTests {
         viewModel.seek(to: 1)
 
         viewModel.setSelectedKeyframeValue(0.8, target: .positionX)
-        var property = try #require(viewModel.selectedClip?.transform.positionX)
-        #expect(abs(property.keyframes[0].value - 0.3) < 0.0001)
-        #expect(abs(property.keyframes[1].value - 1.3) < 0.0001)
-        #expect(property.keyframes.count == 2)
-
-        viewModel.isAutoKeyEnabled = true
-        viewModel.setSelectedKeyframeValue(0.25, target: .positionX)
-        property = try #require(viewModel.selectedClip?.transform.positionX)
+        let property = try #require(viewModel.selectedClip?.transform.positionX)
         #expect(property.keyframes.count == 3)
         #expect(
             property.keyframes.contains {
-                abs($0.time - 1) < 0.0001 && abs($0.value - 0.25) < 0.0001
+                abs($0.time - 1) < 0.0001 && abs($0.value - 0.8) < 0.0001
             }
         )
 
@@ -473,8 +466,8 @@ struct KeyframeEditingTests {
         viewModel.seek(to: 4)
 
         #expect(viewModel.navigationPoints == [2, 2.5, 4, 5.5, 6])
-        #expect(viewModel.candidateGraphSegment?.startTime == 2)
-        #expect(viewModel.candidateGraphSegment?.endTime == 3.5)
+        #expect(viewModel.candidateGraphSegment(in: .transform)?.startTime == 2)
+        #expect(viewModel.candidateGraphSegment(in: .transform)?.endTime == 3.5)
 
         viewModel.seek(to: 2)
         #expect(!viewModel.canNavigateBackward)
@@ -485,6 +478,135 @@ struct KeyframeEditingTests {
         #expect(!viewModel.canNavigateForward)
         viewModel.navigateForward()
         #expect(viewModel.currentTime == 6)
+    }
+
+    @MainActor
+    @Test func sectionKeyframesCreateRemoveAndStaySynchronized() async throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Section keyframes",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/section.mov"),
+                mediaType: .video,
+                originalDuration: 3
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 3)
+        )
+        let viewModel = makeViewModel(clip: clip)
+        viewModel.selectClip(clipID, trackID: viewModel.project.tracks[0].id)
+
+        viewModel.seek(to: 0)
+        viewModel.toggleKeyframeSection(.transform)
+        viewModel.seek(to: 2)
+        viewModel.toggleKeyframeSection(.transform)
+        viewModel.seek(to: 1)
+        viewModel.setSelectedKeyframeValue(0.5, target: .positionX)
+
+        let edited = try #require(viewModel.selectedClip)
+        for target in edited.keyframeTargets(in: .transform) {
+            let times = try #require(
+                edited.animatableProperty(for: target)?.keyframes.map(\.time)
+            )
+            #expect(times == [0, 1, 2])
+        }
+
+        viewModel.toggleKeyframeSection(.transform)
+        let removed = try #require(viewModel.selectedClip)
+        for target in removed.keyframeTargets(in: .transform) {
+            let times = try #require(
+                removed.animatableProperty(for: target)?.keyframes.map(\.time)
+            )
+            #expect(times == [0, 2])
+        }
+    }
+
+    @MainActor
+    @Test func graphSelectionFollowsPlayheadWithinActiveSection() async throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Graph selection",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/graphs.mov"),
+                mediaType: .image,
+                originalDuration: 4
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 4),
+            transform: ClipTransform(
+                positionY: AnimatableProperty(
+                    baseValue: 0,
+                    keyframes: [
+                        Keyframe(time: 0, value: 0),
+                        Keyframe(time: 2, value: 1),
+                        Keyframe(time: 4, value: 0),
+                    ]
+                )
+            )
+        )
+        let viewModel = makeViewModel(clip: clip)
+        viewModel.selectClip(clipID, trackID: viewModel.project.tracks[0].id)
+        viewModel.activeKeyframeTarget = .positionY
+
+        viewModel.seek(to: 1)
+        viewModel.selectGraphSegment(atPlayheadIn: .transform)
+        #expect(viewModel.graphSegment?.section == .transform)
+        #expect(viewModel.graphSegment?.startTime == 0)
+        #expect(viewModel.graphSegment?.endTime == 2)
+
+        viewModel.seek(to: 3)
+        viewModel.selectGraphSegment(atPlayheadIn: .transform)
+        #expect(viewModel.graphSegment?.startTime == 2)
+        #expect(viewModel.graphSegment?.endTime == 4)
+
+        viewModel.seek(to: 4)
+        viewModel.selectGraphSegment(atPlayheadIn: .transform)
+        #expect(viewModel.graphSegment == nil)
+        #expect(viewModel.displayedGraphSegment?.startTime == 2)
+        #expect(viewModel.displayedGraphSegment?.endTime == 4)
+    }
+
+    @MainActor
+    @Test func graphInterpolationAppliesToEveryPropertyInSection() async throws {
+        let clipID = UUID()
+        let frames = [
+            Keyframe(time: 0, value: 0.0),
+            Keyframe(time: 2, value: 1.0),
+        ]
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Section graph",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/section-graph.mov"),
+                mediaType: .image,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2),
+            transform: ClipTransform(
+                positionX: AnimatableProperty(baseValue: 0, keyframes: frames),
+                positionY: AnimatableProperty(baseValue: 0, keyframes: frames),
+                rotationDegrees: AnimatableProperty(baseValue: 0, keyframes: frames)
+            )
+        )
+        let viewModel = makeViewModel(clip: clip)
+        viewModel.selectClip(clipID, trackID: viewModel.project.tracks[0].id)
+
+        viewModel.setInterpolation(
+            KeyframeCurvePreset.easeInOut.interpolation,
+            section: .transform,
+            startTime: 0
+        )
+
+        let edited = try #require(viewModel.selectedClip)
+        for target in [KeyframeTarget.positionX, .positionY, .rotation] {
+            let interpolation = try #require(
+                edited.animatableProperty(for: target)?.keyframes.first?.interpolation
+            )
+            #expect(interpolation == KeyframeCurvePreset.easeInOut.interpolation)
+        }
     }
 
     @MainActor

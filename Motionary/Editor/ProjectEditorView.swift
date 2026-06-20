@@ -9,6 +9,7 @@ enum CoreEditorPanel: Equatable {
     case transform
     case adjust
     case effects
+    case audio
     case graph
 }
 
@@ -80,8 +81,25 @@ struct ProjectEditorView: View {
             selectedAudioVideoItem = nil
         }
         .onChange(of: viewModel.selectedClipID) { _, clipID in
-            if let clipID, activePanel.isPropertyPanel {
+            if let clipID, activePanel.isPropertyPanel || activePanel == .graph {
                 propertyContextClipID = clipID
+                if activePanel == .graph,
+                    let section = graphReturnPanel.keyframeSection
+                {
+                    viewModel.selectGraphSegment(atPlayheadIn: section)
+                }
+            }
+        }
+        .onChange(of: activePanel) { previousPanel, panel in
+            if previousPanel == .graph, panel != .graph {
+                viewModel.graphSegment = nil
+                viewModel.displayedGraphSegment = nil
+                viewModel.activeKeyframeTarget = nil
+                viewModel.selectedKeyframeID = nil
+            }
+            if previousPanel.isPropertyPanel, panel == .timeline {
+                propertyContextClipID = nil
+                viewModel.activeKeyframeTarget = nil
             }
         }
         .onChange(of: viewModel.project) { _, project in
@@ -90,20 +108,17 @@ struct ProjectEditorView: View {
             {
                 propertyContextClipID = nil
                 viewModel.graphSegment = nil
+                viewModel.displayedGraphSegment = nil
                 activePanel = .timeline
             } else if activePanel == .graph {
                 viewModel.refreshGraphSegment()
             }
         }
-        .onChange(of: viewModel.graphSegment) { _, segment in
-            guard activePanel == .graph, segment == nil else { return }
-            if let contextID = propertyContextClipID,
-                viewModel.project.clip(id: contextID) != nil
-            {
-                activePanel = graphReturnPanel
-            } else {
-                activePanel = .timeline
-            }
+        .onChange(of: viewModel.currentTime) { _, _ in
+            guard activePanel == .graph,
+                let section = graphReturnPanel.keyframeSection
+            else { return }
+            viewModel.selectGraphSegment(atPlayheadIn: section)
         }
         .alert(
             "Error",
@@ -138,15 +153,13 @@ struct ProjectEditorView: View {
     private func editorCanvas(geometry: GeometryProxy) -> some View {
         let availableHeight = max(geometry.size.height - geometry.safeAreaInsets.bottom - 12, 1)
         let bottomBarHeight: CGFloat = 72
-        let showsMiniTimeline = activePanel.isPropertyPanel
+        let showsMiniTimeline = activePanel.isPropertyPanel || activePanel == .graph
         let miniTimelineHeight: CGFloat = showsMiniTimeline ? 52 : 0
         let controlHeight: CGFloat = 42
         let previewRatio: CGFloat
         switch activePanel {
         case .timeline:
             previewRatio = 0.44
-        case .graph:
-            previewRatio = 0.34
         default:
             previewRatio = 0.31
         }
@@ -174,12 +187,19 @@ struct ProjectEditorView: View {
                 .frame(height: controlHeight)
 
                 workspace
-                
+                    .frame(maxWidth: .infinity)
+
                 if showsMiniTimeline {
                     SelectedLayerMiniTimeline(
                         viewModel: viewModel,
-                        contextClipID: propertyContextClipID,
-                        pixelsPerSecond: $miniTimelinePixelsPerSecond
+                        contextClipID: $propertyContextClipID,
+                        pixelsPerSecond: $miniTimelinePixelsPerSecond,
+                        activeSection: activePanel == .graph
+                            ? graphReturnPanel.keyframeSection
+                            : activePanel.keyframeSection,
+                        graphSegment: activePanel == .graph
+                            ? viewModel.graphSegment
+                            : nil
                     )
                     .frame(height: miniTimelineHeight)
                 }
@@ -190,13 +210,11 @@ struct ProjectEditorView: View {
                     selectedAudioVideoItem: $selectedAudioVideoItem,
                     isAudioFileImporterPresented: $isAudioFileImporterPresented,
                     activePanel: $activePanel,
-                    propertyContextClipID: $propertyContextClipID
+                    propertyContextClipID: $propertyContextClipID,
+                    graphReturnPanel: $graphReturnPanel
                 )
-                .frame(height: bottomBarHeight)
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 6)
-            .padding(.bottom, geometry.safeAreaInsets.bottom + 6)
+            .padding()
 
             EditorBusyOverlay(viewModel: viewModel)
 
@@ -235,6 +253,11 @@ struct ProjectEditorView: View {
                 viewModel: viewModel,
                 clip: propertyContextClip
             )
+        case .audio:
+            AudioWorkspaceView(
+                viewModel: viewModel,
+                clip: propertyContextClip
+            )
         case .graph:
             KeyframeWorkspaceView(viewModel: viewModel)
         }
@@ -255,19 +278,32 @@ private struct EditorPlaybackControlBar: View {
         ZStack {
             HStack(spacing: 9) {
                 Text("\(formatClock(viewModel.currentTime)) / \(formatClock(viewModel.duration))")
-                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .font(.callout.monospacedDigit().weight(.semibold))
                     .foregroundStyle(MotionaryTheme.textSecondary)
                     .lineLimit(1)
                 Spacer()
 
-                if activePanel.isPropertyPanel, viewModel.candidateGraphSegment != nil {
+                if activePanel == .graph {
+                    CompactIconButton(
+                        systemName: "xmark",
+                        title: "Close graphs",
+                        isProminent: true,
+                        action: {
+                            viewModel.graphSegment = nil
+                            activePanel = graphReturnPanel
+                        },
+                        isBordered: false
+                    )
+                } else if let section = activePanel.keyframeSection,
+                    viewModel.candidateGraphSegment(in: section) != nil
+                {
                     CompactIconButton(
                         systemName: "point.topleft.down.curvedto.point.bottomright.up",
                         title: "Graph",
                         isProminent: true,
                         action: {
                             graphReturnPanel = activePanel
-                            viewModel.openCandidateGraphSegment()
+                            viewModel.openCandidateGraphSegment(in: section)
                             if viewModel.graphSegment != nil {
                                 activePanel = .graph
                             }
@@ -330,6 +366,21 @@ private struct EditorPlaybackControlBar: View {
 
 extension CoreEditorPanel {
     var isPropertyPanel: Bool {
-        self == .transform || self == .adjust || self == .effects
+        self == .transform || self == .adjust || self == .effects || self == .audio
+    }
+
+    var keyframeSection: KeyframeSection? {
+        switch self {
+        case .transform:
+            .transform
+        case .adjust:
+            .adjust
+        case .effects:
+            .effects
+        case .audio:
+            .audio
+        case .timeline, .graph:
+            nil
+        }
     }
 }

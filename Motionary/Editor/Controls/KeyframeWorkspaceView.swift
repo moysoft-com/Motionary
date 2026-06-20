@@ -7,24 +7,24 @@ struct KeyframeWorkspaceView: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color.white.opacity(0.045))
 
             if let context = graphContext {
                 VStack(spacing: 10) {
-                    HStack {
+                    HStack(spacing: 9) {
                         Label(
-                            context.clip.keyframeMetadata(for: context.segment.target).title,
+                            context.segment.section.rawValue,
                             systemImage: "point.topleft.down.curvedto.point.bottomright.up"
                         )
-                        .font(.subheadline.weight(.semibold))
+                        .font(.headline.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
                         Spacer()
                         Text(
                             "\(formatClock(context.segment.startTime)) – \(formatClock(context.segment.endTime))"
                         )
-                        .font(.caption.monospacedDigit())
+                        .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(MotionaryTheme.textSecondary)
                     }
+                    .frame(height: 22)
 
                     NormalizedEasingGraph(
                         viewModel: viewModel,
@@ -38,8 +38,8 @@ struct KeyframeWorkspaceView: View {
                                 Button {
                                     viewModel.setInterpolation(
                                         preset.interpolation,
-                                        target: context.segment.target,
-                                        keyframeID: context.segment.leftKeyframeID
+                                        section: context.segment.section,
+                                        startTime: context.segment.startTime
                                     )
                                 } label: {
                                     Text(preset.title)
@@ -63,21 +63,23 @@ struct KeyframeWorkspaceView: View {
                         }
                     }
                 }
-                .padding(13)
-            } else {
-                Label("No active keyframe segment", systemImage: "waveform.path.ecg")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(MotionaryTheme.textSecondary)
+                .padding(14)
+                .opacity(context.isActive ? 1 : 0.42)
+                .allowsHitTesting(context.isActive)
             }
         }
         .motionaryGlass(cornerRadius: 20)
     }
 
-    private var graphContext: (clip: TimelineClip, segment: KeyframeSegment)? {
-        guard let segment = viewModel.graphSegment,
+    private var graphContext: (
+        clip: TimelineClip,
+        segment: KeyframeSegment,
+        isActive: Bool
+    )? {
+        guard let segment = viewModel.graphSegment ?? viewModel.displayedGraphSegment,
             let clip = viewModel.project.clip(id: segment.clipID)
         else { return nil }
-        return (clip, segment)
+        return (clip, segment, viewModel.graphSegment != nil)
     }
 }
 
@@ -86,7 +88,9 @@ private struct NormalizedEasingGraph: View {
     let clip: TimelineClip
     let segment: KeyframeSegment
 
-    @State private var isBackgroundScrubbing = false
+    @State private var dragMode: GraphDragMode?
+    @State private var workingControl1: KeyframeControlPoint?
+    @State private var workingControl2: KeyframeControlPoint?
 
     var body: some View {
         GeometryReader { geometry in
@@ -125,9 +129,8 @@ private struct NormalizedEasingGraph: View {
             }
             .contentShape(Rectangle())
             .coordinateSpace(name: "NormalizedGraph")
-            .gesture(backgroundScrubGesture(plot: plot))
+            .highPriorityGesture(graphDragGesture(plot: plot))
         }
-        .frame(minHeight: 180)
     }
 
     private func grid(in plot: CGRect) -> some View {
@@ -200,17 +203,11 @@ private struct NormalizedEasingGraph: View {
 
             graphHandle(
                 at: first,
-                isFirst: true,
-                current: control1,
-                other: control2,
-                plot: plot
+                isSelected: dragMode == .firstHandle
             )
             graphHandle(
                 at: second,
-                isFirst: false,
-                current: control2,
-                other: control1,
-                plot: plot
+                isSelected: dragMode == .secondHandle
             )
         }
         .zIndex(20)
@@ -218,72 +215,128 @@ private struct NormalizedEasingGraph: View {
 
     private func graphHandle(
         at position: CGPoint,
-        isFirst: Bool,
-        current: KeyframeControlPoint,
-        other: KeyframeControlPoint,
-        plot: CGRect
+        isSelected: Bool
     ) -> some View {
         Circle()
-            .fill(Color.white)
+            .fill(isSelected ? MotionaryTheme.accent : Color.white)
             .overlay(Circle().stroke(MotionaryTheme.accent, lineWidth: 2))
-            .frame(width: 15, height: 15)
+            .frame(width: isSelected ? 18 : 15, height: isSelected ? 18 : 15)
             .position(position)
-            .contentShape(Rectangle().inset(by: -14))
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 0, coordinateSpace: .named("NormalizedGraph"))
-                    .onChanged { gesture in
-                        let rawX = Double((gesture.location.x - plot.minX) / max(plot.width, 1))
-                        let rawY = Double((plot.maxY - gesture.location.y) / max(plot.height, 1))
-                        let x: Double
-                        if isFirst {
-                            x = min(max(rawX, 0), other.x)
-                        } else {
-                            x = min(max(rawX, other.x), 1)
-                        }
-                        let moved = KeyframeControlPoint(x: x, y: rawY)
-                        viewModel.setInterpolation(
-                            .cubicBezier(
-                                control1: isFirst ? moved : other,
-                                control2: isFirst ? other : moved
-                            ),
-                            target: segment.target,
-                            keyframeID: segment.leftKeyframeID,
-                            interactive: true
-                        )
-                    }
-                    .onEnded { _ in
-                        viewModel.finishInteractiveEdit()
-                    }
-            )
+            .animation(.spring(duration: 0.18), value: isSelected)
     }
 
-    private func backgroundScrubGesture(plot: CGRect) -> some Gesture {
+    private func graphDragGesture(plot: CGRect) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .named("NormalizedGraph"))
             .onChanged { gesture in
-                if !isBackgroundScrubbing {
-                    isBackgroundScrubbing = true
-                    viewModel.beginScrub()
+                if dragMode == nil {
+                    beginGraphDrag(at: gesture.startLocation, plot: plot)
                 }
-                let progress = min(
-                    max(Double((gesture.location.x - plot.minX) / max(plot.width, 1)), 0),
-                    1
-                )
-                let localTime =
-                    segment.startTime
-                    + (segment.endTime - segment.startTime) * progress
-                viewModel.updateScrub(to: clip.timelineStart + localTime)
+                switch dragMode {
+                case .firstHandle:
+                    updateHandle(isFirst: true, location: gesture.location, plot: plot)
+                case .secondHandle:
+                    updateHandle(isFirst: false, location: gesture.location, plot: plot)
+                case .scrub:
+                    updateBackgroundScrub(location: gesture.location, plot: plot)
+                case nil:
+                    break
+                }
             }
             .onEnded { gesture in
-                let progress = min(
-                    max(Double((gesture.location.x - plot.minX) / max(plot.width, 1)), 0),
-                    1
-                )
-                let localTime =
-                    segment.startTime
-                    + (segment.endTime - segment.startTime) * progress
-                isBackgroundScrubbing = false
-                viewModel.endScrub(at: clip.timelineStart + localTime)
+                switch dragMode {
+                case .firstHandle, .secondHandle:
+                    viewModel.finishInteractiveEdit()
+                case .scrub:
+                    endBackgroundScrub(location: gesture.location, plot: plot)
+                case nil:
+                    break
+                }
+                dragMode = nil
+                workingControl1 = nil
+                workingControl2 = nil
             }
+    }
+
+    private func beginGraphDrag(at location: CGPoint, plot: CGRect) {
+        if case .cubicBezier(let control1, let control2) = segment.interpolation {
+            let firstDistance = distance(
+                from: location,
+                to: point(x: control1.x, y: control1.y, in: plot)
+            )
+            let secondDistance = distance(
+                from: location,
+                to: point(x: control2.x, y: control2.y, in: plot)
+            )
+            let hitRadius: CGFloat = 32
+            if min(firstDistance, secondDistance) <= hitRadius {
+                dragMode = firstDistance <= secondDistance
+                    ? .firstHandle
+                    : .secondHandle
+                workingControl1 = control1
+                workingControl2 = control2
+                return
+            }
+        }
+        dragMode = .scrub
+        viewModel.beginScrub()
+    }
+
+    private func updateHandle(
+        isFirst: Bool,
+        location: CGPoint,
+        plot: CGRect
+    ) {
+        guard let control1 = workingControl1,
+            let control2 = workingControl2
+        else { return }
+        let rawX = Double((location.x - plot.minX) / max(plot.width, 1))
+        let rawY = Double((plot.maxY - location.y) / max(plot.height, 1))
+        let moved: KeyframeControlPoint
+        if isFirst {
+            moved = KeyframeControlPoint(
+                x: min(max(rawX, 0), control2.x),
+                y: rawY
+            )
+            workingControl1 = moved
+        } else {
+            moved = KeyframeControlPoint(
+                x: min(max(rawX, control1.x), 1),
+                y: rawY
+            )
+            workingControl2 = moved
+        }
+        viewModel.setInterpolation(
+            .cubicBezier(
+                control1: isFirst ? moved : control1,
+                control2: isFirst ? control2 : moved
+            ),
+            section: segment.section,
+            startTime: segment.startTime,
+            interactive: true
+        )
+    }
+
+    private func updateBackgroundScrub(location: CGPoint, plot: CGRect) {
+        let localTime = graphLocalTime(at: location.x, plot: plot)
+        viewModel.updateScrub(to: clip.timelineStart + localTime)
+    }
+
+    private func endBackgroundScrub(location: CGPoint, plot: CGRect) {
+        let localTime = graphLocalTime(at: location.x, plot: plot)
+        viewModel.endScrub(at: clip.timelineStart + localTime)
+    }
+
+    private func graphLocalTime(at x: CGFloat, plot: CGRect) -> Double {
+        let progress = min(
+            max(Double((x - plot.minX) / max(plot.width, 1)), 0),
+            1
+        )
+        return segment.startTime
+            + (segment.endTime - segment.startTime) * progress
+    }
+
+    private func distance(from lhs: CGPoint, to rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
     }
 
     private func point(x: Double, y: Double, in plot: CGRect) -> CGPoint {
@@ -292,6 +345,12 @@ private struct NormalizedEasingGraph: View {
             y: plot.maxY - plot.height * CGFloat(y)
         )
     }
+}
+
+private enum GraphDragMode {
+    case firstHandle
+    case secondHandle
+    case scrub
 }
 
 struct KeyframeDiamondShape: Shape {

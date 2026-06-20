@@ -22,10 +22,10 @@ final class EditorViewModel: ObservableObject {
     @Published var timelineContentRevision = 0
     @Published var canUndo = false
     @Published var canRedo = false
-    @Published var isAutoKeyEnabled = false
     @Published var activeKeyframeTarget: KeyframeTarget?
     @Published var selectedKeyframeID: UUID?
     @Published var graphSegment: KeyframeSegment?
+    @Published var displayedGraphSegment: KeyframeSegment?
 
     let projectID: UUID
     let projectStore: ProjectStore

@@ -36,6 +36,15 @@ enum KeyframeTarget: Hashable, Identifiable {
     }
 }
 
+enum KeyframeSection: String, CaseIterable, Identifiable {
+    case transform = "Transform"
+    case adjust = "Adjust"
+    case effects = "Effects"
+    case audio = "Audio"
+
+    var id: String { rawValue }
+}
+
 enum KeyframePropertyGroup: String, CaseIterable, Identifiable {
     case transform = "Transform"
     case adjustments = "Adjustments"
@@ -67,9 +76,7 @@ struct KeyframePropertyMetadata {
 
 struct KeyframeSegment: Equatable {
     let clipID: UUID
-    let target: KeyframeTarget
-    let leftKeyframeID: UUID
-    let rightKeyframeID: UUID
+    let section: KeyframeSection
     let startTime: Double
     let endTime: Double
     let interpolation: KeyframeInterpolation

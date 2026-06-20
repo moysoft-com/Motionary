@@ -10,6 +10,7 @@ struct MainView: App {
             TabView {
                 Tab {
                     HomeView()
+                        .labelStyle(.automatic)
                 } label: {
                     Image("MotionarySF")
                 }

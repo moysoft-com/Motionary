@@ -157,6 +157,53 @@ extension TimelineClip {
             + (mediaType == .video ? [.volume] : [])
     }
 
+    func keyframeTargets(in section: KeyframeSection) -> [KeyframeTarget] {
+        switch section {
+        case .transform:
+            guard mediaType != .audio else { return [] }
+            return [
+                .positionX,
+                .positionY,
+                transform.scale.isLinked ? .scale : .scaleX,
+                transform.scale.isLinked ? nil : .scaleY,
+                .rotation,
+            ].compactMap { $0 }
+        case .adjust:
+            guard mediaType != .audio else { return [] }
+            return [.opacity, .brightness, .contrast, .saturation, .exposure]
+        case .effects:
+            guard mediaType != .audio else { return [] }
+            return effectStack.effects.map { .effectIntensity($0.id) }
+        case .audio:
+            guard mediaType == .audio || mediaType == .video else { return [] }
+            return [.volume]
+        }
+    }
+
+    func keyframeTimes(in section: KeyframeSection) -> [Double] {
+        Array(
+            Set(
+                keyframeTargets(in: section).flatMap {
+                    animatableProperty(for: $0)?.keyframes.map(\.time) ?? []
+                }
+            )
+        )
+        .sorted()
+    }
+
+    func keyframeSection(for target: KeyframeTarget) -> KeyframeSection {
+        switch target {
+        case .positionX, .positionY, .scale, .scaleX, .scaleY, .rotation:
+            .transform
+        case .opacity, .brightness, .contrast, .saturation, .exposure:
+            .adjust
+        case .effectIntensity:
+            .effects
+        case .volume:
+            .audio
+        }
+    }
+
     func animatableProperty(for target: KeyframeTarget) -> AnimatableProperty<Double>? {
         switch target {
         case .positionX: transform.positionX

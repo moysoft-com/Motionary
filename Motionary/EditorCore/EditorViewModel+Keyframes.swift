@@ -41,6 +41,22 @@ extension EditorViewModel {
         ) != nil
     }
 
+    func hasKeyframe(atPlayhead section: KeyframeSection) -> Bool {
+        guard let clip = selectedClip else { return false }
+        let time = snappedKeyframeTime(selectedClipLocalTime, clip: clip)
+        return clip.keyframeTargets(in: section).contains { target in
+            clip.animatableProperty(for: target)?.keyframeIndex(
+                at: time,
+                tolerance: keyframeTimeTolerance
+            ) != nil
+        }
+    }
+
+    func hasKeyframes(in section: KeyframeSection, clip: TimelineClip? = nil) -> Bool {
+        guard let clip = clip ?? selectedClip else { return false }
+        return !clip.keyframeTimes(in: section).isEmpty
+    }
+
     func propertyRange(
         for target: KeyframeTarget,
         clip: TimelineClip? = nil
@@ -80,75 +96,85 @@ extension EditorViewModel {
         }
     }
 
-    var candidateGraphSegment: KeyframeSegment? {
-        guard let clip = selectedClip,
-            isTimeInside(clip),
-            let target = activeKeyframeTarget,
-            let property = clip.animatableProperty(for: target)
-        else { return nil }
-        let frames = property.keyframes.sorted { $0.time < $1.time }
-        guard frames.count >= 2 else { return nil }
-        let localTime = currentTime - clip.timelineStart
-
-        let leftIndex: Int?
-        if let exact = frames.firstIndex(
-            where: { abs($0.time - localTime) <= keyframeTimeTolerance }
-        ) {
-            leftIndex = exact < frames.count - 1 ? exact : exact - 1
-        } else {
-            leftIndex = frames.indices.dropLast().first {
-                localTime > frames[$0].time && localTime < frames[$0 + 1].time
-            }
-        }
-        guard let leftIndex, leftIndex >= 0, leftIndex + 1 < frames.count else {
-            return nil
-        }
-        let left = frames[leftIndex]
-        let right = frames[leftIndex + 1]
-        return KeyframeSegment(
-            clipID: clip.id,
-            target: target,
-            leftKeyframeID: left.id,
-            rightKeyframeID: right.id,
-            startTime: left.time,
-            endTime: right.time,
-            interpolation: left.interpolation
+    func candidateGraphSegment(in section: KeyframeSection) -> KeyframeSegment? {
+        guard let clip = selectedClip, isTimeInside(clip) else { return nil }
+        return graphSegmentCandidate(
+            in: section,
+            clip: clip,
+            localTime: currentTime - clip.timelineStart
         )
     }
 
-    func openCandidateGraphSegment() {
-        guard let segment = candidateGraphSegment else { return }
+    private func graphSegmentCandidate(
+        in section: KeyframeSection,
+        clip: TimelineClip,
+        localTime: Double
+    ) -> KeyframeSegment? {
+        let times = clip.keyframeTimes(in: section)
+        guard times.count >= 2 else { return nil }
+        let leftIndex: Int?
+        if let exact = times.firstIndex(
+            where: { abs($0 - localTime) <= keyframeTimeTolerance }
+        ) {
+            leftIndex = exact < times.count - 1 ? exact : exact - 1
+        } else {
+            leftIndex = times.indices.dropLast().first {
+                localTime > times[$0] && localTime < times[$0 + 1]
+            }
+        }
+        guard let leftIndex, leftIndex >= 0, leftIndex + 1 < times.count else {
+            return nil
+        }
+        let startTime = times[leftIndex]
+        let endTime = times[leftIndex + 1]
+        let interpolation =
+            clip.keyframeTargets(in: section).lazy.compactMap { target in
+                clip.animatableProperty(for: target)?.keyframes.first {
+                    abs($0.time - startTime) <= self.keyframeTimeTolerance
+                }?.interpolation
+            }.first
+            ?? .linear
+        return KeyframeSegment(
+            clipID: clip.id,
+            section: section,
+            startTime: startTime,
+            endTime: endTime,
+            interpolation: interpolation
+        )
+    }
+
+    func openCandidateGraphSegment(in section: KeyframeSection) {
+        guard let segment = candidateGraphSegment(in: section) else { return }
         graphSegment = segment
-        selectedKeyframeID = segment.leftKeyframeID
+        displayedGraphSegment = segment
+        activeKeyframeTarget = nil
+        selectedKeyframeID = nil
+    }
+
+    func selectGraphSegment(atPlayheadIn section: KeyframeSection) {
+        graphSegment = candidateGraphSegment(in: section)
+        if let graphSegment {
+            displayedGraphSegment = graphSegment
+        }
+        activeKeyframeTarget = nil
+        selectedKeyframeID = nil
     }
 
     func refreshGraphSegment() {
         guard let segment = graphSegment,
-            let clip = project.clip(id: segment.clipID),
-            let property = clip.animatableProperty(for: segment.target)
+            let clip = project.clip(id: segment.clipID)
         else {
             graphSegment = nil
             return
         }
-        let frames = property.keyframes.sorted { $0.time < $1.time }
-        guard let leftIndex = frames.firstIndex(where: { $0.id == segment.leftKeyframeID }),
-            leftIndex + 1 < frames.count,
-            frames[leftIndex + 1].id == segment.rightKeyframeID
-        else {
-            graphSegment = nil
-            return
-        }
-        let left = frames[leftIndex]
-        let right = frames[leftIndex + 1]
-        graphSegment = KeyframeSegment(
-            clipID: segment.clipID,
-            target: segment.target,
-            leftKeyframeID: left.id,
-            rightKeyframeID: right.id,
-            startTime: left.time,
-            endTime: right.time,
-            interpolation: left.interpolation
+        graphSegment = graphSegmentCandidate(
+            in: segment.section,
+            clip: clip,
+            localTime: currentTime - clip.timelineStart
         )
+        if let graphSegment {
+            displayedGraphSegment = graphSegment
+        }
     }
 
     func setSelectedKeyframeValue(
@@ -173,13 +199,21 @@ extension EditorViewModel {
             touchUpdatedAt: !interactive,
             refreshTimeline: true
         ) { clip in
-            guard var property = clip.animatableProperty(for: target) else { return }
-            let range = self.propertyRange(for: target, clip: clip)
-            let boundedValue = min(max(value, range.lowerBound), range.upperBound)
             let localTime = self.snappedKeyframeTime(
                 self.currentTime - clip.timelineStart,
                 clip: clip
             )
+            let section = clip.keyframeSection(for: target)
+            if self.hasKeyframes(in: section, clip: clip) {
+                self.insertSectionKeyframe(
+                    at: localTime,
+                    section: section,
+                    into: &clip
+                )
+            }
+            guard var property = clip.animatableProperty(for: target) else { return }
+            let range = self.propertyRange(for: target, clip: clip)
+            let boundedValue = min(max(value, range.lowerBound), range.upperBound)
 
             if property.keyframes.isEmpty {
                 property.baseValue = boundedValue
@@ -189,15 +223,12 @@ extension EditorViewModel {
             ) {
                 property.keyframes[index].value = boundedValue
                 self.selectedKeyframeID = property.keyframes[index].id
-            } else if self.isAutoKeyEnabled {
+            } else {
                 self.selectedKeyframeID = property.setKeyframe(
                     at: localTime,
                     value: boundedValue,
                     tolerance: self.keyframeTimeTolerance
                 )
-            } else {
-                let delta = boundedValue - property.value(at: localTime)
-                property.offsetValues(by: delta, range: range)
             }
 
             clip.setAnimatableProperty(property, for: target)
@@ -251,6 +282,50 @@ extension EditorViewModel {
                 )
             }
             clip.setAnimatableProperty(property, for: target)
+            project.tracks[location.track].clips[location.clip] = clip
+        }
+    }
+
+    func toggleKeyframeSection(_ section: KeyframeSection) {
+        guard let selectedClipID else { return }
+        mutateProject { project in
+            guard let location = project.clipLocation(id: selectedClipID) else { return }
+            var clip = project.tracks[location.track].clips[location.clip]
+            let time = self.snappedKeyframeTime(
+                self.currentTime - clip.timelineStart,
+                clip: clip
+            )
+            let targets = clip.keyframeTargets(in: section)
+            let hasMarker = targets.contains { target in
+                clip.animatableProperty(for: target)?.keyframeIndex(
+                    at: time,
+                    tolerance: self.keyframeTimeTolerance
+                ) != nil
+            }
+
+            if hasMarker {
+                self.removeSectionKeyframe(
+                    at: time,
+                    section: section,
+                    from: &clip
+                )
+                self.selectedKeyframeID = nil
+            } else {
+                self.insertSectionKeyframe(
+                    at: time,
+                    section: section,
+                    into: &clip
+                )
+                let preferredTarget =
+                    self.activeKeyframeTarget.flatMap { targets.contains($0) ? $0 : nil }
+                    ?? targets.first
+                self.activeKeyframeTarget = preferredTarget
+                self.selectedKeyframeID = preferredTarget.flatMap { target in
+                    clip.animatableProperty(for: target)?.keyframes.first {
+                        abs($0.time - time) <= self.keyframeTimeTolerance
+                    }?.id
+                }
+            }
             project.tracks[location.track].clips[location.clip] = clip
         }
     }
@@ -327,8 +402,8 @@ extension EditorViewModel {
 
     func setInterpolation(
         _ interpolation: KeyframeInterpolation,
-        target: KeyframeTarget,
-        keyframeID: UUID,
+        section: KeyframeSection,
+        startTime: Double,
         interactive: Bool = false
     ) {
         guard selectedClipID != nil else { return }
@@ -342,18 +417,27 @@ extension EditorViewModel {
             touchUpdatedAt: !interactive,
             refreshTimeline: true
         ) { clip in
-            if target.isScaleTarget {
-                clip.transform.scale.setInterpolation(
-                    interpolation,
-                    keyframeID: keyframeID
+            let targets = clip.keyframeTargets(in: section)
+            if targets.contains(where: \.isScaleTarget),
+                let index = clip.transform.scale.keyframes.firstIndex(
+                    where: {
+                        abs($0.time - startTime) <= self.keyframeTimeTolerance
+                    }
                 )
-                return
+            {
+                clip.transform.scale.keyframes[index].interpolation = interpolation
             }
-            guard var property = clip.animatableProperty(for: target),
-                let index = property.keyframes.firstIndex(where: { $0.id == keyframeID })
-            else { return }
-            property.keyframes[index].interpolation = interpolation
-            clip.setAnimatableProperty(property, for: target)
+            for target in targets where !target.isScaleTarget {
+                guard var property = clip.animatableProperty(for: target),
+                    let index = property.keyframes.firstIndex(
+                        where: {
+                            abs($0.time - startTime) <= self.keyframeTimeTolerance
+                        }
+                    )
+                else { continue }
+                property.keyframes[index].interpolation = interpolation
+                clip.setAnimatableProperty(property, for: target)
+            }
         }
         if interactive {
             schedulePreviewRebuild(seekTo: currentTime)
@@ -443,6 +527,14 @@ extension EditorViewModel {
                 self.currentTime - clip.timelineStart,
                 clip: clip
             )
+            let section = clip.keyframeSection(for: target)
+            if self.hasKeyframes(in: section, clip: clip) {
+                self.insertSectionKeyframe(
+                    at: localTime,
+                    section: section,
+                    into: &clip
+                )
+            }
             let boundedValue = min(max(value, 0.01), 100)
             var scale = clip.transform.scale
             let current = scale.value(at: localTime)
@@ -469,53 +561,63 @@ extension EditorViewModel {
             ) {
                 scale.keyframes[index].value = adjusted(scale.keyframes[index].value)
                 self.selectedKeyframeID = scale.keyframes[index].id
-            } else if self.isAutoKeyEnabled {
+            } else {
                 self.selectedKeyframeID = scale.setKeyframe(
                     at: localTime,
                     value: adjusted(current),
                     tolerance: self.keyframeTimeTolerance
                 )
-            } else if editsBothAxes {
-                let values =
-                    [scale.baseValue.x, scale.baseValue.y]
-                    + scale.keyframes.flatMap { [$0.value.x, $0.value.y] }
-                let factor = Self.boundedScaleFactor(
-                    proposed: boundedValue / max(current.x, 0.000_001),
-                    values: values
-                )
-                scale.baseValue.x *= factor
-                scale.baseValue.y *= factor
-                for index in scale.keyframes.indices {
-                    scale.keyframes[index].value.x *= factor
-                    scale.keyframes[index].value.y *= factor
-                }
-            } else {
-                let isY = target == .scaleY
-                let currentAxis = isY ? current.y : current.x
-                let values =
-                    [isY ? scale.baseValue.y : scale.baseValue.x]
-                    + scale.keyframes.map { isY ? $0.value.y : $0.value.x }
-                let factor = Self.boundedScaleFactor(
-                    proposed: boundedValue / max(currentAxis, 0.000_001),
-                    values: values
-                )
-                if isY {
-                    scale.baseValue.y *= factor
-                    for index in scale.keyframes.indices {
-                        scale.keyframes[index].value.y *= factor
-                    }
-                } else {
-                    scale.baseValue.x *= factor
-                    for index in scale.keyframes.indices {
-                        scale.keyframes[index].value.x *= factor
-                    }
-                }
             }
             clip.transform.scale = scale
         }
 
         if interactive {
             schedulePreviewRebuild(seekTo: currentTime)
+        }
+    }
+
+    private func insertSectionKeyframe(
+        at time: Double,
+        section: KeyframeSection,
+        into clip: inout TimelineClip
+    ) {
+        let targets = clip.keyframeTargets(in: section)
+        if targets.contains(where: \.isScaleTarget) {
+            _ = clip.transform.scale.setKeyframe(
+                at: time,
+                value: clip.transform.scale.value(at: time),
+                tolerance: keyframeTimeTolerance
+            )
+        }
+        for target in targets where !target.isScaleTarget {
+            guard var property = clip.animatableProperty(for: target) else { continue }
+            _ = property.setKeyframe(
+                at: time,
+                value: property.value(at: time),
+                tolerance: keyframeTimeTolerance
+            )
+            clip.setAnimatableProperty(property, for: target)
+        }
+    }
+
+    private func removeSectionKeyframe(
+        at time: Double,
+        section: KeyframeSection,
+        from clip: inout TimelineClip
+    ) {
+        let targets = clip.keyframeTargets(in: section)
+        if targets.contains(where: \.isScaleTarget) {
+            _ = clip.transform.scale.removeKeyframe(
+                at: time,
+                tolerance: keyframeTimeTolerance
+            )
+        }
+        for target in targets where !target.isScaleTarget {
+            guard var property = clip.animatableProperty(for: target) else { continue }
+            property.keyframes.removeAll {
+                abs($0.time - time) <= keyframeTimeTolerance
+            }
+            clip.setAnimatableProperty(property, for: target)
         }
     }
 

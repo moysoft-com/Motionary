@@ -14,6 +14,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     let contentRevision: Int
     let contentSize: CGSize
     let isScrollDisabled: Bool
+    let allowsVerticalScrolling: Bool
     let onScrubStart: () -> Void
     let onScrubChanged: (Double) -> Void
     let onScrubEnd: (Double) -> Void
@@ -28,6 +29,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         contentRevision: Int,
         contentSize: CGSize,
         isScrollDisabled: Bool,
+        allowsVerticalScrolling: Bool = true,
         onScrubStart: @escaping () -> Void,
         onScrubChanged: @escaping (Double) -> Void,
         onScrubEnd: @escaping (Double) -> Void,
@@ -41,6 +43,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         self.contentRevision = contentRevision
         self.contentSize = contentSize
         self.isScrollDisabled = isScrollDisabled
+        self.allowsVerticalScrolling = allowsVerticalScrolling
         self.onScrubStart = onScrubStart
         self.onScrubChanged = onScrubChanged
         self.onScrubEnd = onScrubEnd
@@ -60,7 +63,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         scrollView.showsVerticalScrollIndicator = false
         scrollView.bounces = true
         scrollView.alwaysBounceHorizontal = true
-        scrollView.alwaysBounceVertical = true
+        scrollView.alwaysBounceVertical = allowsVerticalScrolling
+        scrollView.isDirectionalLockEnabled = !allowsVerticalScrolling
         scrollView.decelerationRate = .fast
         scrollView.backgroundColor = .clear
 
@@ -85,14 +89,21 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         context.coordinator.hostingController.view.frame = CGRect(origin: .zero, size: contentSize)
         scrollView.contentSize = contentSize
         scrollView.isScrollEnabled = !isScrollDisabled
+        scrollView.alwaysBounceVertical = allowsVerticalScrolling
+        scrollView.isDirectionalLockEnabled = !allowsVerticalScrolling
+        if !allowsVerticalScrolling, abs(scrollView.contentOffset.y) > 0.5 {
+            scrollView.contentOffset.y = 0
+        }
 
         let activePixelsPerSecond = context.coordinator.parent.pixelsPerSecond
         let maxX = max(contentSize.width - scrollView.bounds.width, 0)
         let targetX = min(max(CGFloat(currentTime) * activePixelsPerSecond, 0), maxX)
-        let targetY = min(
-            scrollView.contentOffset.y,
-            max(contentSize.height - scrollView.bounds.height, 0)
-        )
+        let targetY = allowsVerticalScrolling
+            ? min(
+                scrollView.contentOffset.y,
+                max(contentSize.height - scrollView.bounds.height, 0)
+            )
+            : 0
 
         guard !context.coordinator.isUserInteracting else { return }
         guard abs(scrollView.contentOffset.x - targetX) > 0.5 || abs(scrollView.contentOffset.y - targetY) > 0.5 else {
@@ -160,6 +171,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            if !parent.allowsVerticalScrolling, abs(scrollView.contentOffset.y) > 0.5 {
+                isProgrammaticScroll = true
+                scrollView.contentOffset.y = 0
+                isProgrammaticScroll = false
+            }
             let hasVerticalScrollRange = scrollView.contentSize.height > scrollView.bounds.height + 0.5
             if !hasVerticalScrollRange, scrollView.contentOffset.y > 0 {
                 isProgrammaticScroll = true
@@ -167,7 +183,9 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 isProgrammaticScroll = false
             }
 
-            let pullDistance = max(-scrollView.contentOffset.y, 0)
+            let pullDistance = parent.allowsVerticalScrolling
+                ? max(-scrollView.contentOffset.y, 0)
+                : 0
             if scrollView.isDragging {
                 let wasArmed = isPullToAddArmed
                 isPullToAddArmed = pullDistance >= TimelineScrollContainerPullToAdd.threshold
@@ -256,7 +274,13 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             let maxX = max(parent.contentSize.width - scrollView.bounds.width, 0)
             let clampedX = min(max(targetX, 0), maxX)
             isProgrammaticScroll = true
-            scrollView.setContentOffset(CGPoint(x: clampedX, y: scrollView.contentOffset.y), animated: false)
+            scrollView.setContentOffset(
+                CGPoint(
+                    x: clampedX,
+                    y: parent.allowsVerticalScrolling ? scrollView.contentOffset.y : 0
+                ),
+                animated: false
+            )
             isProgrammaticScroll = false
             let time = min(max(Double(clampedX / max(parent.pixelsPerSecond, 1)), 0), parent.duration)
             parent.onScrubChanged(time)
