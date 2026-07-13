@@ -4,6 +4,12 @@ import SwiftUI
 
 struct KeyframeWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
+
+    init(viewModel: EditorViewModel) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+    }
 
     var body: some View {
         ZStack {
@@ -85,6 +91,7 @@ struct KeyframeWorkspaceView: View {
 
 private struct NormalizedEasingGraph: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let clip: TimelineClip
     let segment: KeyframeSegment
 
@@ -92,13 +99,20 @@ private struct NormalizedEasingGraph: View {
     @State private var workingControl1: KeyframeControlPoint?
     @State private var workingControl2: KeyframeControlPoint?
 
+    init(viewModel: EditorViewModel, clip: TimelineClip, segment: KeyframeSegment) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.clip = clip
+        self.segment = segment
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let plot = CGRect(
                 x: 22,
-                y: 18,
+                y: 34,
                 width: max(geometry.size.width - 44, 1),
-                height: max(geometry.size.height - 36, 1)
+                height: max(geometry.size.height - 68, 1)
             )
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -189,8 +203,8 @@ private struct NormalizedEasingGraph: View {
     ) -> some View {
         let start = point(x: 0, y: 0, in: plot)
         let end = point(x: 1, y: 1, in: plot)
-        let first = point(x: control1.x, y: control1.y, in: plot)
-        let second = point(x: control2.x, y: control2.y, in: plot)
+        let first = controlPointPosition(control1, in: plot)
+        let second = controlPointPosition(control2, in: plot)
 
         return ZStack {
             Path { path in
@@ -261,11 +275,11 @@ private struct NormalizedEasingGraph: View {
         if case .cubicBezier(let control1, let control2) = segment.interpolation {
             let firstDistance = distance(
                 from: location,
-                to: point(x: control1.x, y: control1.y, in: plot)
+                to: controlPointPosition(control1, in: plot)
             )
             let secondDistance = distance(
                 from: location,
-                to: point(x: control2.x, y: control2.y, in: plot)
+                to: controlPointPosition(control2, in: plot)
             )
             let hitRadius: CGFloat = 32
             if min(firstDistance, secondDistance) <= hitRadius {
@@ -291,17 +305,19 @@ private struct NormalizedEasingGraph: View {
         else { return }
         let rawX = Double((location.x - plot.minX) / max(plot.width, 1))
         let rawY = Double((plot.maxY - location.y) / max(plot.height, 1))
+        let x = min(max(rawX, 0), 1)
+        let y = rubberBandedY(rawY, in: plot)
         let moved: KeyframeControlPoint
         if isFirst {
             moved = KeyframeControlPoint(
-                x: min(max(rawX, 0), control2.x),
-                y: rawY
+                x: x,
+                y: y
             )
             workingControl1 = moved
         } else {
             moved = KeyframeControlPoint(
-                x: min(max(rawX, control1.x), 1),
-                y: rawY
+                x: x,
+                y: y
             )
             workingControl2 = moved
         }
@@ -337,6 +353,50 @@ private struct NormalizedEasingGraph: View {
 
     private func distance(from lhs: CGPoint, to rhs: CGPoint) -> CGFloat {
         hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
+
+    private func controlPointPosition(
+        _ controlPoint: KeyframeControlPoint,
+        in plot: CGRect
+    ) -> CGPoint {
+        point(
+            x: controlPoint.x,
+            y: reachableY(controlPoint.y, in: plot),
+            in: plot
+        )
+    }
+
+    private func reachableY(_ value: Double, in plot: CGRect) -> Double {
+        let limit = verticalOvershootLimit(in: plot)
+        return min(max(value, -limit), 1 + limit)
+    }
+
+    /// Allows a small overshoot while progressively increasing resistance. The
+    /// asymptotic limit keeps a released handle inside the graph's touch region.
+    private func rubberBandedY(_ value: Double, in plot: CGRect) -> Double {
+        let limit = verticalOvershootLimit(in: plot)
+        let resistanceLength = max(limit * 0.55, 0.02)
+
+        if value < 0 {
+            return -rubberBandDistance(-value, limit: limit, resistanceLength: resistanceLength)
+        }
+        if value > 1 {
+            return 1 + rubberBandDistance(value - 1, limit: limit, resistanceLength: resistanceLength)
+        }
+        return value
+    }
+
+    private func verticalOvershootLimit(in plot: CGRect) -> Double {
+        let availablePoints = max(plot.minY - 11, 8)
+        return Double(availablePoints / max(plot.height, 1))
+    }
+
+    private func rubberBandDistance(
+        _ distance: Double,
+        limit: Double,
+        resistanceLength: Double
+    ) -> Double {
+        limit * (1 - exp(-distance / resistanceLength))
     }
 
     private func point(x: Double, y: Double, in plot: CGRect) -> CGPoint {

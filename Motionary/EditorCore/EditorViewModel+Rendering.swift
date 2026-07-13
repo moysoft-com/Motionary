@@ -59,68 +59,118 @@ extension EditorViewModel {
 
         Task {
             do {
-                let asset = AVURLAsset(url: clip.source.url)
+                let asset = AVURLAsset(url: project.mediaURL(for: clip))
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                 guard !audioTracks.isEmpty else {
                     errorMessage = "This video does not contain an audio track."
                     return
                 }
 
-                mutateProject { project in
-                    guard let location = project.clipLocation(id: selectedClipID) else { return }
-                    let videoClip = project.tracks[location.track].clips[location.clip]
-                    project.tracks[location.track].clips[location.clip].volume =
-                        AnimatableProperty(baseValue: 0)
-
-                    let audioSource = ClipSource(
-                        url: videoClip.source.url,
-                        mediaType: .audio,
-                        originalDuration: videoClip.source.originalDuration,
-                        naturalSize: nil
+                let beforeTracks = project.tracks
+                let beforeMediaLibrary = project.mediaLibrary
+                var draft = project
+                let videoClip = clip
+                let audioSource = ClipSource(
+                    url: project.mediaURL(for: videoClip),
+                    mediaType: .audio,
+                    originalDuration: project.originalDuration(for: videoClip),
+                    naturalSize: nil
+                )
+                var audioClip = TimelineClip(
+                    name: "\(videoClip.name) Audio",
+                    source: audioSource,
+                    timelineStart: videoClip.timelineStart,
+                    sourceRange: videoClip.sourceRange,
+                    volume: AnimatableProperty(
+                        baseValue: max(videoClip.volume.baseValue, 1)
                     )
-                    let audioClip = TimelineClip(
-                        name: "\(videoClip.name) Audio",
-                        source: audioSource,
-                        timelineStart: videoClip.timelineStart,
-                        sourceRange: videoClip.sourceRange,
-                        volume: AnimatableProperty(
-                            baseValue: max(videoClip.volume.baseValue, 1)
+                )
+                draft.registerClipMedia(&audioClip, source: audioSource)
+                if let location = draft.clipLocation(id: selectedClipID) {
+                    draft.tracks[location.track].replaceLegacyClip(
+                        id: selectedClipID,
+                        with: {
+                            var clip = draft.tracks[location.track].clips[location.clip]
+                            clip.volume = AnimatableProperty(baseValue: 0)
+                            return clip
+                        }()
+                    )
+                }
+                let audioTrackIndex = draft.insertFreshTrack(kind: .audio)
+                draft.tracks[audioTrackIndex].appendLegacyClip(audioClip)
+                draft.synchronizeMediaLibrary()
+                commit(
+                    AnyEditorCommand(
+                        ExtractAudioCommand(
+                            beforeTracks: beforeTracks,
+                            beforeMediaLibrary: beforeMediaLibrary,
+                            afterTracks: draft.tracks,
+                            afterMediaLibrary: draft.mediaLibrary,
+                            invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
                         )
                     )
-                    let audioTrackIndex = project.insertFreshTrack(kind: .audio)
-                    project.tracks[audioTrackIndex].clips.append(audioClip)
-                    project.tracks[audioTrackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
-                    self.selectedTrackID = project.tracks[audioTrackIndex].id
-                    self.selectedClipID = audioClip.id
-                }
+                )
+                self.selectedTrackID = draft.tracks[audioTrackIndex].id
+                self.selectedClipID = audioClip.id
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
     }
 
-    func rebuildPreview(seekTo time: Double? = nil) async {
+    func rebuildPreview(
+        seekTo time: Double? = nil,
+        invalidation: EditorInvalidation,
+        generation: Int
+    ) async {
         let seekTime = min(max(time ?? currentTime, 0), max(duration, 0))
         let shouldResume = isPlaying
-        isRenderingPreview = true
+        let showBuildingUI =
+            invalidation.contains(.compositionTopology) || player == nil
+        if showBuildingUI {
+            isRenderingPreview = true
+            previewState.status = .building(generation: generation)
+        }
         defer {
-            if !Task.isCancelled {
+            if generation == previewGeneration, showBuildingUI {
                 isRenderingPreview = false
             }
         }
         do {
-            let item = try await renderService.makePlayerItem(for: project)
-            guard !Task.isCancelled else { return }
-            if let item {
-                if player == nil {
-                    player = AVPlayer(playerItem: item)
-                    player?.volume = 1
-                } else {
-                    player?.replaceCurrentItem(with: item)
+            let prepared = try await renderService.preparePreview(
+                for: project,
+                quality: previewQuality,
+                invalidation: invalidation
+            )
+            guard !Task.isCancelled, generation == previewGeneration else { return }
+            if let prepared {
+                if prepared.topologyWasRebuilt || player == nil {
+                    let item = AVPlayerItem(asset: prepared.composition)
+                    item.videoComposition = prepared.videoComposition
+                    item.audioMix = prepared.audioMix
+                    if player == nil {
+                        player = AVPlayer(playerItem: item)
+                        player?.volume = 1
+                    } else {
+                        player?.replaceCurrentItem(with: item)
+                    }
+                    installTimeObserver()
+                } else if let item = player?.currentItem {
+                    if invalidation.contains(.previewFrame) {
+                        item.videoComposition = prepared.videoComposition
+                    }
+                    if invalidation.contains(.audioMix) {
+                        item.audioMix = prepared.audioMix
+                    }
                 }
-                installTimeObserver()
-                seek(to: seekTime)
-                if shouldResume {
+                if !isScrubbing {
+                    updateCurrentTime(seekTime)
+                    await seekPlayerAndWait(to: seekTime)
+                }
+                guard !Task.isCancelled, generation == previewGeneration else { return }
+                previewContentRevision &+= 1
+                previewState.status = .ready(generation: generation)
+                if shouldResume, !isScrubbing {
                     player?.play()
                     isPlaying = true
                 }
@@ -129,10 +179,30 @@ extension EditorViewModel {
                 player = nil
                 updateCurrentTime(0)
                 isPlaying = false
+                previewState.status = .ready(generation: generation)
+            }
+        } catch is CancellationError {
+            if generation == previewGeneration {
+                previewState.status = .cancelled
             }
         } catch {
-            if !Task.isCancelled {
-                errorMessage = error.localizedDescription
+            if !Task.isCancelled, generation == previewGeneration {
+                let message = error.localizedDescription
+                previewState.status = .failed(message)
+                errorMessage = message
+            }
+        }
+    }
+
+    private func seekPlayerAndWait(to time: Double) async {
+        guard let player else { return }
+        await withCheckedContinuation { continuation in
+            player.seek(
+                to: CMTime(seconds: time, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            ) { _ in
+                continuation.resume()
             }
         }
     }

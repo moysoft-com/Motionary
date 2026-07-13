@@ -1,31 +1,83 @@
 // Observable editor state and dependency ownership. Behavior is organized in focused extensions.
 
 import AVFoundation
+import Combine
 import SwiftUI
 
 @MainActor
 /// Coordinates all editor state transitions and delegates media, rendering, export, and persistence work to services.
 final class EditorViewModel: ObservableObject {
+    let playbackState = PlaybackState()
+    let selectionState = SelectionState()
+    let timelineState = TimelineState()
+    let previewState = PreviewState()
+    let exportState = ExportState()
+    let projectSession = ProjectSession()
+
     @Published var project: EditorProject
     @Published var player: AVPlayer?
-    @Published var currentTime: Double = 0
-    @Published var selectedClipID: UUID?
-    @Published var selectedTrackID: UUID?
-    @Published var isPlaying = false
-    @Published var isScrubbing = false
+    var currentTime: Double {
+        get { playbackState.currentTime }
+        set { playbackState.currentTime = newValue }
+    }
+    var selectedClipID: UUID? {
+        get { selectionState.clipID }
+        set { selectionState.clipID = newValue }
+    }
+    var selectedTrackID: UUID? {
+        get { selectionState.trackID }
+        set { selectionState.trackID = newValue }
+    }
+    var isPlaying: Bool {
+        get { playbackState.isPlaying }
+        set { playbackState.isPlaying = newValue }
+    }
+    var isScrubbing: Bool {
+        get { playbackState.isScrubbing }
+        set { playbackState.isScrubbing = newValue }
+    }
     @Published var isImporting = false
-    @Published var isRenderingPreview = false
-    @Published var isExporting = false
-    @Published var exportProgress = 0.0
+    var isRenderingPreview: Bool {
+        get { previewState.isBuilding }
+        set {
+            if newValue, !previewState.isBuilding {
+                previewState.status = .building(generation: previewGeneration)
+            } else if !newValue, previewState.isBuilding {
+                previewState.status = .idle
+            }
+        }
+    }
+    var previewContentRevision: Int {
+        get { previewState.contentRevision }
+        set { previewState.contentRevision = newValue }
+    }
+    var isExporting: Bool {
+        get { exportState.isExporting }
+        set { exportState.isExporting = newValue }
+    }
+    var exportProgress: Double {
+        get { exportState.progress }
+        set { exportState.progress = newValue }
+    }
     @Published var confirmationMessage: String?
     @Published var errorMessage: String?
-    @Published var timelineContentRevision = 0
-    @Published var canUndo = false
-    @Published var canRedo = false
+    var timelineContentRevision: Int {
+        get { timelineState.contentRevision }
+        set { timelineState.contentRevision = newValue }
+    }
+    var canUndo: Bool {
+        get { timelineState.canUndo }
+        set { timelineState.canUndo = newValue }
+    }
+    var canRedo: Bool {
+        get { timelineState.canRedo }
+        set { timelineState.canRedo = newValue }
+    }
     @Published var activeKeyframeTarget: KeyframeTarget?
     @Published var selectedKeyframeID: UUID?
     @Published var graphSegment: KeyframeSegment?
     @Published var displayedGraphSegment: KeyframeSegment?
+    @Published var isRippleEditingEnabled = false
 
     let projectID: UUID
     let projectStore: ProjectStore
@@ -34,15 +86,26 @@ final class EditorViewModel: ObservableObject {
     let exportService = VideoExportService()
     var timeObserver: Any?
     var wasPlayingBeforeScrub = false
-    var undoStack: [EditorProject] = []
-    var redoStack: [EditorProject] = []
+    var undoStack: [AnyEditorCommand] = []
+    var redoStack: [AnyEditorCommand] = []
     var rebuildTask: Task<Void, Never>?
+    var previewGeneration = 0
+    var previewQuality: PreviewQuality = .balanced
     var scrubSeekTask: Task<Void, Never>?
     var importTask: Task<Void, Never>?
     var exportTask: Task<Void, Never>?
     var toastTask: Task<Void, Never>?
+    var autosaveTask: Task<Void, Never>?
     var pendingScrubSeekTime: Double?
+    var isScrubSeekInFlight = false
     var interactiveEditSnapshot: EditorProject?
+    var timelineClipCache: [UUID: [TimelineClip]] = [:]
+    var timelineClipCacheRevision = -1
+    var timelineSnapshot: TimelineRenderSnapshot?
+    var timelineSnapshotToken: (revision: Int, selectedClipID: UUID?) = (-1, nil)
+    var deferredPreviewInvalidation: EditorInvalidation = []
+    var lastScrubUIUpdate: CFAbsoluteTime = 0
+    var stateCancellables: Set<AnyCancellable> = []
     let clipRevealEpsilon = 0.01
 
     var duration: Double { project.duration }
@@ -52,9 +115,6 @@ final class EditorViewModel: ObservableObject {
         }
         if isImporting {
             return "Importing"
-        }
-        if isRenderingPreview {
-            return "Preparing Preview"
         }
         return nil
     }
@@ -83,8 +143,23 @@ final class EditorViewModel: ObservableObject {
         self.projectID = projectID
         self.projectStore = projectStore
         self.project = initialContent.editorProject
-        self.selectedTrackID =
+        self.selectionState.trackID =
             initialContent.editorProject.tracks.first(where: { $0.kind == .visual })?.id
             ?? initialContent.editorProject.tracks.first?.id
+        selectionState.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &stateCancellables)
+        timelineState.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &stateCancellables)
+        previewState.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &stateCancellables)
+        projectSession.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &stateCancellables)
+        exportState.objectWillChange
+            .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &stateCancellables)
     }
 }

@@ -147,4 +147,28 @@ struct LayerManagementTests {
         viewModel.moveTrack(undefinedID, to: 1)
         #expect(viewModel.project.tracks.map(\.id) == [audioID, undefinedID, visualID])
     }
+
+    @Test func automergeUsesTopMatchingLayerWhenImportedRangeIsFree() {
+        let occupied = TimelineClip(
+            name: "Existing",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/existing.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Automerge",
+            tracks: [
+                TimelineTrack(name: "Layer 1", kind: .visual, clips: [occupied]),
+                TimelineTrack(name: "Layer 2", kind: .visual)
+            ]
+        )
+
+        #expect(project.topAvailableTrackIndex(kind: .visual, start: 2, duration: 3) == 0)
+        #expect(project.topAvailableTrackIndex(kind: .visual, start: 1, duration: 3) == 1)
+        #expect(project.topAvailableTrackIndex(kind: .audio, start: 0, duration: 3) == nil)
+    }
 }

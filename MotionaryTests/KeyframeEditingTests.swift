@@ -120,17 +120,26 @@ struct KeyframeEditingTests {
         var editorProject = try #require(root["editorProject"] as? [String: Any])
         editorProject["schemaVersion"] = 2
         var tracks = try #require(editorProject["tracks"] as? [[String: Any]])
-        var clips = try #require(tracks[0]["clips"] as? [[String: Any]])
-        clips[0]["volume"] = 0.35
-        tracks[0]["clips"] = clips
+        if var items = tracks[0]["items"] as? [[String: Any]] {
+            var payload = try #require(items[0]["payload"] as? [String: Any])
+            var visuals = try #require(payload["visuals"] as? [String: Any])
+            visuals["volume"] = 0.35
+            payload["visuals"] = visuals
+            items[0]["payload"] = payload
+            tracks[0]["items"] = items
+        } else {
+            var clips = try #require(tracks[0]["clips"] as? [[String: Any]])
+            clips[0]["volume"] = 0.35
+            tracks[0]["clips"] = clips
+        }
         editorProject["tracks"] = tracks
         root["editorProject"] = editorProject
 
         let legacyData = try JSONSerialization.data(withJSONObject: root)
         let decoded = try JSONDecoder().decode(ProjectContent.self, from: legacyData)
 
-        #expect(decoded.schemaVersion == 4)
-        #expect(decoded.editorProject.schemaVersion == 4)
+        #expect(decoded.schemaVersion == EditorProject.currentSchemaVersion)
+        #expect(decoded.editorProject.schemaVersion == EditorProject.currentSchemaVersion)
         #expect(abs(decoded.editorProject.tracks[0].clips[0].volume.baseValue - 0.35) < 0.0001)
         #expect(decoded.editorProject.tracks[0].clips[0].volume.keyframes.isEmpty)
     }

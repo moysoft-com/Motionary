@@ -9,6 +9,7 @@ struct TimelineTrimPreview {
 
 struct TimelineClipBlock: View {
     let clip: TimelineClip
+    let media: ClipMediaDescriptor
     let isSelected: Bool
     let isDragSourceHidden: Bool
     let isDragGhost: Bool
@@ -62,6 +63,7 @@ struct TimelineClipBlock: View {
 
             TimelineClipFill(
                 clip: mediaClip,
+                media: media,
                 width: displayWidth,
                 height: height,
                 pixelsPerSecond: pixelsPerSecond,
@@ -307,6 +309,7 @@ enum TrimHandleEdge {
 
 struct TimelineClipFill: View {
     let clip: TimelineClip
+    let media: ClipMediaDescriptor
     let width: CGFloat
     let height: CGFloat
     let pixelsPerSecond: CGFloat
@@ -317,7 +320,10 @@ struct TimelineClipFill: View {
 
     var body: some View {
         let thumbnailWidth = timelineThumbnailWidth
-        let thumbnailCount = max(Int(ceil(width / max(thumbnailWidth, 1))) + 1, 1)
+        let thumbnailCount = min(
+            max(Int(ceil(width / max(thumbnailWidth, 1))) + 1, 1),
+            36
+        )
         let waveformCount = quantizedWaveformSampleCount
 
         ZStack {
@@ -334,6 +340,7 @@ struct TimelineClipFill: View {
                         ForEach(0..<thumbnailCount, id: \.self) { index in
                             TimelineThumbnailTile(
                                 clip: clip,
+                                media: media,
                                 tileIndex: index,
                                 tileWidth: thumbnailWidth,
                                 height: height,
@@ -357,6 +364,7 @@ struct TimelineClipFill: View {
             if clip.mediaType == .audio {
                 let samples = await TimelineAudioWaveformLoader.samples(
                     for: clip,
+                    media: media,
                     targetCount: waveformCount
                 )
                 guard !Task.isCancelled, requestID == taskID else { return }
@@ -373,7 +381,7 @@ struct TimelineClipFill: View {
     }
 
     private var timelineThumbnailWidth: CGFloat {
-        let storedSize = clip.source.naturalSize?.cgSize ?? CGSize(width: 16, height: 9)
+        let storedSize = media.naturalSize?.cgSize ?? CGSize(width: 16, height: 9)
         let naturalSize = CGSize(width: max(abs(storedSize.width), 1), height: max(abs(storedSize.height), 1))
         let aspectRatio = min(max(naturalSize.width / max(naturalSize.height, 1), 0.35), 4)
         return max(height * aspectRatio, 24)
@@ -391,7 +399,7 @@ struct TimelineClipFill: View {
             "\(Int(timelineThumbnailWidth.rounded()))",
             "\(quantizedWaveformSampleCount)",
             "\(Int(displayScale.rounded()))",
-            clip.source.url.path,
+            media.mediaID.rawValue.uuidString,
             String(format: "%.3f", clip.sourceRange.start),
             String(format: "%.3f", clip.sourceRange.duration)
         ].joined(separator: "|")

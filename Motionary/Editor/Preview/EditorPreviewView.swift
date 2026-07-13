@@ -5,7 +5,14 @@ import SwiftUI
 
 struct CorePreviewSection: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var previewState: PreviewState
     @Binding var selectedMediaItems: [PhotosPickerItem]
+
+    init(viewModel: EditorViewModel, selectedMediaItems: Binding<[PhotosPickerItem]>) {
+        self.viewModel = viewModel
+        _previewState = ObservedObject(wrappedValue: viewModel.previewState)
+        _selectedMediaItems = selectedMediaItems
+    }
 
     var body: some View {
         ZStack {
@@ -63,7 +70,7 @@ struct CorePreviewSection: View {
                 }
             }
 
-            if viewModel.isRenderingPreview {
+            if previewState.isBuilding, viewModel.player == nil {
                 ProgressView()
                     .controlSize(.small)
                     .padding(10)

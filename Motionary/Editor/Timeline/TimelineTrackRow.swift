@@ -4,6 +4,7 @@ import SwiftUI
 
 struct TimelineTrackRow: View {
     let track: TimelineTrack
+    let clips: [TimelineClip]
     let trackIndex: Int
     let trackCount: Int
     let selectedClipID: UUID?
@@ -28,6 +29,7 @@ struct TimelineTrackRow: View {
     let onTrimEnd: (UUID, Double, TimelineClip?, Bool) -> TimelineTrimResult?
     let onPreviewTrimEnd: (UUID, Double, TimelineClip?) -> TimelineTrimResult?
     let onFinishInteractiveEdit: () -> Void
+    let mediaForClip: (TimelineClip) -> ClipMediaDescriptor?
     let onSnapGuideChanged: (Double?) -> Void
     let onTrackDragBegan: () -> Void
     let onTrackDragChanged: (CGSize) -> Void
@@ -60,10 +62,12 @@ struct TimelineTrackRow: View {
                 .frame(width: max(10 + CGFloat(projectDuration) * pixelsPerSecond, 0), height: height)
                 .offset(x: centerPadding - 5)
 
-            ForEach(track.clips) { clip in
-                TimelineClipBlock(
-                    clip: clip,
-                    isSelected: selectedClipID == clip.id,
+            ForEach(clips) { clip in
+                if let media = mediaForClip(clip) {
+                    TimelineClipBlock(
+                        clip: clip,
+                        media: media,
+                        isSelected: selectedClipID == clip.id,
                     isDragSourceHidden: activeClipDrag?.clipID == clip.id,
                     isDragGhost: false,
                     currentTime: currentTime,
@@ -81,9 +85,10 @@ struct TimelineTrackRow: View {
                     onTrimEnd: { delta, baseline, interactive in onTrimEnd(clip.id, delta, baseline, interactive) },
                     onPreviewTrimEnd: { delta, baseline in onPreviewTrimEnd(clip.id, delta, baseline) },
                     onFinishInteractiveEdit: onFinishInteractiveEdit,
-                    onSnapGuideChanged: onSnapGuideChanged
-                )
-                .offset(x: centerPadding + CGFloat(clip.timelineStart) * pixelsPerSecond)
+                        onSnapGuideChanged: onSnapGuideChanged
+                    )
+                    .offset(x: centerPadding + CGFloat(clip.timelineStart) * pixelsPerSecond)
+                }
             }
         }
         .frame(height: height)
@@ -97,7 +102,7 @@ struct TimelineTrackRow: View {
         .zIndex(
             activeTrackDrag?.trackID == track.id
                 ? 200
-                : (track.clips.contains { $0.id == selectedClipID } ? 100 : 0)
+                : (clips.contains { $0.id == selectedClipID } ? 100 : 0)
         )
     }
 

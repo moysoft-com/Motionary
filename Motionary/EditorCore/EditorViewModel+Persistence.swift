@@ -5,52 +5,71 @@ import Foundation
 
 extension EditorViewModel {
     func addImportedMedia(_ imported: ImportedMedia, sequentialVisual: Bool = false) {
-        mutateProject { project in
-            let kind: TrackKind = imported.source.mediaType == .audio ? .audio : .visual
-            let hadVisualClips = project.tracks.contains { $0.kind == .visual && !$0.clips.isEmpty }
-            let trackIndex = project.insertFreshTrack(kind: kind)
-            let targetInsertionTime: Double
-            if kind == .visual, hadVisualClips, !sequentialVisual {
-                targetInsertionTime = currentTime
-            } else {
-                targetInsertionTime = insertionTime(for: kind, in: project)
-            }
-            let clip = TimelineClip(
-                name: imported.storedURL.deletingPathExtension().lastPathComponent,
-                source: imported.source,
-                timelineStart: targetInsertionTime,
-                sourceRange: TimeRangeValue(start: 0, duration: imported.source.originalDuration)
-            )
-            project.tracks[trackIndex].clips.append(clip)
-            project.tracks[trackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
-            if kind == .visual, !hadVisualClips, let naturalSize = imported.source.naturalSize?.displaySafeSize {
-                project.renderSettings = RenderSettings(size: naturalSize)
-            }
-            project.renumberTracks()
-            selectedTrackID = project.tracks[trackIndex].id
-            selectedClipID = clip.id
+        let before = project
+        var after = project
+        let kind: TrackKind = imported.source.mediaType == .audio ? .audio : .visual
+        let hadVisualClips = after.tracks.contains { $0.kind == .visual && !$0.clips.isEmpty }
+        let targetInsertionTime: Double
+        if kind == .visual, hadVisualClips, !sequentialVisual {
+            targetInsertionTime = currentTime
+        } else {
+            targetInsertionTime = insertionTime(for: kind, in: after)
         }
+        let trackIndex =
+            after.topAvailableTrackIndex(
+                kind: kind,
+                start: targetInsertionTime,
+                duration: imported.source.originalDuration
+            )
+            ?? after.insertFreshTrack(kind: kind)
+        var clip = TimelineClip(
+            name: imported.storedURL.deletingPathExtension().lastPathComponent,
+            source: imported.source,
+            timelineStart: targetInsertionTime,
+            sourceRange: TimeRangeValue(start: 0, duration: imported.source.originalDuration)
+        )
+        after.registerClipMedia(&clip, source: imported.source)
+        after.tracks[trackIndex].appendLegacyClip(clip)
+        if kind == .visual, !hadVisualClips, let naturalSize = imported.source.naturalSize?.displaySafeSize {
+            after.renderSettings = RenderSettings(size: naturalSize)
+        }
+        after.renumberTracks()
+        after.synchronizeMediaLibrary()
+        selectedTrackID = after.tracks[trackIndex].id
+        selectedClipID = clip.id
+        commit(
+            EditorCommandFactory.importMedia(
+                before: before,
+                after: after,
+                invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+            )
+        )
     }
 
     func repairStoredMediaReferences() {
         var repaired = project
         var changed = false
 
-        for trackIndex in repaired.tracks.indices {
-            for clipIndex in repaired.tracks[trackIndex].clips.indices {
-                let url = repaired.tracks[trackIndex].clips[clipIndex].source.url
-                let resolved = projectStore.resolvedMediaURL(url, projectID: projectID)
-                if resolved != url {
-                    repaired.tracks[trackIndex].clips[clipIndex].source.url = resolved
-                    changed = true
-                }
+        for (mediaID, asset) in repaired.mediaLibrary {
+            let resolved = projectStore.resolvedMediaURL(asset.url, projectID: projectID)
+            if resolved != asset.url {
+                var source = asset.source
+                source.url = resolved
+                repaired.updateMediaAsset(mediaID, source: source)
+                changed = true
             }
         }
 
         if changed {
-            project = repaired
-            incrementTimelineContentRevision()
-            persist()
+            let before = project
+            commit(
+                EditorCommandFactory.importMedia(
+                    before: before,
+                    after: repaired,
+                    invalidation: [.previewFrame, .compositionTopology, .audioMix, .persistence]
+                ),
+                refreshTimeline: true
+            )
         }
     }
 
@@ -73,6 +92,26 @@ extension EditorViewModel {
         }
     }
 
+    func commit(
+        _ command: AnyEditorCommand,
+        recordHistory: Bool = true,
+        persistChanges: Bool = true,
+        touchUpdatedAt: Bool = true,
+        refreshTimeline: Bool = true,
+        seekTo time: Double? = nil
+    ) {
+        perform(
+            command,
+            recordHistory: recordHistory,
+            persistChanges: persistChanges,
+            touchUpdatedAt: touchUpdatedAt,
+            refreshTimeline: refreshTimeline
+        )
+        if let time {
+            updateCurrentTime(min(max(time, 0), max(duration, 0)))
+        }
+    }
+
     func mutateProject(
         rebuild: Bool = true,
         recordHistory: Bool = true,
@@ -81,15 +120,61 @@ extension EditorViewModel {
         refreshTimeline: Bool = true,
         _ mutation: (inout EditorProject) -> Void
     ) {
-        let previous = project
-        mutation(&project)
+        if !rebuild, !recordHistory, !persistChanges, !touchUpdatedAt {
+            mutation(&project)
+            project.renumberTracks()
+            project.synchronizeMediaLibrary()
+            if refreshTimeline {
+                incrementTimelineContentRevision()
+            }
+            return
+        }
+
+        let before = project
+        var after = project
+        mutation(&after)
+        after.renumberTracks()
+        after.synchronizeMediaLibrary()
+        guard after != before else { return }
+
+        var renderInvalidation = after.renderInvalidation(comparedTo: before)
+        if !rebuild {
+            renderInvalidation.subtract([.previewFrame, .compositionTopology, .audioMix])
+        }
+        var invalidation: EditorInvalidation = [.userInterface, .persistence]
+        invalidation.formUnion(renderInvalidation)
+        if refreshTimeline {
+            invalidation.insert(.timelineLayout)
+        }
+
+        perform(
+            after.historyCommand(from: before, invalidation: invalidation),
+            recordHistory: recordHistory,
+            persistChanges: persistChanges,
+            touchUpdatedAt: touchUpdatedAt,
+            refreshTimeline: refreshTimeline
+        )
+    }
+
+    func perform(
+        _ command: AnyEditorCommand,
+        recordHistory: Bool = true,
+        persistChanges: Bool = true,
+        touchUpdatedAt: Bool = true,
+        refreshTimeline: Bool = true
+    ) {
+        command.apply(to: &project)
+        if command.invalidation.contains(.persistence) || command.invalidation.contains(.compositionTopology) {
+            project.synchronizeMediaLibrary()
+        }
         project.renumberTracks()
-        guard project != previous else { return }
         if refreshTimeline {
             incrementTimelineContentRevision()
+            timelineClipCacheRevision = -1
+            timelineSnapshotToken = (-1, nil)
         }
         if recordHistory {
-            undoStack.append(previous)
+            undoStack.append(command)
             if undoStack.count > 80 {
                 undoStack.removeFirst()
             }
@@ -102,25 +187,69 @@ extension EditorViewModel {
         if persistChanges {
             persist()
         }
-        if rebuild {
-            schedulePreviewRebuild(seekTo: currentTime)
+        if !command.invalidation.intersection([.previewFrame, .compositionTopology, .audioMix]).isEmpty {
+            schedulePreviewRebuild(seekTo: currentTime, invalidation: command.invalidation)
         }
     }
 
-    func schedulePreviewRebuild(seekTo time: Double? = nil, delay: Bool = true) {
+    func schedulePreviewRebuild(
+        seekTo time: Double? = nil,
+        delay: Bool = true,
+        invalidation: EditorInvalidation = [.previewFrame]
+    ) {
+        if isScrubbing {
+            deferredPreviewInvalidation.formUnion(invalidation)
+            return
+        }
+
         rebuildTask?.cancel()
+        previewGeneration &+= 1
+        let generation = previewGeneration
         rebuildTask = Task { [weak self] in
             guard let self else { return }
             if delay {
-                try? await Task.sleep(nanoseconds: 90_000_000)
+                try? await Task.sleep(nanoseconds: 160_000_000)
             }
-            guard !Task.isCancelled else { return }
-            await self.rebuildPreview(seekTo: time)
+            guard !Task.isCancelled, !self.isScrubbing else { return }
+            await self.rebuildPreview(
+                seekTo: time,
+                invalidation: invalidation,
+                generation: generation
+            )
         }
     }
 
     func persist() {
-        projectStore.saveContent(ProjectContent(editorProject: project), for: projectID)
+        autosaveTask?.cancel()
+        let snapshot = project
+        let projectID = projectID
+        projectSession.saveState = .saving
+        autosaveTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+                guard !Task.isCancelled, let self else { return }
+                try await self.projectStore.repository.save(
+                    ProjectContent(editorProject: snapshot),
+                    projectID: projectID
+                )
+                guard !Task.isCancelled else { return }
+                self.projectStore.recordSavedContent(
+                    ProjectContent(editorProject: snapshot),
+                    projectID: projectID
+                )
+                self.projectSession.saveState = .saved(Date())
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self else { return }
+                let message = error.localizedDescription
+                self.projectSession.saveState = .failed(message)
+                self.errorMessage = message
+                AppLogger.persistence.error(
+                    "Failed to autosave project content: \(message, privacy: .public)"
+                )
+            }
+        }
     }
 
     func installTimeObserver() {
@@ -167,12 +296,8 @@ extension EditorViewModel {
     }
 
     func updateSelection(clipID: UUID?, trackID: UUID?) {
-        let changed = selectedClipID != clipID || selectedTrackID != trackID
         selectedClipID = clipID
         selectedTrackID = trackID
-        if changed {
-            incrementTimelineContentRevision()
-        }
     }
 
     func isTimeInside(_ clip: TimelineClip) -> Bool {
@@ -189,5 +314,9 @@ extension EditorViewModel {
 
     func incrementTimelineContentRevision() {
         timelineContentRevision &+= 1
+    }
+
+    func setPreviewQualityForInteraction(_ interactive: Bool) {
+        previewQuality = interactive ? .interactive : .balanced
     }
 }

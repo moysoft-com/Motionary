@@ -74,7 +74,7 @@ extension EditorViewModel {
             return 0...max(maximum, 0)
         case .positionX, .positionY:
             let canvas = project.renderSettings.size
-            let source = clip.source.naturalSize?.displaySafeSize ?? canvas
+            let source = project.naturalSize(for: clip)?.displaySafeSize ?? canvas
             let fitScale = min(
                 canvas.width / max(source.width, 1),
                 canvas.height / max(source.height, 1)
@@ -245,11 +245,9 @@ extension EditorViewModel {
     }
 
     func toggleKeyframe(_ target: KeyframeTarget) {
-        guard let selectedClipID else { return }
+        guard selectedClipID != nil else { return }
         activeKeyframeTarget = target
-        mutateProject { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            var clip = project.tracks[location.track].clips[location.clip]
+        updateSelectedClip { clip in
             if target.isScaleTarget {
                 let time = self.snappedKeyframeTime(
                     self.currentTime - clip.timelineStart,
@@ -267,7 +265,6 @@ extension EditorViewModel {
                         tolerance: self.keyframeTimeTolerance
                     )
                 }
-                project.tracks[location.track].clips[location.clip] = clip
                 return
             }
             guard var property = clip.animatableProperty(for: target) else { return }
@@ -287,15 +284,12 @@ extension EditorViewModel {
                 )
             }
             clip.setAnimatableProperty(property, for: target)
-            project.tracks[location.track].clips[location.clip] = clip
         }
     }
 
     func toggleKeyframeSection(_ section: KeyframeSection) {
-        guard let selectedClipID else { return }
-        mutateProject { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            var clip = project.tracks[location.track].clips[location.clip]
+        guard selectedClipID != nil else { return }
+        updateSelectedClip { clip in
             let time = self.snappedKeyframeTime(
                 self.currentTime - clip.timelineStart,
                 clip: clip
@@ -331,7 +325,6 @@ extension EditorViewModel {
                     }?.id
                 }
             }
-            project.tracks[location.track].clips[location.clip] = clip
         }
     }
 
@@ -387,20 +380,16 @@ extension EditorViewModel {
     }
 
     func removeKeyframe(target: KeyframeTarget, id: UUID) {
-        guard let selectedClipID else { return }
-        mutateProject { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            var clip = project.tracks[location.track].clips[location.clip]
+        guard selectedClipID != nil else { return }
+        updateSelectedClip { clip in
             if target.isScaleTarget {
                 clip.transform.scale.keyframes.removeAll { $0.id == id }
-                project.tracks[location.track].clips[location.clip] = clip
                 self.selectedKeyframeID = nil
                 return
             }
             guard var property = clip.animatableProperty(for: target) else { return }
             property.removeKeyframe(id: id)
             clip.setAnimatableProperty(property, for: target)
-            project.tracks[location.track].clips[location.clip] = clip
             self.selectedKeyframeID = nil
         }
     }

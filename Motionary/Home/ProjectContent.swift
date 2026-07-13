@@ -75,7 +75,7 @@ private extension EditorProject {
     func removingTemporaryTracks() -> EditorProject {
         var persistedProject = self
         persistedProject.tracks.removeAll { track in
-            track.kind == .undefined && track.clips.isEmpty
+            track.kind == .undefined && track.items.isEmpty
         }
         return persistedProject
     }

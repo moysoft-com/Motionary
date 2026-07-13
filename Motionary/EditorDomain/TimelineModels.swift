@@ -3,6 +3,62 @@
 import CoreGraphics
 import Foundation
 
+struct MediaID: RawRepresentable, Hashable, Codable, Sendable {
+    var rawValue: UUID
+
+    init(rawValue: UUID = UUID()) {
+        self.rawValue = rawValue
+    }
+}
+
+struct MediaAsset: Identifiable, Codable, Equatable {
+    var id: MediaID
+    var url: URL
+    var fileName: String
+    var mediaType: ClipMediaType
+    var originalDuration: Double
+    var naturalSize: CGSizeValue?
+
+    init(id: MediaID, source: ClipSource) {
+        self.id = id
+        self.url = source.url
+        self.fileName = source.url.lastPathComponent
+        self.mediaType = source.mediaType
+        self.originalDuration = source.originalDuration
+        self.naturalSize = source.naturalSize
+    }
+
+    var source: ClipSource {
+        ClipSource(
+            id: id.rawValue,
+            url: url,
+            mediaType: mediaType,
+            originalDuration: originalDuration,
+            naturalSize: naturalSize
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case url
+        case fileName
+        case mediaType
+        case originalDuration
+        case naturalSize
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(MediaID.self, forKey: .id)
+        fileName = try container.decode(String.self, forKey: .fileName)
+        url = try container.decodeIfPresent(URL.self, forKey: .url)
+            ?? URL(fileURLWithPath: fileName)
+        mediaType = try container.decode(ClipMediaType.self, forKey: .mediaType)
+        originalDuration = try container.decode(Double.self, forKey: .originalDuration)
+        naturalSize = try container.decodeIfPresent(CGSizeValue.self, forKey: .naturalSize)
+    }
+}
+
 enum ClipShapeKind: String, Codable, CaseIterable, Identifiable {
     case rectangle
     case roundedRectangle
@@ -120,11 +176,12 @@ struct CGSizeValue: Codable, Equatable {
     }
 }
 
-/// Timeline placement and editable state for one source media item.
+/// Timeline placement and editable state for one library media instance.
 struct TimelineClip: Identifiable, Codable, Equatable {
     var id: UUID
     var name: String
-    var source: ClipSource
+    var mediaID: MediaID
+    var mediaType: ClipMediaType
     var timelineStart: Double
     var sourceRange: TimeRangeValue
     var transform: ClipTransform
@@ -132,14 +189,15 @@ struct TimelineClip: Identifiable, Codable, Equatable {
     var effectStack: EffectStack
     var volume: AnimatableProperty<Double>
     var shape: ClipShape?
+    fileprivate var pendingMigrationSource: ClipSource?
 
     var timelineEnd: Double { timelineStart + sourceRange.duration }
-    var mediaType: ClipMediaType { source.mediaType }
 
     init(
         id: UUID = UUID(),
         name: String,
-        source: ClipSource,
+        mediaID: MediaID,
+        mediaType: ClipMediaType,
         timelineStart: Double,
         sourceRange: TimeRangeValue,
         transform: ClipTransform = ClipTransform(),
@@ -150,7 +208,8 @@ struct TimelineClip: Identifiable, Codable, Equatable {
     ) {
         self.id = id
         self.name = name
-        self.source = source
+        self.mediaID = mediaID
+        self.mediaType = mediaType
         self.timelineStart = max(0, timelineStart)
         self.sourceRange = sourceRange
         self.transform = transform
@@ -158,11 +217,43 @@ struct TimelineClip: Identifiable, Codable, Equatable {
         self.effectStack = effectStack
         self.volume = volume.clamped(to: 0...2)
         self.shape = shape
+        self.pendingMigrationSource = nil
+    }
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        source: ClipSource,
+        mediaID: MediaID? = nil,
+        timelineStart: Double,
+        sourceRange: TimeRangeValue,
+        transform: ClipTransform = ClipTransform(),
+        adjustments: AdjustmentSettings = AdjustmentSettings(),
+        effectStack: EffectStack = EffectStack(),
+        volume: AnimatableProperty<Double> = AnimatableProperty(baseValue: 1),
+        shape: ClipShape? = nil
+    ) {
+        self.init(
+            id: id,
+            name: name,
+            mediaID: mediaID ?? MediaID(rawValue: source.id),
+            mediaType: source.mediaType,
+            timelineStart: timelineStart,
+            sourceRange: sourceRange,
+            transform: transform,
+            adjustments: adjustments,
+            effectStack: effectStack,
+            volume: volume,
+            shape: shape
+        )
+        self.pendingMigrationSource = source
     }
 
     private enum CodingKeys: String, CodingKey {
         case id
         case name
+        case mediaID
+        case mediaType
         case source
         case timelineStart
         case sourceRange
@@ -177,7 +268,13 @@ struct TimelineClip: Identifiable, Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decode(String.self, forKey: .name)
-        source = try container.decode(ClipSource.self, forKey: .source)
+        let decodedSource = try container.decodeIfPresent(ClipSource.self, forKey: .source)
+        mediaID = try container.decodeIfPresent(MediaID.self, forKey: .mediaID)
+            ?? MediaID(rawValue: decodedSource?.id ?? UUID())
+        mediaType =
+            try container.decodeIfPresent(ClipMediaType.self, forKey: .mediaType)
+            ?? decodedSource?.mediaType
+            ?? .video
         timelineStart = max(try container.decode(Double.self, forKey: .timelineStart), 0)
         sourceRange = try container.decode(TimeRangeValue.self, forKey: .sourceRange)
         transform = try container.decodeIfPresent(ClipTransform.self, forKey: .transform) ?? ClipTransform()
@@ -195,31 +292,146 @@ struct TimelineClip: Identifiable, Codable, Equatable {
             volume = AnimatableProperty(baseValue: min(max(legacyVolume, 0), 2))
         }
         shape = try container.decodeIfPresent(ClipShape.self, forKey: .shape)
+        pendingMigrationSource = decodedSource
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(mediaID, forKey: .mediaID)
+        try container.encode(mediaType, forKey: .mediaType)
+        try container.encode(timelineStart, forKey: .timelineStart)
+        try container.encode(sourceRange, forKey: .sourceRange)
+        try container.encode(transform, forKey: .transform)
+        try container.encode(adjustments, forKey: .adjustments)
+        try container.encode(effectStack, forKey: .effectStack)
+        try container.encode(volume, forKey: .volume)
+        try container.encodeIfPresent(shape, forKey: .shape)
+    }
+
+    mutating func consumePendingMigrationSource() -> ClipSource? {
+        defer { pendingMigrationSource = nil }
+        return pendingMigrationSource
     }
 }
 
-/// Ordered collection of compatible clips in the editor timeline.
+/// Ordered collection of typed timeline items in the editor timeline.
 struct TimelineTrack: Identifiable, Codable, Equatable {
     var id: UUID
     var name: String
     var kind: TrackKind
-    var clips: [TimelineClip]
+    var items: [TimelineItem]
     var isMuted: Bool
     var isLocked: Bool
+
+    var clips: [TimelineClip] {
+        items.compactMap { $0.legacyClip() }
+    }
 
     init(
         id: UUID = UUID(),
         name: String,
         kind: TrackKind,
-        clips: [TimelineClip] = [],
+        items: [TimelineItem] = [],
         isMuted: Bool = false,
         isLocked: Bool = false
     ) {
         self.id = id
         self.name = name
         self.kind = kind
-        self.clips = clips
+        self.items = items
         self.isMuted = isMuted
         self.isLocked = isLocked
+    }
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        kind: TrackKind,
+        clips: [TimelineClip],
+        isMuted: Bool = false,
+        isLocked: Bool = false
+    ) {
+        self.init(
+            id: id,
+            name: name,
+            kind: kind,
+            items: clips.map(TimelineItem.fromLegacyClip),
+            isMuted: isMuted,
+            isLocked: isLocked
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case kind
+        case clips
+        case items
+        case isMuted
+        case isLocked
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        kind = try container.decode(TrackKind.self, forKey: .kind)
+        isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+        isLocked = try container.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        if let decodedItems = try container.decodeIfPresent([TimelineItem].self, forKey: .items) {
+            items = decodedItems
+        } else {
+            let legacyClips = try container.decodeIfPresent([TimelineClip].self, forKey: .clips) ?? []
+            items = legacyClips.map(TimelineItem.fromLegacyClip)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(items, forKey: .items)
+        try container.encode(isMuted, forKey: .isMuted)
+        try container.encode(isLocked, forKey: .isLocked)
+    }
+}
+
+extension TimelineTrack {
+    func itemIndex(id: UUID) -> Int? {
+        items.firstIndex { $0.id == id }
+    }
+
+    mutating func sortItems() {
+        items.sort { $0.timelineStart < $1.timelineStart }
+    }
+
+    mutating func appendLegacyClip(_ clip: TimelineClip) {
+        items.append(TimelineItem.fromLegacyClip(clip))
+        sortItems()
+    }
+
+    mutating func insertLegacyClip(_ clip: TimelineClip, at index: Int) {
+        items.insert(TimelineItem.fromLegacyClip(clip), at: min(max(index, 0), items.count))
+        sortItems()
+    }
+
+    @discardableResult
+    mutating func removeItem(id: UUID) -> TimelineItem? {
+        guard let index = itemIndex(id: id) else { return nil }
+        return items.remove(at: index)
+    }
+
+    mutating func replaceLegacyClip(id: UUID, with clip: TimelineClip) {
+        guard let index = itemIndex(id: id) else { return }
+        items[index] = TimelineItem.fromLegacyClip(clip)
+    }
+
+    mutating func setTimelineStart(id: UUID, to start: Double) {
+        guard let index = itemIndex(id: id) else { return }
+        items[index].timelineStart = start
+        sortItems()
     }
 }

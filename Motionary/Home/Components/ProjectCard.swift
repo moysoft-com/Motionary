@@ -99,7 +99,7 @@ struct ProjectCard: View {
 
 enum ProjectCoverLoader {
     static func cover(for project: Project, projectStore: ProjectStore) async -> UIImage? {
-        guard let content = projectStore.loadContent(for: project.id),
+        guard let content = try? await projectStore.repository.load(projectID: project.id).content,
             let clip = content.editorProject.tracks
                 .filter({ $0.kind == .visual })
                 .flatMap(\.clips)
@@ -107,7 +107,8 @@ enum ProjectCoverLoader {
                 .min(by: { $0.timelineStart < $1.timelineStart })
         else { return nil }
 
-        let url = projectStore.resolvedMediaURL(clip.source.url, projectID: project.id)
+        let editorProject = content.editorProject
+        let url = projectStore.resolvedMediaURL(editorProject.mediaURL(for: clip), projectID: project.id)
         let sourceStart = clip.sourceRange.start
         return await Task<UIImage?, Never>.detached(priority: .utility) {
             let asset = AVURLAsset(url: url)

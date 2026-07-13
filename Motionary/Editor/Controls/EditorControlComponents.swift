@@ -52,6 +52,7 @@ struct CompactIconButton: View {
     var isDisabled = false
     var action: () -> Void
     var isBordered = true
+    var tintsProminentIcon = false
 
     var body: some View {
         ZStack {
@@ -62,7 +63,11 @@ struct CompactIconButton: View {
                 Image(systemName: systemName)
                     .font(.system(size: isBordered ? 16 : 18, weight: .semibold))
                     .frame(width: isBordered ? 40 : 18, height: isBordered ? 36 : 18)
-                    .foregroundStyle(isBordered ? Color.clear : Color.primary)
+                    .foregroundStyle(
+                        isBordered
+                            ? Color.clear
+                            : (isProminent && tintsProminentIcon ? MotionaryTheme.accent : Color.primary)
+                    )
                     .background {
                         if isBordered {
                             RoundedRectangle(cornerRadius: 13, style: .continuous)

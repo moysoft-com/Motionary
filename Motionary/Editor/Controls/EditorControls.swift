@@ -73,7 +73,7 @@ struct CoreToolBar: View {
                     systemName: propertyToolSystemName(for: .transform, fallback: "crop.rotate"),
                     title: propertyToolTitle(for: .transform, fallback: "Transform"),
                     isSelected: isPropertyToolSelected(.transform),
-                    isDisabled: viewModel.selectedClip == nil && propertyContextClipID == nil
+                    isDisabled: isVisualToolDisabled
                 ) {
                     if activePanel == .graph, graphReturnPanel == .transform {
                         viewModel.graphSegment = nil
@@ -110,7 +110,7 @@ struct CoreToolBar: View {
                     systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
                     title: propertyToolTitle(for: .adjust, fallback: "Adjust"),
                     isSelected: isPropertyToolSelected(.adjust),
-                    isDisabled: viewModel.selectedClip == nil && propertyContextClipID == nil
+                    isDisabled: isVisualToolDisabled
                 ) {
                     if activePanel == .graph, graphReturnPanel == .adjust {
                         viewModel.graphSegment = nil
@@ -127,7 +127,7 @@ struct CoreToolBar: View {
                     systemName: propertyToolSystemName(for: .effects, fallback: "sparkles.2"),
                     title: propertyToolTitle(for: .effects, fallback: "Effects"),
                     isSelected: isPropertyToolSelected(.effects),
-                    isDisabled: viewModel.selectedClip == nil && propertyContextClipID == nil
+                    isDisabled: isVisualToolDisabled
                 ) {
                     if activePanel == .graph, graphReturnPanel == .effects {
                         viewModel.graphSegment = nil
@@ -191,6 +191,13 @@ struct CoreToolBar: View {
     private var canReplaceSelectedMedia: Bool {
         guard let clip = viewModel.selectedClip else { return false }
         return clip.mediaType != .audio && clip.shape == nil
+    }
+
+    private var isVisualToolDisabled: Bool {
+        guard let clip = viewModel.selectedClip ?? propertyContextClipID.flatMap({ viewModel.project.clip(id: $0) }) else {
+            return true
+        }
+        return clip.mediaType == .audio
     }
 
     private func propertyToolSystemName(
@@ -298,7 +305,7 @@ struct CanvasRatioMenu: View {
     private var isOriginalSelected: Bool {
         guard let clip = viewModel.selectedClip,
             clip.mediaType != .audio,
-            let size = clip.source.naturalSize?.cgSize
+            let size = viewModel.project.naturalSize(for: clip)?.cgSize
         else { return false }
         let width = max(Int(abs(size.width).rounded()), 1)
         let height = max(Int(abs(size.height).rounded()), 1)

@@ -5,90 +5,175 @@ import Foundation
 extension EditorViewModel {
     @discardableResult
     func splitSelectedClip() -> UUID? {
-        guard let targetID = selectedClipID else { return nil }
-        var splitClipID: UUID?
+        guard let targetID = selectedClipID,
+            let location = project.clipLocation(id: targetID)
+        else { return nil }
+        let clip = project.tracks[location.track].clips[location.clip]
+        let offset = currentTime - clip.timelineStart
+        guard offset > 0.08, offset < clip.sourceRange.duration - 0.08 else { return nil }
 
-        mutateProject { project in
-            guard let location = project.clipLocation(id: targetID) else { return }
-            let clip = project.tracks[location.track].clips[location.clip]
-            let offset = currentTime - clip.timelineStart
-            guard offset > 0.08, offset < clip.sourceRange.duration - 0.08 else { return }
+        let animationSplit = clip.splittingAnimations(at: offset)
+        var first = animationSplit.left
+        first.sourceRange = TimeRangeValue(start: clip.sourceRange.start, duration: offset)
 
-            let animationSplit = clip.splittingAnimations(at: offset)
-            var first = animationSplit.left
-            first.sourceRange = TimeRangeValue(start: clip.sourceRange.start, duration: offset)
+        var second = animationSplit.right
+        second.id = UUID()
+        second.name = "\(clip.name) split"
+        second.timelineStart = currentTime
+        second.sourceRange = TimeRangeValue(
+            start: clip.sourceRange.start + offset,
+            duration: clip.sourceRange.duration - offset
+        )
 
-            var second = animationSplit.right
-            second.id = UUID()
-            second.name = "\(clip.name) split"
-            second.timelineStart = currentTime
-            second.sourceRange = TimeRangeValue(
-                start: clip.sourceRange.start + offset,
-                duration: clip.sourceRange.duration - offset
+        let trackID = project.tracks[location.track].id
+        commit(
+            AnyEditorCommand(
+                SplitClipCommand(
+                    trackID: trackID,
+                    originalClip: clip,
+                    first: first,
+                    second: second,
+                    invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+                )
             )
-
-            project.tracks[location.track].clips[location.clip] = first
-            project.tracks[location.track].clips.insert(second, at: location.clip + 1)
-            selectedClipID = second.id
-            splitClipID = second.id
-        }
-        return splitClipID
+        )
+        selectedClipID = second.id
+        return second.id
     }
 
     func deleteSelectedClip() {
-        guard let selectedClipID else { return }
-        mutateProject { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            project.tracks[location.track].clips.remove(at: location.clip)
-            self.selectedClipID = nil
+        guard let selectedClipID,
+            let location = project.clipLocation(id: selectedClipID)
+        else { return }
+        let track = project.tracks[location.track]
+        guard let clip = track.items[location.clip].legacyClip() else { return }
 
-            if project.tracks[location.track].clips.isEmpty {
-                project.tracks.remove(at: location.track)
-                let replacementIndex = min(location.track, max(project.tracks.count - 1, 0))
-                self.selectedTrackID =
-                    project.tracks.indices.contains(replacementIndex)
-                    ? project.tracks[replacementIndex].id
-                    : nil
-            } else {
-                self.selectedTrackID = project.tracks[location.track].id
-            }
+        if isRippleEditingEnabled {
+            deleteSelectedClipWithRipple(
+                selectedClipID,
+                location: location,
+                deletedRange: clip.timelineStart..<clip.timelineEnd
+            )
+            return
+        }
+
+        let removedTrack = track.items.count == 1 ? track : nil
+        let item = track.items[location.clip]
+        commit(
+            AnyEditorCommand(
+                RemoveClipCommand(
+                    removedTrack: removedTrack,
+                    trackIndex: location.track,
+                    itemIndex: location.clip,
+                    item: item,
+                    invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+                )
+            )
+        )
+        self.selectedClipID = nil
+        if removedTrack != nil {
+            let replacementIndex = min(location.track, max(project.tracks.count - 1, 0))
+            selectedTrackID =
+                project.tracks.indices.contains(replacementIndex)
+                ? project.tracks[replacementIndex].id
+                : nil
+        } else if project.tracks.indices.contains(location.track) {
+            selectedTrackID = project.tracks[location.track].id
         }
     }
 
-    func duplicateSelectedClip() {
-        guard let selectedClipID else { return }
-        mutateProject { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            let sourceClip = project.tracks[location.track].clips[location.clip]
-            var copy = sourceClip
-            copy.id = UUID()
-            copy.name = "\(sourceClip.name) copy"
-            copy.timelineStart = project.resolvedPlacementStart(
-                proposedStart: sourceClip.timelineEnd + 0.15,
-                duration: sourceClip.sourceRange.duration,
-                destinationTrackIndex: location.track,
-                requiredKind: sourceClip.requiredTrackKind
-            )
-            project.tracks[location.track].clips.insert(copy, at: location.clip + 1)
-            project.tracks[location.track].clips.sort { $0.timelineStart < $1.timelineStart }
-            self.selectedClipID = copy.id
+    private func deleteSelectedClipWithRipple(
+        _ clipID: UUID,
+        location: (track: Int, clip: Int),
+        deletedRange: Range<Double>
+    ) {
+        let beforeTracks = project.tracks
+        var afterTracks = beforeTracks
+        guard afterTracks.indices.contains(location.track),
+            afterTracks[location.track].items.indices.contains(location.clip),
+            afterTracks[location.track].items[location.clip].id == clipID
+        else { return }
+
+        afterTracks[location.track].items.remove(at: location.clip)
+        if afterTracks[location.track].items.isEmpty {
+            afterTracks.remove(at: location.track)
+        } else {
+            let removedDuration = deletedRange.upperBound - deletedRange.lowerBound
+            for index in afterTracks[location.track].items.indices
+            where afterTracks[location.track].items[index].timelineStart >= deletedRange.upperBound - 0.000_001 {
+                afterTracks[location.track].items[index].timelineStart = max(
+                    0,
+                    afterTracks[location.track].items[index].timelineStart - removedDuration
+                )
+            }
+            afterTracks[location.track].sortItems()
         }
+
+        commit(
+            EditorCommandFactory.trackStructure(
+                before: beforeTracks,
+                after: afterTracks,
+                invalidation: [
+                    .previewFrame,
+                    .compositionTopology,
+                    .audioMix,
+                    .timelineLayout,
+                    .userInterface,
+                    .persistence,
+                ]
+            )
+        )
+
+        self.selectedClipID = nil
+        let replacementIndex = min(location.track, max(project.tracks.count - 1, 0))
+        selectedTrackID = project.tracks.indices.contains(replacementIndex)
+            ? project.tracks[replacementIndex].id
+            : nil
+    }
+
+    func duplicateSelectedClip() {
+        guard let selectedClipID,
+            let location = project.clipLocation(id: selectedClipID)
+        else { return }
+        let sourceClip = project.tracks[location.track].clips[location.clip]
+        var copy = sourceClip
+        copy.id = UUID()
+        copy.name = "\(sourceClip.name) copy"
+        copy.timelineStart = project.resolvedPlacementStart(
+            proposedStart: sourceClip.timelineEnd + 0.15,
+            duration: sourceClip.sourceRange.duration,
+            destinationTrackIndex: location.track,
+            requiredKind: sourceClip.requiredTrackKind
+        )
+        commit(
+            AnyEditorCommand(
+                DuplicateClipCommand(
+                    trackID: project.tracks[location.track].id,
+                    copy: copy,
+                    insertIndex: location.clip + 1,
+                    invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+                )
+            )
+        )
+        self.selectedClipID = copy.id
     }
 
     func moveSelectedClip(by seconds: Double) {
         guard let selectedClipID else { return }
         mutateProject { project in
             guard let location = project.clipLocation(id: selectedClipID) else { return }
-            var clip = project.tracks[location.track].clips.remove(at: location.clip)
+            guard let clip = project.tracks[location.track].items.remove(at: location.clip).legacyClip() else {
+                return
+            }
             let placement = project.resolvedPlacement(
                 proposedStart: clip.timelineStart + seconds,
                 duration: clip.sourceRange.duration,
                 destinationTrackIndex: location.track,
                 requiredKind: clip.requiredTrackKind
             )
-            clip.timelineStart = placement.start
-            project.tracks[location.track].clips.append(clip)
-            project.tracks[location.track].clips.sort { $0.timelineStart < $1.timelineStart }
+            var movedClip = clip
+            movedClip.timelineStart = placement.start
+            project.tracks[location.track].appendLegacyClip(movedClip)
         }
     }
 
@@ -103,6 +188,7 @@ extension EditorViewModel {
     ) -> TimelinePlacementResult? {
         if interactive {
             beginInteractiveEdit()
+            setPreviewQualityForInteraction(true)
         }
 
         var result: TimelinePlacementResult?
@@ -113,9 +199,9 @@ extension EditorViewModel {
             touchUpdatedAt: !interactive
         ) { project in
             let proposedIndex = insertionIndex ?? proposedTrackIndex
-            var previewProject = project
+            var preview = project
             guard
-                let placement = previewProject.resolveClipPlacement(
+                let placement = preview.resolveClipPlacement(
                     clipID,
                     proposedStart: timelineStart,
                     proposedTrackIndex: proposedIndex,
@@ -124,7 +210,7 @@ extension EditorViewModel {
             else { return }
             result = project.placeClip(clipID, using: placement)
             selectedClipID = clipID
-            selectedTrackID = project.tracks.first(where: { $0.clips.contains { $0.id == clipID } })?.id
+            selectedTrackID = project.tracks.first(where: { $0.itemIndex(id: clipID) != nil })?.id
         }
         return result
     }
@@ -138,6 +224,7 @@ extension EditorViewModel {
     ) -> TimelinePlacementResult? {
         if interactive {
             beginInteractiveEdit()
+            setPreviewQualityForInteraction(true)
         }
 
         var result: TimelinePlacementResult?
@@ -149,7 +236,7 @@ extension EditorViewModel {
         ) { project in
             result = project.placeClip(clipID, using: placement)
             selectedClipID = clipID
-            selectedTrackID = project.tracks.first(where: { $0.clips.contains { $0.id == clipID } })?.id
+            selectedTrackID = project.tracks.first(where: { $0.itemIndex(id: clipID) != nil })?.id
         }
         return result
     }
@@ -178,52 +265,66 @@ extension EditorViewModel {
     ) -> TimelineTrimResult? {
         if interactive {
             beginInteractiveEdit()
+            setPreviewQualityForInteraction(true)
         }
 
-        var result: TimelineTrimResult?
-        mutateProject(
-            rebuild: !interactive && rebuild,
-            recordHistory: !interactive,
-            persistChanges: !interactive,
-            touchUpdatedAt: !interactive
-        ) { project in
-            guard let location = project.clipLocation(id: clipID) else { return }
-            let currentClip = project.tracks[location.track].clips[location.clip]
-            let reference = baseline ?? currentClip
-            let previousEnd = project.neighborBounds(for: currentClip.id, in: location.track).previousEnd
-            let maxForward = max(reference.sourceRange.duration - 0.1, 0)
-            let maxBackward = -min(reference.sourceRange.start, reference.timelineStart - previousEnd)
-            var applied = min(max(seconds, maxBackward), maxForward)
-            let proposedEdge = reference.timelineStart + applied
-            let snap = project.snappedTimelineEdge(
-                proposedEdge,
-                excluding: currentClip.id,
-                requiredKind: currentClip.requiredTrackKind,
-                snapAnchors: [currentTime]
-            )
-            if snap.snapped {
-                applied = min(max(snap.time - reference.timelineStart, maxBackward), maxForward)
-            }
+        guard let location = project.clipLocation(id: clipID) else { return nil }
+        let currentClip = project.tracks[location.track].clips[location.clip]
+        let reference = baseline ?? currentClip
+        let previousEnd = project.neighborBounds(for: currentClip.id, in: location.track).previousEnd
+        let maxForward = max(reference.sourceRange.duration - 0.1, 0)
+        let maxBackward = -min(reference.sourceRange.start, reference.timelineStart - previousEnd)
+        var applied = min(max(seconds, maxBackward), maxForward)
+        let proposedEdge = reference.timelineStart + applied
+        let snap = project.snappedTimelineEdge(
+            proposedEdge,
+            excluding: currentClip.id,
+            requiredKind: currentClip.requiredTrackKind,
+            snapAnchors: [currentTime]
+        )
+        if snap.snapped {
+            applied = min(max(snap.time - reference.timelineStart, maxBackward), maxForward)
+        }
 
-            var clip = currentClip
-            clip.timelineStart = reference.timelineStart + applied
-            clip.sourceRange = TimeRangeValue(
-                start: reference.sourceRange.start + applied,
-                duration: reference.sourceRange.duration - applied
-            )
-            clip.trimAnimationsAtStart(
-                by: applied,
-                oldDuration: reference.sourceRange.duration
-            )
-            project.tracks[location.track].clips[location.clip] = clip
-            project.tracks[location.track].clips.sort { $0.timelineStart < $1.timelineStart }
+        var clip = currentClip
+        clip.timelineStart = reference.timelineStart + applied
+        clip.sourceRange = TimeRangeValue(
+            start: reference.sourceRange.start + applied,
+            duration: reference.sourceRange.duration - applied
+        )
+        clip.trimAnimationsAtStart(
+            by: applied,
+            oldDuration: reference.sourceRange.duration
+        )
+
+        let result = TimelineTrimResult(
+            edgeTime: clip.timelineStart,
+            appliedDelta: applied,
+            snapped: snap.snapped && abs((reference.timelineStart + applied) - snap.time) < 0.001
+        )
+
+        if interactive {
+            project.replaceClip(id: clipID, with: clip)
+            project.tracks[location.track].sortItems()
+            incrementTimelineContentRevision()
             selectedClipID = clip.id
-            result = TimelineTrimResult(
-                edgeTime: clip.timelineStart,
-                appliedDelta: applied,
-                snapped: snap.snapped && abs((reference.timelineStart + applied) - snap.time) < 0.001
-            )
+            return result
         }
+
+        var invalidation: EditorInvalidation = [.timelineLayout, .userInterface, .persistence]
+        if rebuild {
+            invalidation.formUnion(EditorProject.renderInvalidation(before: currentClip, after: clip))
+        }
+        commit(
+            AnyEditorCommand(
+                TrimClipCommand(
+                    before: currentClip,
+                    after: clip,
+                    invalidation: invalidation
+                )
+            )
+        )
+        selectedClipID = clip.id
         return result
     }
 
@@ -266,55 +367,69 @@ extension EditorViewModel {
     ) -> TimelineTrimResult? {
         if interactive {
             beginInteractiveEdit()
+            setPreviewQualityForInteraction(true)
         }
 
-        var result: TimelineTrimResult?
-        mutateProject(
-            rebuild: !interactive && rebuild,
-            recordHistory: !interactive,
-            persistChanges: !interactive,
-            touchUpdatedAt: !interactive
-        ) { project in
-            guard let location = project.clipLocation(id: clipID) else { return }
-            let currentClip = project.tracks[location.track].clips[location.clip]
-            let reference = baseline ?? currentClip
-            let nextStart = project.neighborBounds(for: currentClip.id, in: location.track).nextStart
-            let sourceForwardLimit =
-                reference.mediaType == .image
-                ? Double.greatestFiniteMagnitude / 4
-                : max(reference.source.originalDuration - reference.sourceRange.end, 0)
-            let maxForward = min(sourceForwardLimit, max(nextStart - reference.timelineEnd, 0))
-            let maxBackward = -max(reference.sourceRange.duration - 0.1, 0)
-            var applied = min(max(seconds, maxBackward), maxForward)
-            let proposedEdge = reference.timelineEnd + applied
-            let snap = project.snappedTimelineEdge(
-                proposedEdge,
-                excluding: currentClip.id,
-                requiredKind: currentClip.requiredTrackKind,
-                snapAnchors: [currentTime]
-            )
-            if snap.snapped {
-                applied = min(max(snap.time - reference.timelineEnd, maxBackward), maxForward)
-            }
+        guard let location = project.clipLocation(id: clipID) else { return nil }
+        let currentClip = project.tracks[location.track].clips[location.clip]
+        let reference = baseline ?? currentClip
+        let nextStart = project.neighborBounds(for: currentClip.id, in: location.track).nextStart
+        let sourceForwardLimit =
+            reference.mediaType == .image
+            ? Double.greatestFiniteMagnitude / 4
+            : max(project.originalDuration(for: reference) - reference.sourceRange.end, 0)
+        let maxForward = min(sourceForwardLimit, max(nextStart - reference.timelineEnd, 0))
+        let maxBackward = -max(reference.sourceRange.duration - 0.1, 0)
+        var applied = min(max(seconds, maxBackward), maxForward)
+        let proposedEdge = reference.timelineEnd + applied
+        let snap = project.snappedTimelineEdge(
+            proposedEdge,
+            excluding: currentClip.id,
+            requiredKind: currentClip.requiredTrackKind,
+            snapAnchors: [currentTime]
+        )
+        if snap.snapped {
+            applied = min(max(snap.time - reference.timelineEnd, maxBackward), maxForward)
+        }
 
-            var clip = currentClip
-            clip.timelineStart = reference.timelineStart
-            clip.sourceRange = TimeRangeValue(
-                start: reference.sourceRange.start,
-                duration: reference.sourceRange.duration + applied
-            )
-            clip.trimAnimationsAtEnd(
-                newDuration: clip.sourceRange.duration,
-                oldDuration: reference.sourceRange.duration
-            )
-            project.tracks[location.track].clips[location.clip] = clip
+        var clip = currentClip
+        clip.timelineStart = reference.timelineStart
+        clip.sourceRange = TimeRangeValue(
+            start: reference.sourceRange.start,
+            duration: reference.sourceRange.duration + applied
+        )
+        clip.trimAnimationsAtEnd(
+            newDuration: clip.sourceRange.duration,
+            oldDuration: reference.sourceRange.duration
+        )
+
+        let result = TimelineTrimResult(
+            edgeTime: clip.timelineEnd,
+            appliedDelta: applied,
+            snapped: snap.snapped && abs((reference.timelineEnd + applied) - snap.time) < 0.001
+        )
+
+        if interactive {
+            project.replaceClip(id: clipID, with: clip)
+            incrementTimelineContentRevision()
             selectedClipID = clip.id
-            result = TimelineTrimResult(
-                edgeTime: clip.timelineEnd,
-                appliedDelta: applied,
-                snapped: snap.snapped && abs((reference.timelineEnd + applied) - snap.time) < 0.001
-            )
+            return result
         }
+
+        var invalidation: EditorInvalidation = [.timelineLayout, .userInterface, .persistence]
+        if rebuild {
+            invalidation.formUnion(EditorProject.renderInvalidation(before: currentClip, after: clip))
+        }
+        commit(
+            AnyEditorCommand(
+                TrimClipCommand(
+                    before: currentClip,
+                    after: clip,
+                    invalidation: invalidation
+                )
+            )
+        )
+        selectedClipID = clip.id
         return result
     }
 
@@ -330,7 +445,7 @@ extension EditorViewModel {
         let sourceForwardLimit =
             reference.mediaType == .image
             ? Double.greatestFiniteMagnitude / 4
-            : max(reference.source.originalDuration - reference.sourceRange.end, 0)
+            : max(project.originalDuration(for: reference) - reference.sourceRange.end, 0)
         let maxForward = min(sourceForwardLimit, max(nextStart - reference.timelineEnd, 0))
         let maxBackward = -max(reference.sourceRange.duration - 0.1, 0)
         var applied = min(max(seconds, maxBackward), maxForward)

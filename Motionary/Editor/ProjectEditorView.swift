@@ -91,13 +91,35 @@ struct ProjectEditorView: View {
             selectedReplacementItem = nil
         }
         .onChange(of: viewModel.selectedClipID) { _, clipID in
-            if let clipID, activePanel.isPropertyPanel || activePanel == .graph {
-                propertyContextClipID = clipID
-                if activePanel == .graph,
-                    let section = graphReturnPanel.keyframeSection
-                {
-                    viewModel.selectGraphSegment(atPlayheadIn: section)
+            if let clipID {
+                if activePanel.isPropertyPanel || activePanel == .graph {
+                    propertyContextClipID = clipID
+                    if activePanel == .graph,
+                        let section = graphReturnPanel.keyframeSection
+                    {
+                        viewModel.selectGraphSegment(atPlayheadIn: section)
+                    }
                 }
+                
+                if let clip = viewModel.project.clip(id: clipID) {
+                    let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
+                    var isSupported = true
+                    switch panelToCheck {
+                    case .shape:
+                        isSupported = clip.shape != nil
+                    case .transform, .adjust, .effects:
+                        isSupported = clip.mediaType != .audio
+                    case .audio:
+                        isSupported = clip.mediaType == .audio || clip.mediaType == .video
+                    default:
+                        isSupported = true
+                    }
+                    if !isSupported {
+                        activePanel = .timeline
+                    }
+                }
+            } else {
+                activePanel = .timeline
             }
         }
         .onChange(of: activePanel) { previousPanel, panel in
@@ -124,7 +146,7 @@ struct ProjectEditorView: View {
                 viewModel.refreshGraphSegment()
             }
         }
-        .onChange(of: viewModel.currentTime) { _, _ in
+        .onReceive(viewModel.playbackState.$currentTime) { _ in
             guard activePanel == .graph,
                 let section = graphReturnPanel.keyframeSection
             else { return }
@@ -296,17 +318,50 @@ struct ProjectEditorView: View {
         guard let propertyContextClipID else { return nil }
         return viewModel.project.clip(id: propertyContextClipID)
     }
+
+    @ViewBuilder
+    private var saveStateLabel: some View {
+        switch viewModel.projectSession.saveState {
+        case .idle:
+            EmptyView()
+        case .saving:
+            Label("Saving", systemImage: "arrow.triangle.2.circlepath")
+                .font(.caption)
+                .foregroundStyle(MotionaryTheme.textSecondary)
+        case .saved:
+            Label("Saved", systemImage: "checkmark.circle")
+                .font(.caption)
+                .foregroundStyle(MotionaryTheme.textSecondary)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        }
+    }
 }
 
 private struct EditorPlaybackControlBar: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     @Binding var activePanel: CoreEditorPanel
     @Binding var graphReturnPanel: CoreEditorPanel
+
+    init(
+        viewModel: EditorViewModel,
+        activePanel: Binding<CoreEditorPanel>,
+        graphReturnPanel: Binding<CoreEditorPanel>
+    ) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        _activePanel = activePanel
+        _graphReturnPanel = graphReturnPanel
+    }
 
     var body: some View {
         ZStack {
             HStack(spacing: 9) {
-                Text("\(formatClock(viewModel.currentTime)) / \(formatClock(viewModel.duration))")
+                Text("\(formatClock(playbackState.currentTime)) / \(formatClock(viewModel.duration))")
                     .font(.callout.monospacedDigit().weight(.semibold))
                     .foregroundStyle(MotionaryTheme.textSecondary)
                     .lineLimit(1)
@@ -338,6 +393,19 @@ private struct EditorPlaybackControlBar: View {
                             }
                         },
                         isBordered: false
+                    )
+                } else if activePanel == .timeline {
+                    CompactIconButton(
+                        systemName: "link",
+                        title: viewModel.isRippleEditingEnabled
+                            ? "Disable ripple editing"
+                            : "Enable ripple editing",
+                        isProminent: viewModel.isRippleEditingEnabled,
+                        action: {
+                            viewModel.isRippleEditingEnabled.toggle()
+                        },
+                        isBordered: false,
+                        tintsProminentIcon: true
                     )
                 }
                 CompactIconButton(

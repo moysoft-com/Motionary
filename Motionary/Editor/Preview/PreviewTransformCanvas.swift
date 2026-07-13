@@ -14,20 +14,37 @@ struct PreviewClipFrame {
     let rotationDegrees: Double
 }
 
+private enum PreviewTransformComponent: Hashable {
+    case position
+    case scale
+    case rotation
+}
+
 struct PreviewTransformCanvas: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let canvasRect: CGRect
 
     @State private var dragStartTransform: ClipTransform?
-    @State private var scaleStart: Double?
-    @State private var rotationStart: Double?
-    @State private var transformStartFrame: PreviewClipFrame?
+    @State private var liveTransform: ClipTransform?
+    @State private var livePreviewImage: UIImage?
+    @State private var liveBackgroundImage: UIImage?
+    @State private var livePreviewLoadID: UUID?
+    @State private var interactionClipID: UUID?
+    @State private var editedTransformComponents: Set<PreviewTransformComponent> = []
     @State private var snapGuideX: CGFloat?
     @State private var snapGuideY: CGFloat?
     @State private var previewSnapKey: String?
     @State private var lastPreviewSnapFeedbackKey: String?
     @State private var lastPreviewSnapFeedbackAt: Date = .distantPast
     @State private var isTransforming = false
+    @State private var isAwaitingPreviewCommit = false
+
+    init(viewModel: EditorViewModel, canvasRect: CGRect) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.canvasRect = canvasRect
+    }
 
     var body: some View {
         ZStack {
@@ -47,16 +64,24 @@ struct PreviewTransformCanvas: View {
 
             if isTransforming,
                 let clip = selectedVisualClip,
-                let frame = previewFrame(for: clip)
+                let transform = liveTransform,
+                let frame = previewFrame(for: clip, transform: transform)
             {
-                if let transformStartFrame {
-                    TransformGhostMask(frame: transformStartFrame)
+                if let liveBackgroundImage {
+                    Image(uiImage: liveBackgroundImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: canvasRect.width, height: canvasRect.height)
+                        .clipped()
                         .allowsHitTesting(false)
                 }
+
                 LiveTransformClipProxy(
                     clip: clip,
                     frame: frame,
-                    currentTime: viewModel.currentTime
+                    transform: transform,
+                    image: livePreviewImage,
+                    localTime: localTime(for: clip)
                 )
                 .allowsHitTesting(false)
             }
@@ -78,7 +103,10 @@ struct PreviewTransformCanvas: View {
             }
 
             if let clip = selectedVisualClip,
-                let frame = previewFrame(for: clip)
+                let frame = previewFrame(
+                    for: clip,
+                    transform: liveTransform ?? clip.transform
+                )
             {
                 PreviewSelectionBox(frame: frame)
                     .gesture(dragGesture(for: clip, frame: frame))
@@ -90,10 +118,22 @@ struct PreviewTransformCanvas: View {
         .frame(width: canvasRect.width, height: canvasRect.height)
         .position(x: canvasRect.midX, y: canvasRect.midY)
         .onChange(of: viewModel.selectedClipID) { _, _ in
-            resetPreviewInteraction(finishEdit: isTransforming)
+            if isAwaitingPreviewCommit {
+                clearLivePreview()
+            } else {
+                resetPreviewInteraction(finishEdit: isTransforming)
+            }
+        }
+        .onChange(of: viewModel.previewContentRevision) { _, _ in
+            guard isAwaitingPreviewCommit else { return }
+            clearLivePreview()
         }
         .onDisappear {
-            resetPreviewInteraction(finishEdit: isTransforming)
+            if isAwaitingPreviewCommit {
+                clearLivePreview()
+            } else {
+                resetPreviewInteraction(finishEdit: isTransforming)
+            }
         }
     }
 
@@ -116,13 +156,10 @@ struct PreviewTransformCanvas: View {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 if dragStartTransform == nil {
-                    dragStartTransform = clip.transform.resolved(at: localTime(for: clip))
-                    transformStartFrame = frame
-                    isTransforming = true
-                    EditorHaptics.dragStart()
-                    viewModel.beginInteractiveEdit()
+                    beginPreviewInteraction(for: clip)
                 }
                 guard let start = dragStartTransform else { return }
+                editedTransformComponents.insert(.position)
 
                 let proposedX =
                     start.positionX.baseValue + Double(value.translation.width / max(canvasRect.width * 0.5, 1))
@@ -141,11 +178,10 @@ struct PreviewTransformCanvas: View {
                     snapped: snapped.guideX != nil || snapped.guideY != nil,
                     value: "\(Int((snapped.guideX ?? -1).rounded())):\(Int((snapped.guideY ?? -1).rounded()))"
                 )
-                viewModel.setSelectedTransform(
-                    positionX: snapped.positionX,
-                    positionY: snapped.positionY,
-                    interactive: true
-                )
+                updateLiveTransform {
+                    $0.positionX.baseValue = snapped.positionX
+                    $0.positionY.baseValue = snapped.positionY
+                }
             }
             .onEnded { _ in
                 resetPreviewInteraction(finishEdit: true)
@@ -155,16 +191,13 @@ struct PreviewTransformCanvas: View {
     private func scaleGesture(for clip: TimelineClip) -> some Gesture {
         MagnificationGesture()
             .onChanged { value in
-                if scaleStart == nil {
-                    scaleStart = clip.transform.scale.value(at: localTime(for: clip)).x
-                    transformStartFrame = previewFrame(for: clip)
-                    isTransforming = true
-                    EditorHaptics.dragStart()
-                    viewModel.beginInteractiveEdit()
+                if dragStartTransform == nil {
+                    beginPreviewInteraction(for: clip)
                 }
-                guard let scaleStart else { return }
+                guard let start = dragStartTransform else { return }
+                editedTransformComponents.insert(.scale)
                 let snapped = snappedScale(
-                    scale: scaleStart * value,
+                    scale: start.scale.baseValue.x * value,
                     clip: clip,
                     selectedClipID: clip.id
                 )
@@ -175,7 +208,9 @@ struct PreviewTransformCanvas: View {
                     snapped: snapped.guideX != nil || snapped.guideY != nil,
                     value: "\(Int((snapped.guideX ?? -1).rounded())):\(Int((snapped.guideY ?? -1).rounded()))"
                 )
-                viewModel.setSelectedTransform(scale: snapped.scale, interactive: true)
+                updateLiveTransform {
+                    $0.scale.baseValue = ScaleValue(x: snapped.scale, y: snapped.scale)
+                }
             }
             .onEnded { _ in
                 resetPreviewInteraction(finishEdit: true)
@@ -185,21 +220,20 @@ struct PreviewTransformCanvas: View {
     private func rotationGesture(for clip: TimelineClip) -> some Gesture {
         RotationGesture()
             .onChanged { value in
-                if rotationStart == nil {
-                    rotationStart = clip.transform.rotationDegrees.value(at: localTime(for: clip))
-                    transformStartFrame = previewFrame(for: clip)
-                    isTransforming = true
-                    EditorHaptics.dragStart()
-                    viewModel.beginInteractiveEdit()
+                if dragStartTransform == nil {
+                    beginPreviewInteraction(for: clip)
                 }
-                guard let rotationStart else { return }
-                let snapped = snappedRotation(rotationStart - value.degrees)
+                guard let start = dragStartTransform else { return }
+                editedTransformComponents.insert(.rotation)
+                let snapped = snappedRotation(start.rotationDegrees.baseValue - value.degrees)
                 updatePreviewSnapHaptic(
                     kind: "rotation",
                     snapped: snapped.snapped,
                     value: String(format: "%.0f", snapped.rotation)
                 )
-                viewModel.setSelectedTransform(rotationDegrees: snapped.rotation, interactive: true)
+                updateLiveTransform {
+                    $0.rotationDegrees.baseValue = snapped.rotation
+                }
             }
             .onEnded { _ in
                 resetPreviewInteraction(finishEdit: true)
@@ -247,10 +281,10 @@ struct PreviewTransformCanvas: View {
         }
 
         let proposedScale = CGFloat(min(max(scale, 0.01), 100))
-        let center = previewCenter(for: clip)
+        let center = previewCenter(for: clip, transform: liveTransform ?? clip.transform)
         let targets = snapTargets(excluding: selectedClipID)
         let threshold: CGFloat = 10
-        let rotation = -clip.transform.rotationDegrees.value(at: localTime(for: clip))
+        let rotation = -(liveTransform ?? clip.transform).rotationDegrees.value(at: localTime(for: clip))
 
         let xSnap = snapScaleAxis(
             center: center.x,
@@ -387,21 +421,25 @@ struct PreviewTransformCanvas: View {
         }
     }
 
-    private func previewFrame(for clip: TimelineClip) -> PreviewClipFrame? {
+    private func previewFrame(
+        for clip: TimelineClip,
+        transform: ClipTransform? = nil
+    ) -> PreviewClipFrame? {
+        let transform = transform ?? clip.transform
         if let shape = clip.shape {
             let renderSize = viewModel.project.renderSettings.size
             guard renderSize.width > 0, renderSize.height > 0,
                 canvasRect.width > 0, canvasRect.height > 0
             else { return nil }
             let localTime = localTime(for: clip)
-            let scale = clip.transform.scale.value(at: localTime)
+            let scale = transform.scale.value(at: localTime)
             let size = CGSize(
                 width: CGFloat(shape.width.value(at: localTime)) * canvasRect.width / renderSize.width
                     * max(scale.x, 0.01),
                 height: CGFloat(shape.height.value(at: localTime)) * canvasRect.height / renderSize.height
                     * max(scale.y, 0.01)
             )
-            let center = previewCenter(for: clip)
+            let center = previewCenter(for: clip, transform: transform)
             return PreviewClipFrame(
                 rect: CGRect(
                     x: center.x - size.width * 0.5,
@@ -409,23 +447,23 @@ struct PreviewTransformCanvas: View {
                     width: size.width,
                     height: size.height
                 ),
-                rotationDegrees: -clip.transform.rotationDegrees.value(at: localTime)
+                rotationDegrees: -transform.rotationDegrees.value(at: localTime)
             )
         }
 
-        let sourceSize = clip.source.naturalSize?.cgSize ?? viewModel.project.renderSettings.size
+        let sourceSize = viewModel.project.naturalSize(for: clip)?.cgSize ?? viewModel.project.renderSettings.size
         guard sourceSize.width > 0, sourceSize.height > 0, canvasRect.width > 0, canvasRect.height > 0 else {
             return nil
         }
 
         let fitScale = min(canvasRect.width / sourceSize.width, canvasRect.height / sourceSize.height)
         let localTime = localTime(for: clip)
-        let scale = clip.transform.scale.value(at: localTime)
+        let scale = transform.scale.value(at: localTime)
         let size = CGSize(
             width: sourceSize.width * fitScale * max(scale.x, 0.01),
             height: sourceSize.height * fitScale * max(scale.y, 0.01)
         )
-        let center = previewCenter(for: clip)
+        let center = previewCenter(for: clip, transform: transform)
 
         return PreviewClipFrame(
             rect: CGRect(
@@ -434,7 +472,7 @@ struct PreviewTransformCanvas: View {
                 width: size.width,
                 height: size.height
             ),
-            rotationDegrees: -clip.transform.rotationDegrees.value(at: localTime)
+            rotationDegrees: -transform.rotationDegrees.value(at: localTime)
         )
     }
 
@@ -450,7 +488,7 @@ struct PreviewTransformCanvas: View {
             )
         }
 
-        let sourceSize = clip.source.naturalSize?.cgSize ?? viewModel.project.renderSettings.size
+        let sourceSize = viewModel.project.naturalSize(for: clip)?.cgSize ?? viewModel.project.renderSettings.size
         guard sourceSize.width > 0, sourceSize.height > 0, canvasRect.width > 0, canvasRect.height > 0 else {
             return nil
         }
@@ -458,11 +496,15 @@ struct PreviewTransformCanvas: View {
         return CGSize(width: sourceSize.width * fitScale, height: sourceSize.height * fitScale)
     }
 
-    private func previewCenter(for clip: TimelineClip) -> CGPoint {
+    private func previewCenter(
+        for clip: TimelineClip,
+        transform: ClipTransform? = nil
+    ) -> CGPoint {
+        let transform = transform ?? clip.transform
         let localTime = localTime(for: clip)
         return CGPoint(
-            x: canvasRect.midX + CGFloat(clip.transform.positionX.value(at: localTime)) * canvasRect.width * 0.5,
-            y: canvasRect.midY - CGFloat(clip.transform.positionY.value(at: localTime)) * canvasRect.height * 0.5
+            x: canvasRect.midX + CGFloat(transform.positionX.value(at: localTime)) * canvasRect.width * 0.5,
+            y: canvasRect.midY - CGFloat(transform.positionY.value(at: localTime)) * canvasRect.height * 0.5
         )
     }
 
@@ -474,19 +516,100 @@ struct PreviewTransformCanvas: View {
         viewModel.currentTime >= clip.timelineStart && viewModel.currentTime < clip.timelineEnd
     }
 
+    private func beginPreviewInteraction(for clip: TimelineClip) {
+        let resolved = clip.transform.resolved(at: localTime(for: clip))
+        dragStartTransform = resolved
+        liveTransform = resolved
+        livePreviewImage = nil
+        liveBackgroundImage = nil
+        interactionClipID = clip.id
+        editedTransformComponents = []
+        isTransforming = true
+        isAwaitingPreviewCommit = false
+        EditorHaptics.dragStart()
+        viewModel.beginInteractiveEdit()
+
+        let loadID = UUID()
+        livePreviewLoadID = loadID
+        let timelineTime = viewModel.currentTime
+        let targetHeight = max(previewFrame(for: clip, transform: resolved)?.rect.height ?? 80, 80)
+        let media = viewModel.project.mediaDescriptor(for: clip)
+        Task {
+            async let backgroundImage = viewModel.renderService.makePreviewBackgroundImage(
+                for: viewModel.project,
+                at: timelineTime,
+                excluding: clip.id
+            )
+            async let clipImage: UIImage? =
+                clip.shape == nil && media != nil
+                ? TimelineThumbnailLoader.image(
+                    for: clip,
+                    media: media!,
+                    timelineTime: timelineTime,
+                    targetHeight: targetHeight
+                )
+                : nil
+            let (background, image) = await (try? backgroundImage, clipImage)
+            guard livePreviewLoadID == loadID else { return }
+            liveBackgroundImage = background
+            livePreviewImage = image
+        }
+    }
+
+    private func updateLiveTransform(_ update: (inout ClipTransform) -> Void) {
+        guard var transform = liveTransform else { return }
+        update(&transform)
+        liveTransform = transform
+    }
+
     private func resetPreviewInteraction(finishEdit: Bool) {
+        let committedTransform =
+            finishEdit && interactionClipID == viewModel.selectedClipID
+            ? liveTransform
+            : nil
+        let committedComponents = editedTransformComponents
+        snapGuideX = nil
+        snapGuideY = nil
+        previewSnapKey = nil
         dragStartTransform = nil
-        scaleStart = nil
-        rotationStart = nil
-        transformStartFrame = nil
+
+        guard finishEdit, let committedTransform, !committedComponents.isEmpty else {
+            clearLivePreview()
+            if finishEdit {
+                viewModel.finishInteractiveEdit()
+            }
+            return
+        }
+
+        isAwaitingPreviewCommit = true
+        viewModel.setSelectedTransform(
+            positionX: committedComponents.contains(.position)
+                ? committedTransform.positionX.baseValue : nil,
+            positionY: committedComponents.contains(.position)
+                ? committedTransform.positionY.baseValue : nil,
+            scale: committedComponents.contains(.scale)
+                ? committedTransform.scale.baseValue.x : nil,
+            rotationDegrees: committedComponents.contains(.rotation)
+                ? committedTransform.rotationDegrees.baseValue : nil,
+            interactive: true
+        )
+        viewModel.finishInteractiveEdit()
+        EditorHaptics.editCommit()
+    }
+
+    private func clearLivePreview() {
+        dragStartTransform = nil
+        liveTransform = nil
+        livePreviewImage = nil
+        liveBackgroundImage = nil
+        livePreviewLoadID = nil
+        interactionClipID = nil
+        editedTransformComponents = []
         snapGuideX = nil
         snapGuideY = nil
         previewSnapKey = nil
         isTransforming = false
-        if finishEdit {
-            viewModel.finishInteractiveEdit()
-            EditorHaptics.editCommit()
-        }
+        isAwaitingPreviewCommit = false
     }
 
     private func updatePreviewSnapHaptic(kind: String, snapped: Bool, value: String) {
@@ -508,28 +631,22 @@ struct PreviewTransformCanvas: View {
     }
 }
 
-struct TransformGhostMask: View {
-    let frame: PreviewClipFrame
-
-    var body: some View {
-        Rectangle()
-            .fill(Color(red: 0.015, green: 0.015, blue: 0.018))
-            .frame(width: frame.rect.width + 2, height: frame.rect.height + 2)
-            .rotationEffect(.degrees(frame.rotationDegrees))
-            .position(x: frame.rect.midX, y: frame.rect.midY)
-    }
-}
-
 struct LiveTransformClipProxy: View {
     let clip: TimelineClip
     let frame: PreviewClipFrame
-    let currentTime: Double
-
-    @State private var image: UIImage?
+    let transform: ClipTransform
+    let image: UIImage?
+    let localTime: Double
 
     var body: some View {
         Group {
-            if let image {
+            if let shape = clip.shape {
+                PreviewShapeProxy(
+                    shape: shape,
+                    frameSize: frame.rect.size,
+                    localTime: localTime
+                )
+            } else if let image {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
@@ -544,29 +661,45 @@ struct LiveTransformClipProxy: View {
         .frame(width: frame.rect.width, height: frame.rect.height)
         .clipped()
         .scaleEffect(
-            x: clip.transform.isFlippedHorizontally ? -1 : 1,
-            y: clip.transform.isFlippedVertically ? -1 : 1
+            x: transform.isFlippedHorizontally ? -1 : 1,
+            y: transform.isFlippedVertically ? -1 : 1
         )
         .rotationEffect(.degrees(frame.rotationDegrees))
         .position(x: frame.rect.midX, y: frame.rect.midY)
-        .opacity(0.9)
-        .task(id: taskID) {
-            image = await TimelineThumbnailLoader.image(
-                for: clip,
-                timelineTime: currentTime,
-                targetHeight: max(frame.rect.height, 80)
+        .opacity(transform.opacity.baseValue)
+    }
+}
+
+private struct PreviewShapeProxy: View {
+    let shape: ClipShape
+    let frameSize: CGSize
+    let localTime: Double
+
+    var body: some View {
+        switch shape.kind {
+        case .rectangle:
+            Rectangle()
+                .fill(shape.color.swiftUIColor)
+        case .roundedRectangle:
+            RoundedRectangle(
+                cornerRadius: cornerRadius,
+                style: .continuous
             )
+            .fill(shape.color.swiftUIColor)
+        case .circle:
+            Ellipse()
+                .fill(shape.color.swiftUIColor)
         }
     }
 
-    private var taskID: String {
-        [
-            clip.source.url.path,
-            String(format: "%.3f", clip.sourceRange.start),
-            String(format: "%.3f", clip.sourceRange.duration),
-            String(format: "%.2f", currentTime),
-            "\(Int(frame.rect.height.rounded()))"
-        ].joined(separator: "|")
+    private var cornerRadius: CGFloat {
+        let sourceWidth = max(CGFloat(shape.width.value(at: localTime)), 1)
+        let sourceHeight = max(CGFloat(shape.height.value(at: localTime)), 1)
+        let scale = min(frameSize.width / sourceWidth, frameSize.height / sourceHeight)
+        return min(
+            CGFloat(shape.cornerRadius.value(at: localTime)) * scale,
+            min(frameSize.width, frameSize.height) * 0.5
+        )
     }
 }
 

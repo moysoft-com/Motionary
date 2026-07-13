@@ -14,7 +14,22 @@ struct ExportSettingsView: View {
     init(project: EditorProject, onExport: @escaping (VideoExportSettings) -> Void) {
         self.project = project
         self.onExport = onExport
-        _settings = State(initialValue: VideoExportSettings.recommended(for: project))
+        var defaults = VideoExportSettings.recommended(for: project)
+        let storedDefaults = UserDefaults.standard
+        let quality = ExportQuality(
+            rawValue: storedDefaults.string(forKey: AppPreferences.exportQualityKey)
+                ?? AppPreferences.defaultExportQuality
+        ) ?? .balanced
+        defaults.videoBitrate = Int(Double(defaults.videoBitrate) * quality.bitrateMultiplier)
+        defaults.codec = ExportVideoCodec(
+            rawValue: storedDefaults.string(forKey: AppPreferences.exportCodecKey)
+                ?? AppPreferences.defaultExportCodec
+        ) ?? .h264
+        defaults.container = ExportContainer(
+            rawValue: storedDefaults.string(forKey: AppPreferences.exportContainerKey)
+                ?? AppPreferences.defaultExportContainer
+        ) ?? .mp4
+        _settings = State(initialValue: defaults.normalized)
     }
 
     var body: some View {

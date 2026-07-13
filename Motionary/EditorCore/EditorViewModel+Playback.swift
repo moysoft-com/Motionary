@@ -5,12 +5,30 @@ import AVFoundation
 extension EditorViewModel {
     func start() {
         EditorAudioSession.configurePlayback()
+        TimelineCacheLifecycle.installMemoryWarningHandler()
+        Task {
+            await TimelineThumbnailTileCache.shared.setActiveProject(projectID)
+        }
         repairStoredMediaReferences()
-        schedulePreviewRebuild(seekTo: 0, delay: false)
+        schedulePreviewRebuild(
+            seekTo: 0,
+            delay: false,
+            invalidation: [.previewFrame, .compositionTopology, .audioMix]
+        )
         persist()
     }
 
     func stop() {
+        let content = ProjectContent(editorProject: project)
+        autosaveTask?.cancel()
+        autosaveTask = Task { [projectStore, projectID] in
+            try? await projectStore.repository.save(content, projectID: projectID)
+        }
+        Task {
+            await TimelineThumbnailTileCache.shared.removeAll()
+            await TimelineAudioWaveformCache.shared.removeAll()
+            await MediaAssetCache.shared.removeAll()
+        }
         rebuildTask?.cancel()
         rebuildTask = nil
         scrubSeekTask?.cancel()
@@ -22,6 +40,7 @@ extension EditorViewModel {
         isImporting = false
         isExporting = false
         pendingScrubSeekTime = nil
+        isScrubSeekInFlight = false
         isRenderingPreview = false
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
@@ -83,27 +102,33 @@ extension EditorViewModel {
     }
 
     func undo() {
-        guard let previous = undoStack.popLast() else { return }
+        guard let command = undoStack.popLast() else { return }
         let retainedClipID = selectedClipID
-        redoStack.append(project)
-        project = previous
+        command.undo(on: &project)
+        redoStack.append(command)
         restoreSelectionIfPossible(retainedClipID)
         incrementTimelineContentRevision()
         updateHistoryFlags()
         persist()
-        schedulePreviewRebuild(seekTo: min(currentTime, duration))
+        schedulePreviewRebuild(
+            seekTo: min(currentTime, duration),
+            invalidation: command.invalidation
+        )
     }
 
     func redo() {
-        guard let next = redoStack.popLast() else { return }
+        guard let command = redoStack.popLast() else { return }
         let retainedClipID = selectedClipID
-        undoStack.append(project)
-        project = next
+        command.apply(to: &project)
+        undoStack.append(command)
         restoreSelectionIfPossible(retainedClipID)
         incrementTimelineContentRevision()
         updateHistoryFlags()
         persist()
-        schedulePreviewRebuild(seekTo: min(currentTime, duration))
+        schedulePreviewRebuild(
+            seekTo: min(currentTime, duration),
+            invalidation: command.invalidation
+        )
     }
 
     func seek(to time: Double, exact: Bool = true) {
@@ -126,34 +151,23 @@ extension EditorViewModel {
         player?.pause()
         isPlaying = false
         isScrubbing = true
-    }
-
-    func updateScrub(to time: Double) {
-        let clamped = min(max(time, 0), max(duration, 0))
-        updateCurrentTime(clamped)
-        pendingScrubSeekTime = clamped
-        guard scrubSeekTask == nil else { return }
-
-        scrubSeekTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 35_000_000)
-            await MainActor.run {
-                guard let self else { return }
-                let target = self.pendingScrubSeekTime
-                self.pendingScrubSeekTime = nil
-                self.scrubSeekTask = nil
-                guard let target else { return }
-                self.seekPlayer(to: target, exact: false)
-            }
-        }
+        rebuildTask?.cancel()
+        rebuildTask = nil
+        previewQuality = .interactive
     }
 
     func endScrub(at time: Double) {
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
         pendingScrubSeekTime = nil
+        isScrubSeekInFlight = false
+        player?.currentItem?.cancelPendingSeeks()
         seek(to: time, exact: true)
+        updateCurrentTime(time)
         isScrubbing = false
         wasPlayingBeforeScrub = false
+        previewQuality = .balanced
+        flushDeferredPreviewRebuild(seekTo: time)
     }
 
     var navigationPoints: [Double] {

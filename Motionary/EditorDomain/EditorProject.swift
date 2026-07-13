@@ -5,19 +5,35 @@ import Foundation
 
 /// Persisted aggregate containing canvas settings, tracks, clips, and migration metadata.
 struct EditorProject: Identifiable, Codable, Equatable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 6
 
     var id: UUID
     var schemaVersion: Int
     var title: String
     var renderSettings: RenderSettings
+    var mediaLibrary: [MediaID: MediaAsset]
     var tracks: [TimelineTrack]
+    var sequences: [UUID: CompoundSequence]
+    var itemLinks: [ItemLink]
     var createdAt: Date
     var updatedAt: Date
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case schemaVersion
+        case title
+        case renderSettings
+        case mediaLibrary
+        case tracks
+        case sequences
+        case itemLinks
+        case createdAt
+        case updatedAt
+    }
+
     var duration: Double {
         tracks
-            .flatMap(\.clips)
+            .flatMap(\.items)
             .map(\.timelineEnd)
             .max() ?? 0
     }
@@ -27,7 +43,10 @@ struct EditorProject: Identifiable, Codable, Equatable {
         schemaVersion: Int = EditorProject.currentSchemaVersion,
         title: String,
         renderSettings: RenderSettings = RenderSettings(),
+        mediaLibrary: [MediaID: MediaAsset] = [:],
         tracks: [TimelineTrack] = EditorProject.defaultTracks(),
+        sequences: [UUID: CompoundSequence] = [:],
+        itemLinks: [ItemLink] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -35,9 +54,29 @@ struct EditorProject: Identifiable, Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.title = title
         self.renderSettings = renderSettings
+        self.mediaLibrary = mediaLibrary
         self.tracks = tracks
+        self.sequences = sequences
+        self.itemLinks = itemLinks
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        synchronizeMediaLibrary()
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        title = try container.decode(String.self, forKey: .title)
+        renderSettings = try container.decodeIfPresent(RenderSettings.self, forKey: .renderSettings)
+            ?? RenderSettings()
+        mediaLibrary = try container.decodeIfPresent([MediaID: MediaAsset].self, forKey: .mediaLibrary) ?? [:]
+        tracks = try container.decodeIfPresent([TimelineTrack].self, forKey: .tracks) ?? Self.defaultTracks()
+        sequences = try container.decodeIfPresent([UUID: CompoundSequence].self, forKey: .sequences) ?? [:]
+        itemLinks = try container.decodeIfPresent([ItemLink].self, forKey: .itemLinks) ?? []
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
+        synchronizeMediaLibrary()
     }
 
     static func empty(title: String) -> EditorProject {
@@ -48,6 +87,63 @@ struct EditorProject: Identifiable, Codable, Equatable {
         [
             TimelineTrack(name: "Layer 1", kind: .visual)
         ]
+    }
+
+    mutating func synchronizeMediaLibrary() {
+        var referencedIDs = Set<MediaID>()
+        for trackIndex in tracks.indices {
+            for itemIndex in tracks[trackIndex].items.indices {
+                guard var clip = tracks[trackIndex].items[itemIndex].legacyClip() else { continue }
+                let mediaID = clip.mediaID
+                var shouldRewriteItem = false
+
+                if let migrationSource = clip.consumePendingMigrationSource() {
+                    mediaLibrary[mediaID] = MediaAsset(id: mediaID, source: migrationSource)
+                    clip.mediaType = migrationSource.mediaType
+                    shouldRewriteItem = true
+                } else if mediaLibrary[mediaID] == nil {
+                    mediaLibrary[mediaID] = MediaAsset(
+                        id: mediaID,
+                        source: ClipSource(
+                            url: URL(fileURLWithPath: clip.name),
+                            mediaType: clip.mediaType,
+                            originalDuration: clip.sourceRange.duration
+                        )
+                    )
+                }
+
+                if let asset = mediaLibrary[mediaID], clip.mediaType != asset.mediaType {
+                    clip.mediaType = asset.mediaType
+                    shouldRewriteItem = true
+                }
+
+                if shouldRewriteItem {
+                    tracks[trackIndex].items[itemIndex] = TimelineItem.fromLegacyClip(clip)
+                }
+                referencedIDs.insert(mediaID)
+            }
+        }
+
+        let prunedLibrary = mediaLibrary.filter { referencedIDs.contains($0.key) }
+        if prunedLibrary != mediaLibrary {
+            mediaLibrary = prunedLibrary
+        }
+        if schemaVersion != Self.currentSchemaVersion {
+            schemaVersion = Self.currentSchemaVersion
+        }
+    }
+
+    mutating func updateMediaAsset(_ mediaID: MediaID, source: ClipSource) {
+        mediaLibrary[mediaID] = MediaAsset(id: mediaID, source: source)
+        for trackIndex in tracks.indices {
+            for itemIndex in tracks[trackIndex].items.indices {
+                guard var clip = tracks[trackIndex].items[itemIndex].legacyClip(),
+                    clip.mediaID == mediaID
+                else { continue }
+                clip.mediaType = source.mediaType
+                tracks[trackIndex].items[itemIndex] = TimelineItem.fromLegacyClip(clip)
+            }
+        }
     }
 
     static func migratingLegacy(

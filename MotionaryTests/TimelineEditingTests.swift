@@ -7,6 +7,49 @@ import Testing
 
 struct TimelineEditingTests {
     @MainActor
+    @Test func rippleDeleteClosesGapAndUndoRestoresTrack() async throws {
+        let first = TimelineClip(
+            name: "First",
+            source: ClipSource(url: URL(fileURLWithPath: "/tmp/first.mov"), mediaType: .video, originalDuration: 2),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let deletedID = UUID()
+        let deleted = TimelineClip(
+            id: deletedID,
+            name: "Deleted",
+            source: ClipSource(url: URL(fileURLWithPath: "/tmp/deleted.mov"), mediaType: .video, originalDuration: 2),
+            timelineStart: 2,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let last = TimelineClip(
+            name: "Last",
+            source: ClipSource(url: URL(fileURLWithPath: "/tmp/last.mov"), mediaType: .video, originalDuration: 2),
+            timelineStart: 4,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Ripple delete",
+            tracks: [TimelineTrack(name: "Layer 1", kind: .visual, clips: [first, deleted, last])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.isRippleEditingEnabled = true
+        viewModel.selectClip(deletedID, trackID: viewModel.project.tracks[0].id)
+
+        viewModel.deleteSelectedClip()
+
+        #expect(viewModel.project.tracks[0].clips.map(\.timelineStart) == [0, 2])
+
+        viewModel.undo()
+
+        #expect(viewModel.project.tracks[0].clips.map(\.timelineStart) == [0, 2, 4])
+    }
+
+    @MainActor
     @Test func trimmingClipEdgesCannotCrossNeighbors() async throws {
         let middleID = UUID()
         let left = TimelineClip(

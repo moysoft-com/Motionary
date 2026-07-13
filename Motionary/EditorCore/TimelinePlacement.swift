@@ -4,16 +4,12 @@ import Foundation
 
 extension EditorProject {
     func clip(id: UUID) -> TimelineClip? {
-        tracks.flatMap(\.clips).first { $0.id == id }
+        item(id: id)?.legacyClip()
     }
 
     func clipLocation(id: UUID) -> (track: Int, clip: Int)? {
-        for trackIndex in tracks.indices {
-            if let clipIndex = tracks[trackIndex].clips.firstIndex(where: { $0.id == id }) {
-                return (trackIndex, clipIndex)
-            }
-        }
-        return nil
+        guard let location = itemLocation(id: id) else { return nil }
+        return (location.track, location.item)
     }
 
     mutating func resolveClipPlacement(
@@ -23,8 +19,8 @@ extension EditorProject {
         currentTime: Double
     ) -> TimelinePlacementResult? {
         guard let location = clipLocation(id: clipID) else { return nil }
-        let clip = tracks[location.track].clips.remove(at: location.clip)
-        let requiredKind = clip.requiredTrackKind
+        let item = tracks[location.track].items.remove(at: location.clip)
+        let requiredKind = item.requiredTrackKind
         let destinationIndex = compatibleTrackIndex(
             proposedIndex: proposedTrackIndex,
             requiredKind: requiredKind,
@@ -33,7 +29,7 @@ extension EditorProject {
         adoptTrackKindIfNeeded(at: destinationIndex, requiredKind: requiredKind)
         let placement = resolvedPlacement(
             proposedStart: proposedStart,
-            duration: clip.sourceRange.duration,
+            duration: item.placementDuration,
             destinationTrackIndex: destinationIndex,
             requiredKind: requiredKind,
             snapAnchors: [currentTime]
@@ -51,21 +47,21 @@ extension EditorProject {
         using placement: TimelinePlacementResult
     ) -> TimelinePlacementResult? {
         guard let location = clipLocation(id: clipID) else { return nil }
-        var clip = tracks[location.track].clips.remove(at: location.clip)
-        let requiredKind = clip.requiredTrackKind
+        var item = tracks[location.track].items.remove(at: location.clip)
+        let requiredKind = item.requiredTrackKind
         let destinationIndex = compatibleTrackIndex(
             proposedIndex: placement.trackIndex,
             requiredKind: requiredKind,
             sourceIndex: location.track
         )
         adoptTrackKindIfNeeded(at: destinationIndex, requiredKind: requiredKind)
-        clip.timelineStart = placement.start
-        tracks[destinationIndex].clips.append(clip)
-        tracks[destinationIndex].clips.sort { $0.timelineStart < $1.timelineStart }
+        item.timelineStart = placement.start
+        tracks[destinationIndex].items.append(item)
+        tracks[destinationIndex].sortItems()
         renumberTracks()
         return TimelinePlacementResult(
-            start: clip.timelineStart,
-            trackIndex: clipLocation(id: clip.id)?.track ?? destinationIndex,
+            start: item.timelineStart,
+            trackIndex: clipLocation(id: item.id)?.track ?? destinationIndex,
             snapped: placement.snapped,
             snapTime: placement.snapTime
         )
@@ -73,14 +69,14 @@ extension EditorProject {
 
     mutating func insertFreshTrack(kind: TrackKind) -> Int {
         if kind != .undefined,
-            let undefinedIndex = tracks.firstIndex(where: { $0.kind == .undefined && $0.clips.isEmpty })
+            let undefinedIndex = tracks.firstIndex(where: { $0.kind == .undefined && $0.items.isEmpty })
         {
             tracks[undefinedIndex].kind = kind
             return undefinedIndex
         }
 
-        let hasClipsInKind = tracks.contains { $0.kind == kind && !$0.clips.isEmpty }
-        if !hasClipsInKind, let emptyIndex = tracks.firstIndex(where: { $0.kind == kind && $0.clips.isEmpty }) {
+        let hasClipsInKind = tracks.contains { $0.kind == kind && !$0.items.isEmpty }
+        if !hasClipsInKind, let emptyIndex = tracks.firstIndex(where: { $0.kind == kind && $0.items.isEmpty }) {
             return emptyIndex
         }
 
@@ -99,6 +95,22 @@ extension EditorProject {
         case .audio:
             tracks.append(TimelineTrack(name: nextTrackName(for: kind), kind: kind))
             return tracks.count - 1
+        }
+    }
+
+    func topAvailableTrackIndex(
+        kind: TrackKind,
+        start: Double,
+        duration: Double
+    ) -> Int? {
+        let rangeStart = max(0, start)
+        let rangeEnd = rangeStart + max(duration, 0.001)
+
+        return tracks.firstIndex { track in
+            guard track.kind == kind else { return false }
+            return track.clips.allSatisfy { clip in
+                clip.timelineEnd <= rangeStart || clip.timelineStart >= rangeEnd
+            }
         }
     }
 
@@ -206,7 +218,7 @@ extension EditorProject {
         var snapped = false
         var snapTime: Double?
 
-        let compatibleClips = tracks.flatMap(\.clips)
+        let compatibleClips = tracks.flatMap(\.items).compactMap { $0.legacyClip() }
 
         var bestDistance = snapThreshold
         let anchors = (snapAnchors + compatibleClips.flatMap { [$0.timelineStart, $0.timelineEnd] })
@@ -235,7 +247,6 @@ extension EditorProject {
         }
 
         let clipsInDestination = tracks[destinationTrackIndex].clips
-            .sorted { $0.timelineStart < $1.timelineStart }
         let nonOverlappingStart = nearestNonOverlappingStart(
             proposedStart: candidate,
             duration: safeDuration,
@@ -264,7 +275,8 @@ extension EditorProject {
         let boundedEdge = max(0, proposedEdge)
         let otherClips =
             tracks
-            .flatMap(\.clips)
+            .flatMap(\.items)
+            .compactMap { $0.legacyClip() }
             .filter { $0.id != clipID }
         let otherDuration = otherClips.map(\.timelineEnd).max() ?? 0
         let anchors = ([0, otherDuration] + snapAnchors + otherClips.flatMap { [$0.timelineStart, $0.timelineEnd] })

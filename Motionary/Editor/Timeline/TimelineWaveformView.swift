@@ -3,6 +3,14 @@
 import AVFoundation
 import SwiftUI
 
+private final class TimelineWaveformBox {
+    let samples: [CGFloat]
+
+    init(_ samples: [CGFloat]) {
+        self.samples = samples
+    }
+}
+
 struct TimelineWaveformView: View {
     let samples: [CGFloat]
 
@@ -45,33 +53,69 @@ struct TimelineWaveformView: View {
 
 actor TimelineAudioWaveformCache {
     static let shared = TimelineAudioWaveformCache()
-    private var cache: [String: [CGFloat]] = [:]
+    private let cache = NSCache<NSString, TimelineWaveformBox>()
+    private var inFlight: [String: Task<[CGFloat], Never>] = [:]
 
-    func samples(for clip: TimelineClip, targetCount: Int) async -> [CGFloat] {
+    init() {
+        cache.countLimit = 120
+        cache.totalCostLimit = 16 * 1_024 * 1_024
+    }
+
+    func samples(for clip: TimelineClip, media: ClipMediaDescriptor, targetCount: Int) async -> [CGFloat] {
+        let quantizedCount = max(32, Int((Double(targetCount) / 32).rounded(.up)) * 32)
         let key = [
-            clip.source.url.path,
+            media.mediaID.rawValue.uuidString,
             String(format: "%.3f", clip.sourceRange.start),
             String(format: "%.3f", clip.sourceRange.duration),
-            "\(targetCount)"
+            "\(quantizedCount)"
         ].joined(separator: "|")
 
-        if let cached = cache[key] {
-            return cached
+        if let cached = cache.object(forKey: key as NSString) {
+            return cached.samples
         }
 
-        let samples = await TimelineAudioWaveformLoader.generateSamples(for: clip, targetCount: targetCount)
-        cache[key] = samples
+        if let task = inFlight[key] {
+            return await task.value
+        }
+
+        let task = Task {
+            await TimelineAudioWaveformLoader.generateSamples(for: clip, media: media, targetCount: quantizedCount)
+        }
+        inFlight[key] = task
+        let samples = await task.value
+        inFlight[key] = nil
+        cache.setObject(
+            TimelineWaveformBox(samples),
+            forKey: key as NSString,
+            cost: max(samples.count * MemoryLayout<CGFloat>.stride, 1)
+        )
         return samples
+    }
+
+    func removeAll() {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        cache.removeAllObjects()
+    }
+
+    func trimForMemoryPressure() {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        cache.removeAllObjects()
     }
 }
 
 enum TimelineAudioWaveformLoader {
-    static func samples(for clip: TimelineClip, targetCount: Int) async -> [CGFloat] {
-        await TimelineAudioWaveformCache.shared.samples(for: clip, targetCount: targetCount)
+    static func samples(for clip: TimelineClip, media: ClipMediaDescriptor, targetCount: Int) async -> [CGFloat] {
+        await TimelineAudioWaveformCache.shared.samples(for: clip, media: media, targetCount: targetCount)
     }
 
-    fileprivate static func generateSamples(for clip: TimelineClip, targetCount: Int) async -> [CGFloat] {
-        let url = clip.source.url
+    fileprivate static func generateSamples(
+        for clip: TimelineClip,
+        media: ClipMediaDescriptor,
+        targetCount: Int
+    ) async -> [CGFloat] {
+        let url = media.url
         let sourceStart = clip.sourceRange.start
         let sourceDuration = clip.sourceRange.duration
 

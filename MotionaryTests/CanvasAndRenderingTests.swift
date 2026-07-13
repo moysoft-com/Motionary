@@ -185,4 +185,20 @@ struct CanvasAndRenderingTests {
         #expect(rendered.hasVideo == false)
         #expect(rendered.videoComposition == nil)
     }
+
+    @Test func zeroVolumeVideoStillParticipatesInAudioTopology() async throws {
+        let clip = TimelineClip(
+            name: "Muted",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/muted.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2),
+            volume: AnimatableProperty(baseValue: 0)
+        )
+
+        #expect(CompositionRenderService.shouldIncludeSourceAudio(for: clip))
+    }
 }

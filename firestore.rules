@@ -1,0 +1,73 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.enabled == true;
+    }
+
+    match /admins/{userID} {
+      allow read: if signedIn() && userID == request.auth.uid;
+      allow write: if false;
+    }
+
+    match /suggestions/{suggestionID} {
+      allow read: if signedIn();
+      allow create: if isAdmin() || (signedIn()
+        && request.resource.data.ownerID == request.auth.uid);
+      allow update: if isAdmin() || (signedIn() && (
+        (resource.data.ownerID == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title', 'description', 'normalizedTitle', 'normalizationKey', 'updatedAt'
+          ]))
+        || ((request.resource.data.votes == resource.data.votes + 1
+          || request.resource.data.votes == resource.data.votes - 1)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'votes', 'updatedAt'
+          ]))
+      ));
+      allow delete: if isAdmin() || (signedIn()
+        && resource.data.ownerID == request.auth.uid);
+
+      match /votes/{userID} {
+        allow read: if isAdmin() || (signedIn() && (
+          userID == request.auth.uid
+          || get(/databases/$(database)/documents/suggestions/$(suggestionID)).data.ownerID == request.auth.uid
+        ));
+        allow create: if signedIn()
+          && userID == request.auth.uid
+          && request.resource.data.userID == request.auth.uid;
+        allow delete: if isAdmin() || (signedIn() && (
+          userID == request.auth.uid
+          || get(/databases/$(database)/documents/suggestions/$(suggestionID)).data.ownerID == request.auth.uid
+        ));
+        allow update: if false;
+      }
+    }
+
+    match /suggestionKeys/{key} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && request.resource.data.ownerID == request.auth.uid;
+      allow delete: if isAdmin() || (signedIn()
+        && resource.data.ownerID == request.auth.uid);
+    }
+
+    match /suggestionCooldowns/{userID} {
+      allow read, create, update, delete: if isAdmin() || (signedIn()
+        && userID == request.auth.uid);
+    }
+
+    match /suggestionReports/{reportID} {
+      allow create: if signedIn()
+        && request.resource.data.reporterID == request.auth.uid;
+      allow read, update, delete: if isAdmin();
+    }
+  }
+}

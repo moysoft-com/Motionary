@@ -4,18 +4,32 @@ import Foundation
 
 extension EditorViewModel {
     func setCanvasPreset(_ preset: CanvasRatioPreset) {
-        mutateProject {
-            $0.renderSettings = preset.settings(
-                frameRate: $0.renderSettings.frameRate,
-                backgroundColor: $0.renderSettings.backgroundColor
+        let before = project.renderSettings
+        let after = preset.settings(
+            frameRate: before.frameRate,
+            backgroundColor: before.backgroundColor
+        )
+        commit(
+            EditorCommandFactory.setRenderSettings(
+                before: before,
+                after: after,
+                invalidation: [.previewFrame, .compositionTopology, .persistence, .userInterface]
             )
-        }
+        )
     }
 
     func setCanvasBackgroundColor(_ color: RGBAColor) {
-        mutateProject(refreshTimeline: false) {
-            $0.renderSettings.backgroundColor = color
-        }
+        let before = project.renderSettings
+        var after = before
+        after.backgroundColor = color
+        commit(
+            EditorCommandFactory.setRenderSettings(
+                before: before,
+                after: after,
+                invalidation: [.previewFrame, .persistence]
+            ),
+            refreshTimeline: false
+        )
     }
 
     func setSelectedShape(
@@ -30,22 +44,28 @@ extension EditorViewModel {
 
     var canApplySelectedClipOriginalRatio: Bool {
         guard let clip = selectedClip, clip.mediaType != .audio else { return false }
-        return clip.source.naturalSize != nil
+        return project.naturalSize(for: clip) != nil
     }
 
     func setCanvasToSelectedClipOriginalRatio() {
         guard let clip = selectedClip,
             clip.mediaType != .audio,
-            let naturalSize = clip.source.naturalSize?.displaySafeSize
+            let naturalSize = project.naturalSize(for: clip)?.displaySafeSize
         else { return }
 
-        mutateProject {
-            $0.renderSettings = RenderSettings(
-                size: naturalSize,
-                frameRate: $0.renderSettings.frameRate,
-                backgroundColor: $0.renderSettings.backgroundColor
+        let before = project.renderSettings
+        let after = RenderSettings(
+            size: naturalSize,
+            frameRate: before.frameRate,
+            backgroundColor: before.backgroundColor
+        )
+        commit(
+            EditorCommandFactory.setRenderSettings(
+                before: before,
+                after: after,
+                invalidation: [.previewFrame, .compositionTopology, .persistence, .userInterface]
             )
-        }
+        )
     }
 
     func updateSelectedClip(
@@ -57,16 +77,31 @@ extension EditorViewModel {
         _ update: (inout TimelineClip) -> Void
     ) {
         guard let selectedClipID else { return }
-        mutateProject(
-            rebuild: rebuild,
+        guard let location = project.clipLocation(id: selectedClipID) else { return }
+        let before = project.tracks[location.track].clips[location.clip]
+        var after = before
+        update(&after)
+        guard after != before else { return }
+        var invalidation: EditorInvalidation = [.userInterface, .persistence]
+        if rebuild {
+            invalidation.formUnion(EditorProject.renderInvalidation(before: before, after: after))
+        }
+        if refreshTimeline {
+            invalidation.insert(.timelineLayout)
+        }
+        perform(
+            AnyEditorCommand(
+                ReplaceClipCommand(
+                    before: before,
+                    after: after,
+                    invalidation: invalidation
+                )
+            ),
             recordHistory: recordHistory,
             persistChanges: persistChanges,
             touchUpdatedAt: touchUpdatedAt,
             refreshTimeline: refreshTimeline
-        ) { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            update(&project.tracks[location.track].clips[location.clip])
-        }
+        )
     }
 
     func setSelectedTransform(
@@ -123,6 +158,7 @@ extension EditorViewModel {
     }
 
     func finishInteractiveEdit(rebuild: Bool = true) {
+        setPreviewQualityForInteraction(false)
         guard let snapshot = interactiveEditSnapshot else {
             persist()
             if rebuild {
@@ -133,8 +169,12 @@ extension EditorViewModel {
 
         interactiveEditSnapshot = nil
         guard project != snapshot else { return }
-
-        undoStack.append(snapshot)
+        let renderInvalidation = project.renderInvalidation(comparedTo: snapshot)
+        let command = project.historyCommand(
+            from: snapshot,
+            invalidation: renderInvalidation.union([.userInterface, .persistence])
+        )
+        undoStack.append(command)
         if undoStack.count > 80 {
             undoStack.removeFirst()
         }
@@ -143,16 +183,17 @@ extension EditorViewModel {
         project.updatedAt = Date()
         persist()
         if rebuild {
-            schedulePreviewRebuild(seekTo: currentTime)
+            schedulePreviewRebuild(
+                seekTo: currentTime,
+                invalidation: renderInvalidation
+            )
         }
     }
 
     func addKeyframe(_ target: KeyframeTarget) {
-        guard let selectedClipID else { return }
+        guard selectedClipID != nil else { return }
         activeKeyframeTarget = target
-        mutateProject { project in
-            guard let location = project.clipLocation(id: selectedClipID) else { return }
-            var clip = project.tracks[location.track].clips[location.clip]
+        updateSelectedClip { clip in
             let time = self.snappedKeyframeTime(self.currentTime - clip.timelineStart, clip: clip)
             if target.isScaleTarget {
                 self.selectedKeyframeID = clip.transform.scale.setKeyframe(
@@ -160,7 +201,6 @@ extension EditorViewModel {
                     value: clip.transform.scale.value(at: time),
                     tolerance: self.keyframeTimeTolerance
                 )
-                project.tracks[location.track].clips[location.clip] = clip
                 return
             }
             guard var property = clip.animatableProperty(for: target) else { return }
@@ -170,8 +210,6 @@ extension EditorViewModel {
                 tolerance: self.keyframeTimeTolerance
             )
             clip.setAnimatableProperty(property, for: target)
-
-            project.tracks[location.track].clips[location.clip] = clip
         }
     }
 }

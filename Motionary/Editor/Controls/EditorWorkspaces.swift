@@ -346,17 +346,29 @@ private struct PropertyWorkspaceShell<Content: View>: View {
 
 private struct PropertyScrubber: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let clip: TimelineClip
     let target: KeyframeTarget
     let isEnabled: Bool
 
-    @State private var dragStartValue: Double?
-    @State private var dragStartTickPosition: CGFloat?
     @State private var rulerTickPosition: CGFloat?
     @State private var lastHapticBucket: Int?
     @State private var isDragging = false
     @State private var isScrubbing = false
     @State private var momentumTask: Task<Void, Never>?
+
+    init(
+        viewModel: EditorViewModel,
+        clip: TimelineClip,
+        target: KeyframeTarget,
+        isEnabled: Bool = true
+    ) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.clip = clip
+        self.target = target
+        self.isEnabled = isEnabled
+    }
 
     var body: some View {
         let metadata = clip.keyframeMetadata(for: target)
@@ -384,16 +396,17 @@ private struct PropertyScrubber: View {
             .contentShape(Rectangle())
             .overlay {
                 HorizontalScrubInteraction(
-                    onChanged: { translation in
+                    onBegan: {
+                        beginScrub(metadata: metadata)
+                    },
+                    onChanged: { delta in
                         updateScrub(
-                            translation: translation,
-                            metadata: metadata,
-                            currentValue: value
+                            delta: delta,
+                            metadata: metadata
                         )
                     },
-                    onEnded: { translation, velocity in
+                    onEnded: { velocity in
                         endScrub(
-                            translation: translation,
                             velocity: velocity,
                             metadata: metadata
                         )
@@ -427,32 +440,31 @@ private struct PropertyScrubber: View {
         return clip.animatableProperty(for: target)?.value(at: time) ?? 0
     }
 
-    private func updateScrub(
-        translation: CGFloat,
-        metadata: KeyframePropertyMetadata,
-        currentValue: Double
-    ) {
-        if !isDragging {
-            momentumTask?.cancel()
-            momentumTask = nil
-            if isScrubbing {
-                viewModel.finishInteractiveEdit()
-            }
-            dragStartValue = currentValue
-            dragStartTickPosition = tickPosition(
-                for: currentValue,
-                metadata: metadata
-            )
-            rulerTickPosition = dragStartTickPosition
-            isDragging = true
-            isScrubbing = true
-            viewModel.activeKeyframeTarget = target
-            viewModel.beginInteractiveEdit()
-            EditorHaptics.scrubStart()
+    private func beginScrub(metadata: KeyframePropertyMetadata) {
+        momentumTask?.cancel()
+        momentumTask = nil
+        if isScrubbing {
+            viewModel.finishInteractiveEdit()
         }
-        guard let startPosition = dragStartTickPosition else { return }
+        let currentValue = displayedValue
+        rulerTickPosition = tickPosition(
+            for: currentValue,
+            metadata: metadata
+        )
+        isDragging = true
+        isScrubbing = true
+        viewModel.activeKeyframeTarget = target
+        viewModel.beginInteractiveEdit()
+        EditorHaptics.scrubStart()
+    }
+
+    private func updateScrub(
+        delta: CGFloat,
+        metadata: KeyframePropertyMetadata
+    ) {
+        guard isDragging, let currentPosition = rulerTickPosition else { return }
         let position = boundedTickPosition(
-            startPosition - translation / InfiniteScrubberTrack.tickSpacing,
+            currentPosition - delta / InfiniteScrubberTrack.tickSpacing,
             metadata: metadata
         )
         rulerTickPosition = position
@@ -466,17 +478,15 @@ private struct PropertyScrubber: View {
     }
 
     private func endScrub(
-        translation: CGFloat,
         velocity: CGFloat,
         metadata: KeyframePropertyMetadata
     ) {
-        guard let startPosition = dragStartTickPosition else { return }
-        let position = boundedTickPosition(
-            startPosition - translation / InfiniteScrubberTrack.tickSpacing,
-            metadata: metadata
-        )
-        rulerTickPosition = position
+        guard isDragging else { return }
         isDragging = false
+        guard let position = rulerTickPosition else {
+            finishScrubbing()
+            return
+        }
         startMomentum(
             distance: min(max(-velocity * 0.18, -480), 480),
             from: position,
@@ -530,24 +540,21 @@ private struct PropertyScrubber: View {
 
     @MainActor
     private func settleRulerAndFinish() async {
-        guard let position = rulerTickPosition else {
+        guard rulerTickPosition != nil else {
             finishScrubbing()
             return
         }
-        let maximum = maximumTickPosition(metadata: clip.keyframeMetadata(for: target))
-        let snappedPosition =
-            position <= 0.5
-            ? 0
-            : (position >= maximum - 0.5 ? maximum : position.rounded())
+        let metadata = clip.keyframeMetadata(for: target)
+        let currentValue = displayedValue
+        let snappedPosition = tickPosition(for: currentValue, metadata: metadata)
         withAnimation(.spring(duration: 0.22, bounce: 0.12)) {
             rulerTickPosition = snappedPosition
         }
 
         try? await Task.sleep(for: .milliseconds(220))
         guard !Task.isCancelled else { return }
-        let metadata = clip.keyframeMetadata(for: target)
         viewModel.setSelectedKeyframeValue(
-            value(at: snappedPosition, metadata: metadata),
+            currentValue,
             target: target,
             interactive: true
         )
@@ -555,8 +562,6 @@ private struct PropertyScrubber: View {
     }
 
     private func finishScrubbing() {
-        dragStartValue = nil
-        dragStartTickPosition = nil
         rulerTickPosition = nil
         isScrubbing = false
         lastHapticBucket = nil
@@ -709,27 +714,32 @@ private struct InfiniteScrubberTrack: View {
 
                 Canvas { context, size in
                     let spacing = Self.tickSpacing
-                    let maximumIndex = Int(ceil(maximumTickPosition))
+                    
+                    let halfVisibleTicks = Int(ceil((size.width * 0.5) / spacing))
+                    let startIndex = max(0, Int(floor(tickPosition)) - halfVisibleTicks - 1)
+                    let endIndex = min(Int(ceil(maximumTickPosition)), Int(ceil(tickPosition)) + halfVisibleTicks + 1)
 
-                    for index in 0...maximumIndex {
-                        let indexPosition = min(CGFloat(index), maximumTickPosition)
-                        let x =
-                            size.width * 0.5
-                            + (indexPosition - tickPosition) * spacing
-                        let isRoundNumber = index.isMultiple(of: 10)
-                        let height: CGFloat = 8
-                        let rect = CGRect(
-                            x: x - 0.6,
-                            y: (size.height - height) * 0.5,
-                            width: 1.2,
-                            height: height
-                        )
-                        context.fill(
-                            Path(roundedRect: rect, cornerRadius: 0.6),
-                            with: .color(
-                                Color.white.opacity(isRoundNumber ? 0.52 : 0.24)
+                    if startIndex <= endIndex {
+                        for index in startIndex...endIndex {
+                            let indexPosition = min(CGFloat(index), maximumTickPosition)
+                            let x =
+                                size.width * 0.5
+                                + (indexPosition - tickPosition) * spacing
+                            let isRoundNumber = index.isMultiple(of: 10)
+                            let height: CGFloat = 8
+                            let rect = CGRect(
+                                x: x - 0.6,
+                                y: (size.height - height) * 0.5,
+                                width: 1.2,
+                                height: height
                             )
-                        )
+                            context.fill(
+                                Path(roundedRect: rect, cornerRadius: 0.6),
+                                with: .color(
+                                    Color.white.opacity(isRoundNumber ? 0.52 : 0.24)
+                                )
+                            )
+                        }
                     }
                 }
                 .mask {
@@ -762,11 +772,12 @@ private struct InfiniteScrubberTrack: View {
 }
 
 private struct HorizontalScrubInteraction: UIViewRepresentable {
+    let onBegan: () -> Void
     let onChanged: (CGFloat) -> Void
-    let onEnded: (CGFloat, CGFloat) -> Void
+    let onEnded: (CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onChanged: onChanged, onEnded: onEnded)
+        Coordinator(onBegan: onBegan, onChanged: onChanged, onEnded: onEnded)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -784,29 +795,39 @@ private struct HorizontalScrubInteraction: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onBegan = onBegan
         context.coordinator.onChanged = onChanged
         context.coordinator.onEnded = onEnded
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onBegan: () -> Void
         var onChanged: (CGFloat) -> Void
-        var onEnded: (CGFloat, CGFloat) -> Void
+        var onEnded: (CGFloat) -> Void
 
         init(
+            onBegan: @escaping () -> Void,
             onChanged: @escaping (CGFloat) -> Void,
-            onEnded: @escaping (CGFloat, CGFloat) -> Void
+            onEnded: @escaping (CGFloat) -> Void
         ) {
+            self.onBegan = onBegan
             self.onChanged = onChanged
             self.onEnded = onEnded
         }
 
         @objc func handlePan(_ recognizer: UIPanGestureRecognizer) {
-            let translation = recognizer.translation(in: recognizer.view).x
+            guard let view = recognizer.view else { return }
             switch recognizer.state {
+            case .began:
+                onBegan()
+                recognizer.setTranslation(.zero, in: view)
             case .changed:
-                onChanged(translation)
+                let delta = recognizer.translation(in: view).x
+                onChanged(delta)
+                recognizer.setTranslation(.zero, in: view)
             case .ended, .cancelled:
-                onEnded(translation, recognizer.velocity(in: recognizer.view).x)
+                let velocity = recognizer.velocity(in: view).x
+                onEnded(velocity)
             default:
                 break
             }
@@ -831,10 +852,26 @@ private struct HorizontalScrubInteraction: UIViewRepresentable {
 
 struct SelectedLayerMiniTimeline: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     @Binding var contextClipID: UUID?
     @Binding var pixelsPerSecond: CGFloat
     let activeSection: KeyframeSection?
     let graphSegment: KeyframeSegment?
+
+    init(
+        viewModel: EditorViewModel,
+        contextClipID: Binding<UUID?>,
+        pixelsPerSecond: Binding<CGFloat>,
+        activeSection: KeyframeSection?,
+        graphSegment: KeyframeSegment?
+    ) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        _contextClipID = contextClipID
+        _pixelsPerSecond = pixelsPerSecond
+        self.activeSection = activeSection
+        self.graphSegment = graphSegment
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -858,11 +895,9 @@ struct SelectedLayerMiniTimeline: View {
                     onScrubStart: { viewModel.beginScrub() },
                     onScrubChanged: { time in
                         viewModel.updateScrub(to: time)
-                        selectClipIfNeeded(at: time, in: track)
                     },
                     onScrubEnd: { time in
                         viewModel.endScrub(at: time)
-                        selectClipIfNeeded(at: time, in: track)
                     },
                     onPullToAddChanged: { _ in },
                     onPullToAddEnded: { _ in }
@@ -883,23 +918,26 @@ struct SelectedLayerMiniTimeline: View {
                                         .allowsHitTesting(false)
                                 }
 
-                                TimelineClipFill(
-                                    clip: clip,
-                                    width: width,
-                                    height: 38,
-                                    pixelsPerSecond: pixelsPerSecond,
-                                    sampleWidth: nil
-                                )
-                                .frame(width: width, height: 38)
-                                .overlay {
-                                    MiniTimelineKeyframes(
+                                if let media = viewModel.project.mediaDescriptor(for: clip) {
+                                    TimelineClipFill(
                                         clip: clip,
-                                        currentTime: viewModel.currentTime,
-                                        tolerance: viewModel.keyframeTimeTolerance,
+                                        media: media,
                                         width: width,
-                                        activeSection: activeSection,
-                                        graphSegment: graphSegment
+                                        height: 38,
+                                        pixelsPerSecond: pixelsPerSecond,
+                                        sampleWidth: nil
                                     )
+                                    .frame(width: width, height: 38)
+                                    .overlay {
+                                        MiniTimelineKeyframes(
+                                            clip: clip,
+                                            currentTime: viewModel.currentTime,
+                                            tolerance: viewModel.keyframeTimeTolerance,
+                                            width: width,
+                                            activeSection: activeSection,
+                                            graphSegment: graphSegment
+                                        )
+                                    }
                                 }
                             }
                             .frame(width: width, height: 42)
@@ -919,21 +957,6 @@ struct SelectedLayerMiniTimeline: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .motionaryGlass(cornerRadius: 13)
-    }
-
-    private func selectClipIfNeeded(at time: Double, in track: TimelineTrack) {
-        guard let clip = track.clips.first(where: {
-            time >= $0.timelineStart && time < $0.timelineEnd
-        }) else {
-            return
-        }
-        guard clip.id != contextClipID || clip.id != viewModel.selectedClipID else {
-            return
-        }
-
-        contextClipID = clip.id
-        viewModel.selectClip(clip.id, trackID: track.id)
-        EditorHaptics.selection()
     }
 
     private var miniTimelineContentRevision: Int {

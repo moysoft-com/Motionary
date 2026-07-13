@@ -122,7 +122,10 @@ struct VideoExportService {
         let videoOutput = AVAssetReaderVideoCompositionOutput(
             videoTracks: videoTracks,
             videoSettings: [
-                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+                // Keep the compositor's working buffer private and hand the encoder
+                // compact video-range YUV instead of another 4-byte BGRA frame.
+                kCVPixelBufferPixelFormatTypeKey as String:
+                    Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
             ]
         )
         videoOutput.videoComposition = videoComposition
@@ -169,6 +172,11 @@ struct VideoExportService {
                 AVVideoCodecKey: settings.codec.avCodec,
                 AVVideoWidthKey: settings.width,
                 AVVideoHeightKey: settings.height,
+                AVVideoColorPropertiesKey: [
+                    AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                    AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2
+                ],
                 AVVideoCompressionPropertiesKey: compression
             ]
         )

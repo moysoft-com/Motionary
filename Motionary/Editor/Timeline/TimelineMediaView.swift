@@ -6,6 +6,7 @@ import UIKit
 
 struct TimelineThumbnailTile: View {
     let clip: TimelineClip
+    let media: ClipMediaDescriptor
     let tileIndex: Int
     let tileWidth: CGFloat
     let height: CGFloat
@@ -34,6 +35,7 @@ struct TimelineThumbnailTile: View {
             image = nil
             let loaded = await TimelineThumbnailLoader.tileImage(
                 for: clip,
+                media: media,
                 tileIndex: tileIndex,
                 tileWidth: tileWidth,
                 tileHeight: height,
@@ -52,7 +54,7 @@ struct TimelineThumbnailTile: View {
             "\(Int(tileWidth.rounded()))",
             "\(Int(height.rounded()))",
             "\(Int((displayScale * 100).rounded()))",
-            clip.source.url.path,
+            media.mediaID.rawValue.uuidString,
             clip.mediaType.rawValue,
             String(format: "%.3f", clip.sourceRange.start),
             String(format: "%.3f", clip.sourceRange.duration)
@@ -62,10 +64,30 @@ struct TimelineThumbnailTile: View {
 
 actor TimelineThumbnailTileCache {
     static let shared = TimelineThumbnailTileCache()
-    private var tileCache: [String: UIImage] = [:]
+    private let tileCache = NSCache<NSString, UIImage>()
+    private var inFlight: [String: Task<UIImage?, Never>] = [:]
+    private var activeProjectID: UUID?
+    private let diskRoot: URL = {
+        let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return root.appendingPathComponent("timeline-thumbnails", isDirectory: true)
+    }()
+
+    init() {
+        tileCache.countLimit = 240
+        tileCache.totalCostLimit = 96 * 1_024 * 1_024
+        try? FileManager.default.createDirectory(at: diskRoot, withIntermediateDirectories: true)
+    }
+
+    func setActiveProject(_ projectID: UUID) {
+        if activeProjectID != projectID {
+            activeProjectID = projectID
+        }
+    }
 
     func tileImage(
         for clip: TimelineClip,
+        media: ClipMediaDescriptor,
         tileIndex: Int,
         tileWidth: CGFloat,
         tileHeight: CGFloat,
@@ -80,42 +102,117 @@ actor TimelineThumbnailTileCache {
                 max(Double(tileIndex) * secondsPerTile + secondsPerTile * 0.5, 0),
                 max(clip.sourceRange.duration - 0.001, 0))
         let sourceTime = clip.sourceRange.start + localTime
-        let key = [
-            clip.source.url.path,
-            clip.mediaType.rawValue,
+        let key = cacheKey(
+            media: media,
+            tileIndex: tileIndex,
+            sourceTime: sourceTime,
+            tileWidth: tileWidth,
+            tileHeight: tileHeight,
+            displayScale: displayScale
+        )
+
+        if let cached = tileCache.object(forKey: key as NSString) {
+            return cached
+        }
+        if let diskImage = loadDiskImage(forKey: key) {
+            tileCache.setObject(diskImage, forKey: key as NSString, cost: imageCost(diskImage))
+            return diskImage
+        }
+
+        if let task = inFlight[key] {
+            return await task.value
+        }
+
+        let task = Task {
+            await TimelineThumbnailLoader.generateImage(
+                for: clip,
+                media: media,
+                sourceTime: sourceTime,
+                targetSize: CGSize(width: tileWidth, height: tileHeight),
+                displayScale: displayScale
+            )
+        }
+        inFlight[key] = task
+        let image = await task.value
+        inFlight[key] = nil
+        if let image {
+            tileCache.setObject(image, forKey: key as NSString, cost: imageCost(image))
+            storeDiskImage(image, forKey: key)
+        }
+        return image
+    }
+
+    func removeAll() {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        tileCache.removeAllObjects()
+        activeProjectID = nil
+    }
+
+    func trimForMemoryPressure() {
+        inFlight.values.forEach { $0.cancel() }
+        inFlight.removeAll()
+        tileCache.removeAllObjects()
+    }
+
+    private func cacheKey(
+        media: ClipMediaDescriptor,
+        tileIndex: Int,
+        sourceTime: Double,
+        tileWidth: CGFloat,
+        tileHeight: CGFloat,
+        displayScale: CGFloat
+    ) -> String {
+        [
+            media.mediaID.rawValue.uuidString,
+            media.mediaType.rawValue,
             "\(tileIndex)",
             String(format: "%.3f", sourceTime),
             "\(Int(tileWidth.rounded()))",
             "\(Int(tileHeight.rounded()))",
             "\(Int((displayScale * 100).rounded()))"
         ].joined(separator: "|")
+    }
 
-        if let cached = tileCache[key] {
-            return cached
-        }
+    private func imageCost(_ image: UIImage) -> Int {
+        let pixelWidth = Int(image.size.width * image.scale)
+        let pixelHeight = Int(image.size.height * image.scale)
+        return max(pixelWidth * pixelHeight * 4, 1)
+    }
 
-        let image = await TimelineThumbnailLoader.generateImage(
-            for: clip,
-            sourceTime: sourceTime,
-            targetSize: CGSize(width: tileWidth, height: tileHeight),
-            displayScale: displayScale
-        )
-        if let image {
-            tileCache[key] = image
-        }
+    private func diskURL(forKey key: String) -> URL {
+        let hashed = key.data(using: .utf8)?.base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_") ?? key
+        return diskRoot.appendingPathComponent("\(hashed).png")
+    }
+
+    private func loadDiskImage(forKey key: String) -> UIImage? {
+        let url = diskURL(forKey: key)
+        guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else { return nil }
         return image
+    }
+
+    private func storeDiskImage(_ image: UIImage, forKey key: String) {
+        guard let data = image.pngData() else { return }
+        try? data.write(to: diskURL(forKey: key), options: [.atomic])
     }
 }
 
 enum TimelineThumbnailLoader {
-    static func image(for clip: TimelineClip, timelineTime: Double, targetHeight: CGFloat) async -> UIImage? {
+    static func image(
+        for clip: TimelineClip,
+        media: ClipMediaDescriptor,
+        timelineTime: Double,
+        targetHeight: CGFloat
+    ) async -> UIImage? {
         let localTime = min(max(timelineTime - clip.timelineStart, 0), max(clip.sourceRange.duration - 0.01, 0))
         let sourceTime = clip.sourceRange.start + localTime
-        return await generateImage(for: clip, sourceTime: sourceTime, targetHeight: targetHeight)
+        return await generateImage(for: clip, media: media, sourceTime: sourceTime, targetHeight: targetHeight)
     }
 
     static func tileImage(
         for clip: TimelineClip,
+        media: ClipMediaDescriptor,
         tileIndex: Int,
         tileWidth: CGFloat,
         tileHeight: CGFloat,
@@ -124,6 +221,7 @@ enum TimelineThumbnailLoader {
     ) async -> UIImage? {
         await TimelineThumbnailTileCache.shared.tileImage(
             for: clip,
+            media: media,
             tileIndex: tileIndex,
             tileWidth: tileWidth,
             tileHeight: tileHeight,
@@ -132,10 +230,13 @@ enum TimelineThumbnailLoader {
         )
     }
 
-    fileprivate static func generateImage(for clip: TimelineClip, sourceTime: Double, targetHeight: CGFloat) async
-        -> UIImage?
-    {
-        let url = clip.source.url
+    fileprivate static func generateImage(
+        for clip: TimelineClip,
+        media: ClipMediaDescriptor,
+        sourceTime: Double,
+        targetHeight: CGFloat
+    ) async -> UIImage? {
+        let url = media.url
         let sourceStart = clip.sourceRange.start
         return await Task<UIImage?, Never>.detached(priority: .utility) {
             let asset = AVURLAsset(url: url)
@@ -157,9 +258,13 @@ enum TimelineThumbnailLoader {
     }
 
     fileprivate static func generateImage(
-        for clip: TimelineClip, sourceTime: Double, targetSize: CGSize, displayScale: CGFloat
+        for clip: TimelineClip,
+        media: ClipMediaDescriptor,
+        sourceTime: Double,
+        targetSize: CGSize,
+        displayScale: CGFloat
     ) async -> UIImage? {
-        let url = clip.source.url
+        let url = media.url
         let sourceStart = clip.sourceRange.start
         let sourceEnd = clip.sourceRange.end
         return await Task<UIImage?, Never>.detached(priority: .utility) {

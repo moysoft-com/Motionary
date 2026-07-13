@@ -4,9 +4,18 @@ import SwiftUI
 import UIKit
 
 struct EditorBusyOverlay: View {
-    @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var viewModel: EditorViewModel
+    @ObservedObject private var exportState: ExportState
+    @ObservedObject private var previewState: PreviewState
     let onCancelRequest: () -> Void
     @State private var showsOverlay = false
+
+    init(viewModel: EditorViewModel, onCancelRequest: @escaping () -> Void) {
+        self.viewModel = viewModel
+        _exportState = ObservedObject(wrappedValue: viewModel.exportState)
+        _previewState = ObservedObject(wrappedValue: viewModel.previewState)
+        self.onCancelRequest = onCancelRequest
+    }
 
     var body: some View {
         ZStack {
@@ -18,8 +27,8 @@ struct EditorBusyOverlay: View {
                         .onTapGesture(perform: onCancelRequest)
 
                     VStack(spacing: 12) {
-                        if viewModel.isExporting {
-                            ProgressView(value: viewModel.exportProgress)
+                        if exportState.isExporting {
+                            ProgressView(value: exportState.progress)
                         } else {
                             ProgressView()
                         }
@@ -40,18 +49,15 @@ struct EditorBusyOverlay: View {
         .task(id: busyKey) {
             showsOverlay = false
             guard viewModel.isPerformingLongTask else { return }
-            if viewModel.isRenderingPreview && !viewModel.isImporting && !viewModel.isExporting {
-                try? await Task.sleep(nanoseconds: 450_000_000)
-            }
+            try? await Task.sleep(nanoseconds: 650_000_000)
             guard !Task.isCancelled, viewModel.isPerformingLongTask else { return }
             showsOverlay = true
         }
     }
 
     private var busyKey: String {
-        if viewModel.isExporting { return "export" }
+        if exportState.isExporting { return "export" }
         if viewModel.isImporting { return "import" }
-        if viewModel.isRenderingPreview { return "preview" }
         return "idle"
     }
 }

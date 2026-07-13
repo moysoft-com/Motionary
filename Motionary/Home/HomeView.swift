@@ -4,6 +4,8 @@ import PhotosUI
 import SwiftUI
 
 struct HomeView: View {
+    @AppStorage(AppPreferences.newProjectFrameRateKey)
+    private var newProjectFrameRate = AppPreferences.defaultFrameRate
     @StateObject private var projectStore: ProjectStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedProject: Project?
@@ -162,6 +164,7 @@ struct HomeView: View {
             let project = projectStore.addProject()
             let importService = MediaImportService()
             var editorProject = EditorProject.empty(title: project.title)
+            editorProject.renderSettings.frameRate = Int32(newProjectFrameRate)
 
             do {
                 var importedByIndex: [Int: ImportedMedia] = [:]
@@ -197,10 +200,14 @@ struct HomeView: View {
                     appendInitialMedia(imported, to: &editorProject)
                 }
 
+                editorProject.synchronizeMediaLibrary()
                 editorProject.updatedAt = Date()
-                projectStore.saveContent(ProjectContent(editorProject: editorProject), for: project.id)
+                let content = ProjectContent(editorProject: editorProject)
+                try await projectStore.repository.save(content, projectID: project.id)
+                projectStore.recordSavedContent(content, projectID: project.id)
                 selectedProject = projectStore.projects.first(where: { $0.id == project.id }) ?? project
             } catch {
+                projectStore.deleteProject(with: project.id)
                 errorMessage = error.localizedDescription
             }
         }
@@ -220,6 +227,8 @@ struct HomeView: View {
             timelineStart: timelineStart,
             sourceRange: TimeRangeValue(start: 0, duration: imported.source.originalDuration)
         )
+        var registeredClip = clip
+        project.registerClipMedia(&registeredClip, source: imported.source)
 
         switch kind {
         case .undefined:
@@ -232,8 +241,7 @@ struct HomeView: View {
                 project.tracks.insert(TimelineTrack(name: "Layer 1", kind: .visual), at: 0)
                 trackIndex = 0
             }
-            project.tracks[trackIndex].clips.append(clip)
-            project.tracks[trackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
+            project.tracks[trackIndex].appendLegacyClip(registeredClip)
 
             let hasOnlyThisVisual =
                 project.tracks
@@ -241,7 +249,10 @@ struct HomeView: View {
                 .flatMap(\.clips)
                 .count == 1
             if hasOnlyThisVisual, let naturalSize = imported.source.naturalSize?.cgSize {
-                project.renderSettings = RenderSettings(size: naturalSize)
+                project.renderSettings = RenderSettings(
+                    size: naturalSize,
+                    frameRate: Int32(newProjectFrameRate)
+                )
             }
         case .shape:
             return
@@ -253,8 +264,7 @@ struct HomeView: View {
                 project.tracks.append(TimelineTrack(name: "Audio 1", kind: .audio))
                 trackIndex = project.tracks.count - 1
             }
-            project.tracks[trackIndex].clips.append(clip)
-            project.tracks[trackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
+            project.tracks[trackIndex].appendLegacyClip(registeredClip)
         }
     }
 }

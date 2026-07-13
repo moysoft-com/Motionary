@@ -85,21 +85,34 @@ extension EditorViewModel {
                     projectStore: projectStore
                 )
                 try Task.checkCancellation()
-                mutateProject { project in
-                    guard let location = project.clipLocation(id: selectedClipID) else { return }
-                    var clip = project.tracks[location.track].clips[location.clip]
-                    let previousDuration = clip.sourceRange.duration
-                    clip.name = imported.storedURL.deletingPathExtension().lastPathComponent
-                    clip.source = imported.source
-                    clip.shape = nil
-                    clip.sourceRange = TimeRangeValue(
-                        start: 0,
-                        duration: imported.source.mediaType == .image
-                            ? previousDuration
-                            : min(previousDuration, imported.source.originalDuration)
+                guard let location = project.clipLocation(id: selectedClipID) else { return }
+                let beforeClip = project.tracks[location.track].clips[location.clip]
+                let beforeMedia = project.mediaAsset(for: beforeClip)
+                let previousDuration = beforeClip.sourceRange.duration
+                var afterClip = beforeClip
+                afterClip.name = imported.storedURL.deletingPathExtension().lastPathComponent
+                afterClip.mediaID = MediaID(rawValue: imported.source.id)
+                afterClip.mediaType = imported.source.mediaType
+                afterClip.shape = nil
+                afterClip.sourceRange = TimeRangeValue(
+                    start: 0,
+                    duration: imported.source.mediaType == .image
+                        ? previousDuration
+                        : min(previousDuration, imported.source.originalDuration)
+                )
+                let afterMedia = MediaAsset(id: afterClip.mediaID, source: imported.source)
+                commit(
+                    AnyEditorCommand(
+                        ReplaceClipMediaCommand(
+                            clipID: selectedClipID,
+                            beforeClip: beforeClip,
+                            beforeMedia: beforeMedia,
+                            afterClip: afterClip,
+                            afterMedia: afterMedia,
+                            invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+                        )
                     )
-                    project.tracks[location.track].clips[location.clip] = clip
-                }
+                )
             } catch is CancellationError {
                 return
             } catch {
@@ -126,22 +139,29 @@ extension EditorViewModel {
                     projectStore: projectStore
                 )
                 try Task.checkCancellation()
-                mutateProject { project in
-                    let trackIndex = project.insertFreshTrack(kind: .shape)
-                    var source = imported.source
-                    source.naturalSize = CGSizeValue(width: 400, height: 400)
-                    let clip = TimelineClip(
-                        name: kind.title,
-                        source: source,
-                        timelineStart: self.currentTime,
-                        sourceRange: TimeRangeValue(start: 0, duration: shapeDuration),
-                        shape: ClipShape(kind: kind)
+                let before = project
+                var after = project
+                let trackIndex = after.insertFreshTrack(kind: .shape)
+                var source = imported.source
+                source.naturalSize = CGSizeValue(width: 400, height: 400)
+                var clip = TimelineClip(
+                    name: kind.title,
+                    source: source,
+                    timelineStart: self.currentTime,
+                    sourceRange: TimeRangeValue(start: 0, duration: shapeDuration),
+                    shape: ClipShape(kind: kind)
+                )
+                after.registerClipMedia(&clip, source: source)
+                after.tracks[trackIndex].appendLegacyClip(clip)
+                selectedTrackID = after.tracks[trackIndex].id
+                selectedClipID = clip.id
+                commit(
+                    EditorCommandFactory.importMedia(
+                        before: before,
+                        after: after,
+                        invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
                     )
-                    project.tracks[trackIndex].clips.append(clip)
-                    project.tracks[trackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
-                    self.selectedTrackID = project.tracks[trackIndex].id
-                    self.selectedClipID = clip.id
-                }
+                )
             } catch is CancellationError {
                 return
             } catch {
@@ -156,47 +176,60 @@ extension EditorViewModel {
     ) {
         guard !importedMedia.isEmpty else { return }
 
-        mutateProject { project in
-            var finalSelection: (clipID: UUID, trackID: UUID)?
+        let before = project
+        var after = project
+        var finalSelection: (clipID: UUID, trackID: UUID)?
 
-            for imported in importedMedia {
-                let kind: TrackKind = imported.source.mediaType == .audio ? .audio : .visual
-                let hadVisualClips = project.tracks.contains {
-                    $0.kind == .visual && !$0.clips.isEmpty
-                }
-                let trackIndex = project.insertFreshTrack(kind: kind)
-                let targetInsertionTime: Double
-                if kind == .visual, hadVisualClips, !sequentialVisual {
-                    targetInsertionTime = currentTime
-                } else {
-                    targetInsertionTime = insertionTime(for: kind, in: project)
-                }
-                let clip = TimelineClip(
-                    name: imported.storedURL.deletingPathExtension().lastPathComponent,
-                    source: imported.source,
-                    timelineStart: targetInsertionTime,
-                    sourceRange: TimeRangeValue(
-                        start: 0,
-                        duration: imported.source.originalDuration
-                    )
+        for imported in importedMedia {
+            let kind: TrackKind = imported.source.mediaType == .audio ? .audio : .visual
+            let hadVisualClips = after.tracks.contains {
+                $0.kind == .visual && !$0.clips.isEmpty
+            }
+            let targetInsertionTime: Double
+            if kind == .visual, hadVisualClips, !sequentialVisual {
+                targetInsertionTime = currentTime
+            } else {
+                targetInsertionTime = insertionTime(for: kind, in: after)
+            }
+            let trackIndex =
+                after.topAvailableTrackIndex(
+                    kind: kind,
+                    start: targetInsertionTime,
+                    duration: imported.source.originalDuration
                 )
-                project.tracks[trackIndex].clips.append(clip)
-                project.tracks[trackIndex].clips.sort { $0.timelineStart < $1.timelineStart }
-                if kind == .visual,
-                    !hadVisualClips,
-                    let naturalSize = imported.source.naturalSize?.displaySafeSize
-                {
-                    project.renderSettings = RenderSettings(size: naturalSize)
-                }
-                finalSelection = (clip.id, project.tracks[trackIndex].id)
+                ?? after.insertFreshTrack(kind: kind)
+            var clip = TimelineClip(
+                name: imported.storedURL.deletingPathExtension().lastPathComponent,
+                source: imported.source,
+                timelineStart: targetInsertionTime,
+                sourceRange: TimeRangeValue(
+                    start: 0,
+                    duration: imported.source.originalDuration
+                )
+            )
+            after.registerClipMedia(&clip, source: imported.source)
+            after.tracks[trackIndex].appendLegacyClip(clip)
+            if kind == .visual,
+                !hadVisualClips,
+                let naturalSize = imported.source.naturalSize?.displaySafeSize
+            {
+                after.renderSettings = RenderSettings(size: naturalSize)
             }
-
-            project.renumberTracks()
-            if let finalSelection {
-                selectedTrackID = finalSelection.trackID
-                selectedClipID = finalSelection.clipID
-            }
+            finalSelection = (clip.id, after.tracks[trackIndex].id)
         }
+
+        after.renumberTracks()
+        if let finalSelection {
+            selectedTrackID = finalSelection.trackID
+            selectedClipID = finalSelection.clipID
+        }
+        commit(
+            EditorCommandFactory.importMedia(
+                before: before,
+                after: after,
+                invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+            )
+        )
     }
 
     func importAudioFromPhotosItem(_ item: PhotosPickerItem) {
@@ -245,44 +278,66 @@ extension EditorViewModel {
     }
 
     func addLayer() {
-        mutateProject(rebuild: false) { project in
-            project.tracks.insert(TimelineTrack(name: "Layer", kind: .undefined), at: 0)
-            selectedTrackID = project.tracks.first?.id
-        }
+        let before = project.tracks
+        var after = project
+        after.tracks.insert(TimelineTrack(name: "Layer", kind: .undefined), at: 0)
+        selectedTrackID = after.tracks.first?.id
+        commit(
+            EditorCommandFactory.trackStructure(
+                before: before,
+                after: after.tracks,
+                invalidation: [.timelineLayout, .userInterface, .persistence]
+            ),
+            refreshTimeline: true
+        )
     }
 
     func deleteLayer(_ trackID: UUID) {
-        mutateProject { project in
-            guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
-            let removedTrack = project.tracks.remove(at: trackIndex)
+        guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        let before = project.tracks
+        var after = project
+        let removedTrack = after.tracks.remove(at: trackIndex)
 
-            if let selectedClipID,
-                removedTrack.clips.contains(where: { $0.id == selectedClipID })
-            {
-                self.selectedClipID = nil
-            }
-
-            if selectedTrackID == trackID {
-                let replacementIndex = min(trackIndex, max(project.tracks.count - 1, 0))
-                selectedTrackID =
-                    project.tracks.indices.contains(replacementIndex)
-                    ? project.tracks[replacementIndex].id
-                    : nil
-            }
+        if let selectedClipID,
+            removedTrack.clips.contains(where: { $0.id == selectedClipID })
+        {
+            self.selectedClipID = nil
         }
+
+        if selectedTrackID == trackID {
+            let replacementIndex = min(trackIndex, max(after.tracks.count - 1, 0))
+            selectedTrackID =
+                after.tracks.indices.contains(replacementIndex)
+                ? after.tracks[replacementIndex].id
+                : nil
+        }
+        commit(
+            EditorCommandFactory.trackStructure(
+                before: before,
+                after: after.tracks,
+                invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+            )
+        )
     }
 
     func moveTrack(_ trackID: UUID, to proposedIndex: Int) {
-        mutateProject(rebuild: false) { project in
-            guard let sourceIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
-            let track = project.tracks[sourceIndex]
-            let boundedIndex = min(max(proposedIndex, 0), max(project.tracks.count - 1, 0))
-            guard sourceIndex != boundedIndex else { return }
+        guard let sourceIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        let before = project.tracks
+        var after = project
+        let track = after.tracks[sourceIndex]
+        let boundedIndex = min(max(proposedIndex, 0), max(after.tracks.count - 1, 0))
+        guard sourceIndex != boundedIndex else { return }
 
-            project.tracks.remove(at: sourceIndex)
-            project.tracks.insert(track, at: boundedIndex)
-            project.renumberTracks()
-        }
+        after.tracks.remove(at: sourceIndex)
+        after.tracks.insert(track, at: boundedIndex)
+        after.renumberTracks()
+        commit(
+            EditorCommandFactory.trackStructure(
+                before: before,
+                after: after.tracks,
+                invalidation: [.timelineLayout, .userInterface, .persistence]
+            )
+        )
     }
 
     func selectClip(_ clipID: UUID?, trackID: UUID? = nil, revealInPreview: Bool = false) {

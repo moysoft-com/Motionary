@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		8CA5E5813004020800A91E5F /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA5E5803004020800A91E5F /* FirebaseAuth */; };
+		8CD7881D3003FA4A00E1D88F /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */; };
+		8CF00101300A000100F00101 /* FirebaseAppCheck in Frameworks */ = {isa = PBXBuildFile; productRef = 8CF00100300A000100F00101 /* FirebaseAppCheck */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		8C70C7CC2D7225A80070BD08 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -30,11 +36,6 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		8C70C7BD2D7225A60070BD08 /* Motionary */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Motionary;
-			sourceTree = "<group>";
-		};
 		8C70C7CE2D7225A80070BD08 /* MotionaryTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = MotionaryTests;
@@ -45,6 +46,11 @@
 			path = MotionaryUITests;
 			sourceTree = "<group>";
 		};
+		8CA5E52D3003FCA500A91E5F /* Motionary */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Motionary;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -52,6 +58,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8CF00101300A000100F00101 /* FirebaseAppCheck in Frameworks */,
+				8CD7881D3003FA4A00E1D88F /* FirebaseFirestore in Frameworks */,
+				8CA5E5813004020800A91E5F /* FirebaseAuth in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,9 +84,10 @@
 		8C70C7B22D7225A60070BD08 = {
 			isa = PBXGroup;
 			children = (
-				8C70C7BD2D7225A60070BD08 /* Motionary */,
+				8CA5E52D3003FCA500A91E5F /* Motionary */,
 				8C70C7CE2D7225A80070BD08 /* MotionaryTests */,
 				8C70C7D82D7225A80070BD08 /* MotionaryUITests */,
+				8CA5E57F3004020800A91E5F /* Frameworks */,
 				8C70C7BC2D7225A60070BD08 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +100,13 @@
 				8C70C7D52D7225A80070BD08 /* MotionaryUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		8CA5E57F3004020800A91E5F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -108,10 +125,13 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				8C70C7BD2D7225A60070BD08 /* Motionary */,
+				8CA5E52D3003FCA500A91E5F /* Motionary */,
 			);
 			name = Motionary;
 			packageProductDependencies = (
+				8CF00100300A000100F00101 /* FirebaseAppCheck */,
+				8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */,
+				8CA5E5803004020800A91E5F /* FirebaseAuth */,
 			);
 			productName = Motionary;
 			productReference = 8C70C7BB2D7225A60070BD08 /* Motionary.app */;
@@ -175,6 +195,11 @@
 				TargetAttributes = {
 					8C70C7BA2D7225A60070BD08 = {
 						CreatedOnToolsVersion = 16.2;
+						SystemCapabilities = {
+							com.apple.AppAttest = {
+								enabled = 1;
+							};
+						};
 					};
 					8C70C7CA2D7225A80070BD08 = {
 						CreatedOnToolsVersion = 16.2;
@@ -195,6 +220,9 @@
 			);
 			mainGroup = 8C70C7B22D7225A60070BD08;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 8C70C7BC2D7225A60070BD08 /* Products */;
 			projectDirPath = "";
@@ -397,6 +425,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
 				DEVELOPMENT_TEAM = 84TRSZD4QB;
@@ -430,6 +459,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
 				DEVELOPMENT_TEAM = 84TRSZD4QB;
@@ -462,6 +492,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84TRSZD4QB;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -480,6 +511,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84TRSZD4QB;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
@@ -497,6 +529,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84TRSZD4QB;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = lian.MotionaryUITests;
@@ -513,6 +546,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 84TRSZD4QB;
 				GENERATE_INFOPLIST_FILE = YES;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = lian.MotionaryUITests;
@@ -564,6 +598,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.16.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8CA5E5803004020800A91E5F /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		8CF00100300A000100F00101 /* FirebaseAppCheck */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAppCheck;
+		};
+		8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8C70C7B32D7225A60070BD08 /* Project object */;
 }

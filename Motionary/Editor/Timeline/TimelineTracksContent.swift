@@ -3,7 +3,8 @@
 import SwiftUI
 
 struct TimelineTracksContent: View {
-    @ObservedObject var viewModel: EditorViewModel
+    let snapshot: TimelineRenderSnapshot
+    let viewModel: EditorViewModel
     @Binding var activeClipDrag: TimelineClipDragState?
     @Binding var activeTrackDrag: TimelineTrackDragState?
     @Binding var activeTrimSnapTime: Double?
@@ -15,6 +16,7 @@ struct TimelineTracksContent: View {
     let pixelsPerSecond: CGFloat
     let trackHeight: CGFloat
     let rowSpacing: CGFloat
+    let clipDragScrollOffset: CGSize
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -25,7 +27,7 @@ struct TimelineTracksContent: View {
                 }
 
             VStack(spacing: rowSpacing) {
-                ForEach(Array(viewModel.project.tracks.enumerated()), id: \.element.id) { index, track in
+                ForEach(Array(snapshot.tracks.enumerated()), id: \.element.id) { index, track in
                     trackRow(track: track, index: index)
                 }
             }
@@ -41,13 +43,16 @@ struct TimelineTracksContent: View {
                     .allowsHitTesting(false)
             }
 
-            if let activeClipDrag {
+            if let activeClipDrag,
+                let media = viewModel.project.mediaDescriptor(for: dragGhostClip(for: activeClipDrag))
+            {
                 TimelineClipBlock(
                     clip: dragGhostClip(for: activeClipDrag),
+                    media: media,
                     isSelected: activeClipDrag.selectedClipIDBeforeDrag == activeClipDrag.clipID,
                     isDragSourceHidden: false,
                     isDragGhost: true,
-                    currentTime: viewModel.currentTime,
+                    currentTime: 0,
                     keyframeTolerance: viewModel.keyframeTimeTolerance,
                     pixelsPerSecond: pixelsPerSecond,
                     height: trackHeight - 8,
@@ -98,7 +103,7 @@ struct TimelineTracksContent: View {
         }
 
         var involvedTrackIndices = [movingTrackIndex]
-        for (index, track) in viewModel.project.tracks.enumerated() {
+        for (index, track) in snapshot.tracks.enumerated() {
             let containsSnapTarget = track.clips.contains { clip in
                 clip.id != movingClipID
                     && (abs(clip.timelineStart - time) < 0.001 || abs(clip.timelineEnd - time) < 0.001)
@@ -124,14 +129,15 @@ struct TimelineTracksContent: View {
     private func trackRow(track: TimelineTrack, index: Int) -> some View {
         TimelineTrackRow(
             track: track,
+            clips: snapshot.clipsByTrackID[track.id] ?? [],
             trackIndex: index,
-            trackCount: viewModel.project.tracks.count,
-            selectedClipID: viewModel.selectedClipID,
+            trackCount: snapshot.tracks.count,
+            selectedClipID: snapshot.selectedClipID,
             activeClipDrag: activeClipDrag,
             activeTrackDrag: activeTrackDrag,
-            currentTime: viewModel.currentTime,
-            keyframeTolerance: viewModel.keyframeTimeTolerance,
-            projectDuration: viewModel.duration,
+            currentTime: 0,
+            keyframeTolerance: snapshot.keyframeTolerance,
+            projectDuration: snapshot.duration,
             pixelsPerSecond: pixelsPerSecond,
             centerPadding: centerPadding,
             height: trackHeight,
@@ -188,6 +194,7 @@ struct TimelineTracksContent: View {
             onFinishInteractiveEdit: {
                 viewModel.finishInteractiveEdit()
             },
+            mediaForClip: { viewModel.project.mediaDescriptor(for: $0) },
             onSnapGuideChanged: { time in
                 activeTrimSnapTime = time
             },
@@ -210,6 +217,8 @@ struct TimelineTracksContent: View {
     }
 
     private func beginClipDrag(_ clip: TimelineClip, sourceTrackIndex: Int, trackID: UUID) {
+        let previousClipID = viewModel.selectedClipID
+        let previousTrackID = viewModel.selectedTrackID
         activeClipDrag = TimelineClipDragState(
             clipID: clip.id,
             sourceTrackIndex: sourceTrackIndex,
@@ -221,18 +230,23 @@ struct TimelineTracksContent: View {
                 snapTime: nil
             ),
             clipSnapshot: clip,
-            selectedClipIDBeforeDrag: viewModel.selectedClipID,
-            selectedTrackIDBeforeDrag: viewModel.selectedTrackID
+            selectedClipIDBeforeDrag: previousClipID,
+            selectedTrackIDBeforeDrag: previousTrackID
         )
+        viewModel.selectClip(clip.id, trackID: trackID)
         EditorHaptics.dragStart()
     }
 
     private func updateClipDrag(_ clip: TimelineClip, translation: CGSize) {
         guard let currentDrag = activeClipDrag, currentDrag.clipID == clip.id else { return }
-        let rawStart = currentDrag.startTimelineStart + Double(translation.width / max(pixelsPerSecond, 1))
+        let adjustedTranslation = CGSize(
+            width: translation.width + clipDragScrollOffset.width,
+            height: translation.height + clipDragScrollOffset.height
+        )
+        let rawStart = currentDrag.startTimelineStart + Double(adjustedTranslation.width / max(pixelsPerSecond, 1))
         let targetIndex = targetTrackIndex(
             sourceTrackIndex: currentDrag.sourceTrackIndex,
-            translationY: translation.height,
+            translationY: adjustedTranslation.height,
             currentTargetIndex: currentDrag.resolvedPlacement.trackIndex
         )
         let placement =
@@ -263,13 +277,15 @@ struct TimelineTracksContent: View {
         if commit {
             _ = viewModel.placeClip(drag.clipID, using: drag.resolvedPlacement, interactive: true)
             viewModel.finishInteractiveEdit()
+            viewModel.selectClip(drag.clipID)
+            EditorHaptics.editCommit()
+        } else {
             viewModel.selectClip(
                 drag.selectedClipIDBeforeDrag,
                 trackID: drag.selectedClipIDBeforeDrag == nil
                     ? drag.selectedTrackIDBeforeDrag
                     : nil
             )
-            EditorHaptics.editCommit()
         }
     }
 

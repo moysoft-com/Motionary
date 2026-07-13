@@ -276,22 +276,26 @@ struct AnimatableProperty<Value: Codable & Equatable>: Codable, Equatable {
 extension AnimatableProperty where Value == Double {
     func value(at time: Double) -> Double {
         guard !keyframes.isEmpty else { return baseValue }
-        let sorted = keyframes.sorted { $0.time < $1.time }
-        guard let first = sorted.first, let last = sorted.last else { return baseValue }
+        guard let first = keyframes.first, let last = keyframes.last else { return baseValue }
         if time <= first.time { return first.value }
         if time >= last.time { return last.value }
 
-        for index in 0..<(sorted.count - 1) {
-            let left = sorted[index]
-            let right = sorted[index + 1]
-            guard time >= left.time && time <= right.time else { continue }
-            let span = max(right.time - left.time, 0.001)
-            let progress = (time - left.time) / span
-            let curvedProgress = left.interpolation.progress(at: progress)
-            return left.value + ((right.value - left.value) * curvedProgress)
+        var lower = 0
+        var upper = keyframes.count - 1
+        while lower + 1 < upper {
+            let midpoint = (lower + upper) / 2
+            if keyframes[midpoint].time <= time {
+                lower = midpoint
+            } else {
+                upper = midpoint
+            }
         }
-
-        return baseValue
+        let left = keyframes[lower]
+        let right = keyframes[upper]
+        let span = max(right.time - left.time, 0.001)
+        let progress = (time - left.time) / span
+        let curvedProgress = left.interpolation.progress(at: progress)
+        return left.value + ((right.value - left.value) * curvedProgress)
     }
 
     func keyframeIndex(at time: Double, tolerance: Double) -> Int? {

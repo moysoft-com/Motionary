@@ -22,13 +22,16 @@ final class ProjectStore: ObservableObject {
     }
 
     private let storageURL: URL
+    let repository: ProjectRepository
     private var isLoading = false
     private let fileManager = FileManager.default
 
     init() {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        storageURL = (documentsURL ?? FileManager.default.temporaryDirectory)
+        let rootURL = documentsURL ?? FileManager.default.temporaryDirectory
+        storageURL = rootURL
             .appendingPathComponent("projects.json")
+        repository = ProjectRepository(rootURL: rootURL)
         load()
     }
 
@@ -49,15 +52,7 @@ final class ProjectStore: ObservableObject {
         defer { isLoading = false }
         guard let data = try? Data(contentsOf: storageURL) else { return }
         do {
-            var loadedProjects = try JSONDecoder().decode([Project].self, from: data)
-            for index in loadedProjects.indices {
-                if let content = loadContent(for: loadedProjects[index].id) {
-                    loadedProjects[index].updatedAt = max(
-                        loadedProjects[index].updatedAt,
-                        content.editorProject.updatedAt
-                    )
-                }
-            }
+            let loadedProjects = try JSONDecoder().decode([Project].self, from: data)
             projects = loadedProjects.sorted { $0.updatedAt > $1.updatedAt }
         } catch {
             AppLogger.persistence.error("Failed to load projects: \(error.localizedDescription, privacy: .public)")
@@ -74,25 +69,8 @@ final class ProjectStore: ObservableObject {
         }
     }
 
-    // MARK: - Project Content Persistence
-
-    func loadContent(for projectID: UUID) -> ProjectContent? {
-        let contentURL = contentURL(for: projectID)
-        guard let data = try? Data(contentsOf: contentURL) else { return nil }
-        return try? JSONDecoder().decode(ProjectContent.self, from: data)
-    }
-
-    func saveContent(_ content: ProjectContent, for projectID: UUID) {
-        let contentURL = contentURL(for: projectID)
-        do {
-            let data = try JSONEncoder().encode(content)
-            try data.write(to: contentURL, options: [.atomic])
-            syncProjectMetadata(projectID: projectID, content: content)
-        } catch {
-            AppLogger.persistence.error(
-                "Failed to save project content: \(error.localizedDescription, privacy: .public)"
-            )
-        }
+    func recordSavedContent(_ content: ProjectContent, projectID: UUID) {
+        syncProjectMetadata(projectID: projectID, content: content)
     }
 
     func storeMedia(from url: URL, projectID: UUID) throws -> URL {

@@ -4,14 +4,34 @@ import AVFoundation
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
+import Metal
 import UIKit
 
 /// Applies clip ordering, transforms, adjustments, effects, and opacity to each output frame.
 final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     private let renderQueue = DispatchQueue(label: "com.motionary.video-compositor.render")
-    private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private let ciContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(
+                mtlDevice: device,
+                options: [.cacheIntermediates: false]
+            )
+        }
+        return CIContext(options: [.cacheIntermediates: false])
+    }()
     private var shouldCancelAllRequests = false
-    private var shapeImageCache: [String: CIImage] = [:]
+    private let shapeImageCache: NSCache<NSString, CIImage> = {
+        let cache = NSCache<NSString, CIImage>()
+        cache.countLimit = 48
+        cache.totalCostLimit = 64 * 1_024 * 1_024
+        return cache
+    }()
+    private let textImageCache: NSCache<NSString, CIImage> = {
+        let cache = NSCache<NSString, CIImage>()
+        cache.countLimit = 32
+        cache.totalCostLimit = 48 * 1_024 * 1_024
+        return cache
+    }()
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [
@@ -31,7 +51,12 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         ]
     }
 
-    func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {}
+    func renderContextChanged(_ newRenderContext: AVVideoCompositionRenderContext) {
+        // A preview-quality or export-size change makes the previous raster layers
+        // poor cache candidates and can otherwise retain several large surfaces.
+        shapeImageCache.removeAllObjects()
+        textImageCache.removeAllObjects()
+    }
 
     func startRequest(_ asyncVideoCompositionRequest: AVAsynchronousVideoCompositionRequest) {
         renderQueue.async { [weak self] in
@@ -69,11 +94,23 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                     .cropped(to: canvasRect)
                 let time = CMTimeGetSeconds(asyncVideoCompositionRequest.compositionTime)
 
-                for clip in instruction.clips where self.isClip(clip, activeAt: time) {
+                for clip in instruction.activeClips(at: time) {
                     let localTime = max(0, time - clip.timelineStart)
                     var image: CIImage
                     if let shape = clip.shape {
-                        image = self.shapeImage(shape, at: localTime, renderSize: renderSize)
+                        image = self.shapeImage(
+                            shape,
+                            at: localTime,
+                            renderSize: renderSize,
+                            renderScale: instruction.renderScale
+                        )
+                    } else if let text = clip.text {
+                        image = self.textImage(
+                            text,
+                            at: localTime,
+                            renderSize: renderSize,
+                            renderScale: instruction.renderScale
+                        )
                     } else {
                         guard let sourceBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: clip.trackID) else {
                             continue
@@ -82,10 +119,33 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         image = self.orientedImage(image, sourceTransform: clip.sourceTransform)
                     }
                     image = self.applyAdjustments(clip.adjustments, to: image, at: localTime)
-                    image = self.applyEffects(clip.effectStack, to: image, at: localTime)
-                    image = self.place(image, clip: clip, at: localTime, renderSize: renderSize)
+                    image = self.applyEffects(
+                        clip.effectStack,
+                        to: image,
+                        at: localTime,
+                        renderScale: instruction.renderScale
+                    )
+                    image = self.place(
+                        image,
+                        clip: clip,
+                        at: localTime,
+                        renderSize: renderSize,
+                        isGeneratedLayer: clip.shape != nil || clip.text != nil
+                    )
 
-                    let opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
+                    var opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
+                    if let transition = clip.transitionOut, transition.duration > 0 {
+                        let fadeStart = max(clip.duration - transition.duration, 0)
+                        if localTime >= fadeStart {
+                            let progress = min(max((localTime - fadeStart) / transition.duration, 0), 1)
+                            switch transition.kind {
+                            case .crossDissolve, .fadeToBlack:
+                                opacity *= 1 - progress
+                            case .wipeLeft:
+                                opacity *= 1 - progress
+                            }
+                        }
+                    }
                     image = self.applyOpacity(opacity, to: image)
                     output = image.composited(over: output)
                 }
@@ -105,10 +165,6 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         }
     }
 
-    private func isClip(_ clip: RenderClipDescriptor, activeAt time: Double) -> Bool {
-        time >= clip.timelineStart && time < clip.timelineStart + clip.duration
-    }
-
     private func orientedImage(
         _ image: CIImage,
         sourceTransform: CGAffineTransform
@@ -116,10 +172,15 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         image.transformed(by: sourceTransform)
     }
 
-    private func shapeImage(_ shape: ClipShape, at time: Double, renderSize: CGSize) -> CIImage {
-        let resolvedWidth = shape.width.value(at: time)
-        let resolvedHeight = shape.height.value(at: time)
-        let resolvedCornerRadius = shape.cornerRadius.value(at: time)
+    private func shapeImage(
+        _ shape: ClipShape,
+        at time: Double,
+        renderSize: CGSize,
+        renderScale: CGFloat
+    ) -> CIImage {
+        let resolvedWidth = quantize(shape.width.value(at: time), step: 2)
+        let resolvedHeight = quantize(shape.height.value(at: time), step: 2)
+        let resolvedCornerRadius = quantize(shape.cornerRadius.value(at: time), step: 1)
         let cacheKey = [
             shape.kind.rawValue,
             String(shape.color.red),
@@ -129,54 +190,139 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             String(resolvedWidth),
             String(resolvedHeight),
             String(resolvedCornerRadius),
+            String(describing: renderScale),
             "\(renderSize.width)",
             "\(renderSize.height)"
         ].joined(separator: ":")
-        if let cached = shapeImageCache[cacheKey] {
+        if let cached = shapeImageCache.object(forKey: cacheKey as NSString) {
             return cached
         }
 
-        let width = min(max(CGFloat(resolvedWidth), 1), renderSize.width)
-        let height = min(max(CGFloat(resolvedHeight), 1), renderSize.height)
-        let shapeRect = CGRect(
-            x: (renderSize.width - width) * 0.5,
-            y: (renderSize.height - height) * 0.5,
-            width: width,
-            height: height
-        )
+        let width = min(max(CGFloat(resolvedWidth) * renderScale, 1), renderSize.width)
+        let height = min(max(CGFloat(resolvedHeight) * renderScale, 1), renderSize.height)
+        let layerSize = CGSize(width: width, height: height)
+        let shapeRect = CGRect(origin: .zero, size: layerSize)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
-        let image = UIGraphicsImageRenderer(size: renderSize, format: format).image { context in
+        let image = UIGraphicsImageRenderer(size: layerSize, format: format).image { context in
             UIColor(
                 red: CGFloat(shape.color.red),
                 green: CGFloat(shape.color.green),
                 blue: CGFloat(shape.color.blue),
                 alpha: CGFloat(shape.color.alpha)
             ).setFill()
-            let bounds = shapeRect.insetBy(dx: 1, dy: 1)
+            let bounds = shapeRect.insetBy(dx: min(1, width * 0.25), dy: min(1, height * 0.25))
             switch shape.kind {
             case .rectangle:
                 context.fill(bounds)
             case .roundedRectangle:
                 UIBezierPath(
                     roundedRect: bounds,
-                    cornerRadius: min(CGFloat(resolvedCornerRadius), min(width, height) * 0.5)
+                    cornerRadius: min(
+                        CGFloat(resolvedCornerRadius) * renderScale,
+                        min(width, height) * 0.5
+                    )
                 ).fill()
             case .circle:
                 context.cgContext.fillEllipse(in: bounds)
             }
         }
         let rendered = image.cgImage.map(CIImage.init(cgImage:)) ?? CIImage.empty()
-        shapeImageCache[cacheKey] = rendered
+        shapeImageCache.setObject(
+            rendered,
+            forKey: cacheKey as NSString,
+            cost: max(Int(width * height * 4), 1)
+        )
         return rendered
     }
 
-    private func place(_ image: CIImage, clip: RenderClipDescriptor, at time: Double, renderSize: CGSize) -> CIImage {
+    private func textImage(
+        _ text: TextTimelineItem,
+        at time: Double,
+        renderSize: CGSize,
+        renderScale: CGFloat
+    ) -> CIImage {
+        let fontSize = max(text.style.fontSize * renderScale, 12)
+        let layerSize = CGSize(
+            width: max((renderSize.width * 0.8).rounded(.up), 1),
+            height: max(
+                max((renderSize.height * 0.3).rounded(.up), ceil(fontSize * 1.35)),
+                1
+            )
+        )
+        let cacheKey = [
+            text.text,
+            text.style.fontName,
+            String(text.style.fontSize),
+            text.style.alignment.rawValue,
+            String(text.style.color.red),
+            String(text.style.color.green),
+            String(text.style.color.blue),
+            String(text.style.color.alpha),
+            String(describing: renderScale),
+            "\(layerSize.width)",
+            "\(layerSize.height)"
+        ].joined(separator: ":")
+        if let cached = textImageCache.object(forKey: cacheKey as NSString) {
+            return cached
+        }
+        let paragraph = NSMutableParagraphStyle()
+        switch text.style.alignment {
+        case .leading:
+            paragraph.alignment = .left
+        case .center:
+            paragraph.alignment = .center
+        case .trailing:
+            paragraph.alignment = .right
+        }
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: UIFont(name: text.style.fontName, size: fontSize)
+                ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold),
+            .foregroundColor: UIColor(
+                red: CGFloat(text.style.color.red),
+                green: CGFloat(text.style.color.green),
+                blue: CGFloat(text.style.color.blue),
+                alpha: CGFloat(text.style.color.alpha)
+            ),
+            .paragraphStyle: paragraph
+        ]
+        let attributed = NSAttributedString(string: text.text, attributes: attributes)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let bounds = CGRect(origin: .zero, size: layerSize)
+        let renderer = UIGraphicsImageRenderer(size: layerSize, format: format)
+        let image = renderer.image { _ in
+            attributed.draw(with: bounds, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        }
+        let rendered = image.cgImage.map(CIImage.init(cgImage:)) ?? CIImage.empty()
+        textImageCache.setObject(
+            rendered,
+            forKey: cacheKey as NSString,
+            cost: max(Int(layerSize.width * layerSize.height * 4), 1)
+        )
+        return rendered
+    }
+
+    private func quantize(_ value: Double, step: Double) -> Double {
+        guard step > 0 else { return value }
+        return (value / step).rounded() * step
+    }
+
+    private func place(
+        _ image: CIImage,
+        clip: RenderClipDescriptor,
+        at time: Double,
+        renderSize: CGSize,
+        isGeneratedLayer: Bool
+    ) -> CIImage {
         let extent = image.extent
         guard extent.width > 0, extent.height > 0 else { return image }
 
-        let fitScale = min(renderSize.width / extent.width, renderSize.height / extent.height)
+        let fitScale = isGeneratedLayer
+            ? 1
+            : min(renderSize.width / extent.width, renderSize.height / extent.height)
         let scale = clip.transform.scale.value(at: time)
         let scaleXValue = fitScale * max(scale.x, 0.01)
         let scaleYValue = fitScale * max(scale.y, 0.01)
@@ -215,7 +361,12 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         return output
     }
 
-    private func applyEffects(_ stack: EffectStack, to image: CIImage, at time: Double) -> CIImage {
+    private func applyEffects(
+        _ stack: EffectStack,
+        to image: CIImage,
+        at time: Double,
+        renderScale: CGFloat
+    ) -> CIImage {
         stack.effects.reduce(image) { current, effect in
             guard effect.isEnabled else { return current }
             let intensity = min(max(effect.intensity.value(at: time), 0), 1)
@@ -245,7 +396,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             case .blur:
                 let filter = CIFilter.gaussianBlur()
                 filter.inputImage = current.clampedToExtent()
-                filter.radius = Float(intensity * 18)
+                filter.radius = Float(intensity * 18 * Double(renderScale))
                 return (filter.outputImage ?? current).cropped(to: current.extent)
             case .vignette:
                 let filter = CIFilter.vignette()
