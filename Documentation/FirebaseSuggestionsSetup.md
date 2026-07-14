@@ -38,7 +38,7 @@ No custom Firestore index is required. Motionary checks the current user's vote 
 
 If your existing `suggestions` documents still contain `votedUsers` and do not contain `normalizationKey` or `status`, they are legacy documents. Leave them unchanged; Motionary reads them compatibly. A successfully created new suggestion will contain `normalizedTitle`, `normalizationKey`, `status`, `createdAt`, and a `votes/{uid}` subcollection.
 
-These rules restrict edits and deletion to owners, make report documents private, validate document shapes, and limit vote documents to their authenticated UID. The 20-minute new-suggestion cooldown is enforced by the app. Fully trusted server-side throttling is not available without backend code.
+These rules restrict edits and deletion to owners, reserve status changes for administrators, make reports private, validate document shapes and lengths, bind vote-count changes to deterministic vote documents, and enforce the 20-minute new-suggestion cooldown using Firestore server time. Broader device/IP throttling and semantic moderation still require a trusted backend.
 
 ## 4. Enable App Check enforcement
 
@@ -64,6 +64,7 @@ Reports appear at **Firestore Database → Data → suggestionReports**. Each do
 - `suggestionID`
 - `reporterID`
 - `reason`
+- `details`
 - `createdAt`
 - `status`
 
@@ -72,4 +73,4 @@ To hide a reported suggestion:
 1. Open its document in the `suggestions` collection.
 2. Change `status` from `approved` to `hidden`.
 
-To restore it, change `status` back to `approved`. Automatic trusted moderation requires server code and is not available without enabling billing, so report decisions remain manual on Spark.
+To restore it, change `status` to `normal`. Prefer the Motionary admin panel over direct Firestore edits so reports and status are shown consistently. Automatic semantic moderation requires trusted server code and is not available on the current Spark-only architecture, so report decisions remain manual.

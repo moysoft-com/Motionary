@@ -88,14 +88,15 @@ struct LayerManagementTests {
     }
 
     @MainActor
-    @Test func deletingLastClipRemovesItsLayer() async throws {
+    @Test func deletingLastClipKeepsItsLayer() async throws {
         let trackID = UUID()
         let clipID = UUID()
+        let sourceURL = URL(fileURLWithPath: "/tmp/only.mov")
         let clip = TimelineClip(
             id: clipID,
             name: "Only clip",
             source: ClipSource(
-                url: URL(fileURLWithPath: "/tmp/only.mov"),
+                url: sourceURL,
                 mediaType: .video,
                 originalDuration: 2
             ),
@@ -115,11 +116,83 @@ struct LayerManagementTests {
         )
         viewModel.selectClip(clipID, trackID: trackID)
 
+        viewModel.seek(to: viewModel.duration)
+
+        let frameDuration = 1 / Double(viewModel.project.renderSettings.frameRate)
+        #expect(abs(viewModel.currentTime - (viewModel.duration - frameDuration)) < 0.000_001)
+
         viewModel.deleteSelectedClip()
 
-        #expect(viewModel.project.tracks.isEmpty)
+        #expect(viewModel.project.tracks.count == 1)
+        #expect(viewModel.project.tracks[0].id == trackID)
+        #expect(viewModel.project.tracks[0].clips.isEmpty)
+        #expect(viewModel.project.tracks[0].kind == .undefined)
+        #expect(viewModel.project.tracks[0].name == "Layer")
         #expect(viewModel.selectedClipID == nil)
-        #expect(viewModel.selectedTrackID == nil)
+        #expect(viewModel.selectedTrackID == trackID)
+        #expect(viewModel.currentTime == 0)
+
+        let persistedData = try JSONEncoder().encode(ProjectContent(editorProject: viewModel.project))
+        let persistedContent = try JSONDecoder().decode(ProjectContent.self, from: persistedData)
+        #expect(persistedContent.editorProject.tracks.count == 1)
+        #expect(persistedContent.editorProject.tracks[0].id == trackID)
+        #expect(persistedContent.editorProject.tracks[0].kind == .undefined)
+
+        let textID = viewModel.addText()
+
+        #expect(textID != nil)
+        #expect(viewModel.project.tracks.count == 1)
+        #expect(viewModel.project.tracks[0].id == trackID)
+        #expect(viewModel.project.tracks[0].kind == .text)
+
+        viewModel.undo()
+        viewModel.undo()
+
+        #expect(viewModel.project.tracks.count == 1)
+        #expect(viewModel.project.tracks[0].id == trackID)
+        #expect(viewModel.project.tracks[0].kind == .visual)
+        #expect(viewModel.project.tracks[0].clips.map(\.id) == [clipID])
+        #expect(viewModel.project.mediaAsset(for: viewModel.project.tracks[0].clips[0])?.url == sourceURL)
+    }
+
+    @MainActor
+    @Test func deletingOnlyClipRemovesLayerWhenAnotherLayerRemains() async throws {
+        let deletedTrackID = UUID()
+        let remainingTrackID = UUID()
+        let clip = TimelineClip(
+            name: "Only layer clip",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/only-layer-clip.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(
+                editorProject: EditorProject(
+                    title: "Remove empty layer",
+                    tracks: [
+                        TimelineTrack(id: deletedTrackID, name: "Layer 1", kind: .visual, clips: [clip]),
+                        TimelineTrack(id: remainingTrackID, name: "Layer", kind: .undefined),
+                    ]
+                )
+            )
+        )
+        viewModel.selectClip(clip.id, trackID: deletedTrackID)
+
+        viewModel.deleteSelectedClip()
+
+        #expect(viewModel.project.tracks.map(\.id) == [remainingTrackID])
+        #expect(viewModel.selectedTrackID == remainingTrackID)
+
+        viewModel.undo()
+
+        #expect(viewModel.project.tracks.map(\.id) == [deletedTrackID, remainingTrackID])
+        #expect(viewModel.project.clip(id: clip.id) != nil)
     }
 
     @MainActor
@@ -140,9 +213,11 @@ struct LayerManagementTests {
             projectStore: ProjectStore(),
             initialContent: ProjectContent(editorProject: project)
         )
+        let previewGenerationBeforeReorder = viewModel.previewGeneration
 
         viewModel.moveTrack(audioID, to: 0)
         #expect(viewModel.project.tracks.map(\.id) == [audioID, visualID, undefinedID])
+        #expect(viewModel.previewGeneration > previewGenerationBeforeReorder)
 
         viewModel.moveTrack(undefinedID, to: 1)
         #expect(viewModel.project.tracks.map(\.id) == [audioID, undefinedID, visualID])

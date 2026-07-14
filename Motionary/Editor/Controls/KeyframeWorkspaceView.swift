@@ -34,7 +34,7 @@ struct KeyframeWorkspaceView: View {
 
                     NormalizedEasingGraph(
                         viewModel: viewModel,
-                        clip: context.clip,
+                        timelineStart: context.timelineStart,
                         segment: context.segment
                     )
 
@@ -78,31 +78,32 @@ struct KeyframeWorkspaceView: View {
     }
 
     private var graphContext: (
-        clip: TimelineClip,
+        timelineStart: Double,
         segment: KeyframeSegment,
         isActive: Bool
     )? {
         guard let segment = viewModel.graphSegment ?? viewModel.displayedGraphSegment,
-            let clip = viewModel.project.clip(id: segment.clipID)
+            let item = viewModel.project.item(id: segment.clipID)
         else { return nil }
-        return (clip, segment, viewModel.graphSegment != nil)
+        return (item.timelineStart, segment, viewModel.graphSegment != nil)
     }
 }
 
 private struct NormalizedEasingGraph: View {
     @ObservedObject var viewModel: EditorViewModel
     @ObservedObject private var playbackState: PlaybackState
-    let clip: TimelineClip
+    let timelineStart: Double
     let segment: KeyframeSegment
 
     @State private var dragMode: GraphDragMode?
     @State private var workingControl1: KeyframeControlPoint?
     @State private var workingControl2: KeyframeControlPoint?
+    @State private var snappedHandleAxes: GraphHandleSnapAxes = []
 
-    init(viewModel: EditorViewModel, clip: TimelineClip, segment: KeyframeSegment) {
+    init(viewModel: EditorViewModel, timelineStart: Double, segment: KeyframeSegment) {
         self.viewModel = viewModel
         _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
-        self.clip = clip
+        self.timelineStart = timelineStart
         self.segment = segment
     }
 
@@ -187,7 +188,7 @@ private struct NormalizedEasingGraph: View {
     @ViewBuilder
     private func playhead(in plot: CGRect) -> some View {
         let duration = max(segment.endTime - segment.startTime, 0.000_001)
-        let localTime = viewModel.currentTime - clip.timelineStart
+        let localTime = viewModel.currentTime - timelineStart
         let progress = min(max((localTime - segment.startTime) / duration, 0), 1)
         Rectangle()
             .fill(Color.white.opacity(0.72))
@@ -268,6 +269,7 @@ private struct NormalizedEasingGraph: View {
                 dragMode = nil
                 workingControl1 = nil
                 workingControl2 = nil
+                snappedHandleAxes = []
             }
     }
 
@@ -305,8 +307,18 @@ private struct NormalizedEasingGraph: View {
         else { return }
         let rawX = Double((location.x - plot.minX) / max(plot.width, 1))
         let rawY = Double((plot.maxY - location.y) / max(plot.height, 1))
-        let x = min(max(rawX, 0), 1)
-        let y = rubberBandedY(rawY, in: plot)
+        let snappedX = GraphHandleSnapper.edgeValue(rawX, axisLength: plot.width)
+        let snappedY = GraphHandleSnapper.edgeValue(rawY, axisLength: plot.height)
+        let snapAxes = GraphHandleSnapAxes(
+            horizontal: snappedX.didSnap,
+            vertical: snappedY.didSnap
+        )
+        if !snapAxes.subtracting(snappedHandleAxes).isEmpty {
+            EditorHaptics.selection()
+        }
+        snappedHandleAxes = snapAxes
+        let x = snappedX.didSnap ? snappedX.value : min(max(rawX, 0), 1)
+        let y = snappedY.didSnap ? snappedY.value : rubberBandedY(rawY, in: plot)
         let moved: KeyframeControlPoint
         if isFirst {
             moved = KeyframeControlPoint(
@@ -334,12 +346,12 @@ private struct NormalizedEasingGraph: View {
 
     private func updateBackgroundScrub(location: CGPoint, plot: CGRect) {
         let localTime = graphLocalTime(at: location.x, plot: plot)
-        viewModel.updateScrub(to: clip.timelineStart + localTime)
+        viewModel.updateScrub(to: timelineStart + localTime)
     }
 
     private func endBackgroundScrub(location: CGPoint, plot: CGRect) {
         let localTime = graphLocalTime(at: location.x, plot: plot)
-        viewModel.endScrub(at: clip.timelineStart + localTime)
+        viewModel.endScrub(at: timelineStart + localTime)
     }
 
     private func graphLocalTime(at x: CGFloat, plot: CGRect) -> Double {
@@ -411,6 +423,42 @@ private enum GraphDragMode {
     case firstHandle
     case secondHandle
     case scrub
+}
+
+struct GraphHandleSnapAxes: OptionSet {
+    let rawValue: Int
+
+    static let horizontal = GraphHandleSnapAxes(rawValue: 1 << 0)
+    static let vertical = GraphHandleSnapAxes(rawValue: 1 << 1)
+
+    init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    init(horizontal: Bool, vertical: Bool) {
+        var axes: GraphHandleSnapAxes = []
+        if horizontal { axes.insert(.horizontal) }
+        if vertical { axes.insert(.vertical) }
+        self = axes
+    }
+}
+
+enum GraphHandleSnapper {
+    static let threshold: CGFloat = 12
+
+    static func edgeValue(
+        _ value: Double,
+        axisLength: CGFloat
+    ) -> (value: Double, didSnap: Bool) {
+        let normalizedThreshold = Double(threshold / max(axisLength, 1))
+        if abs(value) <= normalizedThreshold {
+            return (0, true)
+        }
+        if abs(value - 1) <= normalizedThreshold {
+            return (1, true)
+        }
+        return (value, false)
+    }
 }
 
 struct KeyframeDiamondShape: Shape {

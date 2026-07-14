@@ -22,6 +22,9 @@ extension EditorViewModel {
     }
 
     func displayedValue(for target: KeyframeTarget) -> Double {
+        if selectedTextItem != nil {
+            return textDisplayedValue(for: target)
+        }
         guard let clip = selectedClip else { return 0 }
         if target.isScaleTarget {
             let scale = clip.transform.scale.value(at: selectedClipLocalTime)
@@ -34,6 +37,9 @@ extension EditorViewModel {
     }
 
     func hasKeyframe(atPlayhead target: KeyframeTarget) -> Bool {
+        if selectedTextItem != nil {
+            return textHasKeyframe(atPlayhead: target)
+        }
         guard let property = selectedClip?.animatableProperty(for: target) else { return false }
         return property.keyframeIndex(
             at: snappedKeyframeTime(selectedClipLocalTime),
@@ -42,6 +48,9 @@ extension EditorViewModel {
     }
 
     func hasKeyframe(atPlayhead section: KeyframeSection) -> Bool {
+        if selectedTextItem != nil {
+            return textHasKeyframe(atPlayhead: section)
+        }
         guard let clip = selectedClip else { return false }
         let time = snappedKeyframeTime(selectedClipLocalTime, clip: clip)
         return clip.keyframeTargets(in: section).contains { target in
@@ -53,6 +62,9 @@ extension EditorViewModel {
     }
 
     func hasKeyframes(in section: KeyframeSection, clip: TimelineClip? = nil) -> Bool {
+        if clip == nil, selectedTextItem != nil {
+            return textHasKeyframes(in: section)
+        }
         guard let clip = clip ?? selectedClip else { return false }
         return !clip.keyframeTimes(in: section).isEmpty
     }
@@ -61,6 +73,9 @@ extension EditorViewModel {
         for target: KeyframeTarget,
         clip: TimelineClip? = nil
     ) -> ClosedRange<Double> {
+        if clip == nil, selectedTextItem != nil {
+            return textPropertyRange(for: target)
+        }
         guard let clip = clip ?? selectedClip else {
             return target == .rotation
                 ? -Double.greatestFiniteMagnitude...Double.greatestFiniteMagnitude
@@ -102,6 +117,14 @@ extension EditorViewModel {
     }
 
     func candidateGraphSegment(in section: KeyframeSection) -> KeyframeSegment? {
+        if let item = selectedTextItem {
+            guard currentTime >= item.timelineStart, currentTime < item.timelineEnd else { return nil }
+            return textGraphSegmentCandidate(
+                in: section,
+                item: item,
+                localTime: currentTime - item.timelineStart
+            )
+        }
         guard let clip = selectedClip, isTimeInside(clip) else { return nil }
         return graphSegmentCandidate(
             in: section,
@@ -166,9 +189,20 @@ extension EditorViewModel {
     }
 
     func refreshGraphSegment() {
-        guard let segment = graphSegment,
-            let clip = project.clip(id: segment.clipID)
-        else {
+        guard let segment = graphSegment else {
+            graphSegment = nil
+            return
+        }
+        if case .text(let item) = project.item(id: segment.clipID) {
+            graphSegment = textGraphSegmentCandidate(
+                in: segment.section,
+                item: item,
+                localTime: currentTime - item.timelineStart
+            )
+            if let graphSegment { displayedGraphSegment = graphSegment }
+            return
+        }
+        guard let clip = project.clip(id: segment.clipID) else {
             graphSegment = nil
             return
         }
@@ -187,6 +221,10 @@ extension EditorViewModel {
         target: KeyframeTarget,
         interactive: Bool = false
     ) {
+        if selectedTextItem != nil {
+            setSelectedTextKeyframeValue(value, target: target, interactive: interactive)
+            return
+        }
         guard selectedClipID != nil else { return }
         if target.isScaleTarget {
             setSelectedScaleValue(value, target: target, interactive: interactive)
@@ -245,6 +283,10 @@ extension EditorViewModel {
     }
 
     func toggleKeyframe(_ target: KeyframeTarget) {
+        if selectedTextItem != nil {
+            toggleTextKeyframe(target)
+            return
+        }
         guard selectedClipID != nil else { return }
         activeKeyframeTarget = target
         updateSelectedClip { clip in
@@ -288,6 +330,10 @@ extension EditorViewModel {
     }
 
     func toggleKeyframeSection(_ section: KeyframeSection) {
+        if selectedTextItem != nil {
+            toggleTextKeyframeSection(section)
+            return
+        }
         guard selectedClipID != nil else { return }
         updateSelectedClip { clip in
             let time = self.snappedKeyframeTime(
@@ -335,6 +381,16 @@ extension EditorViewModel {
         value: Double? = nil,
         interactive: Bool = false
     ) {
+        if selectedTextItem != nil {
+            updateTextKeyframe(
+                target: target,
+                id: id,
+                time: time,
+                value: value,
+                interactive: interactive
+            )
+            return
+        }
         guard selectedClipID != nil else { return }
         if interactive {
             beginInteractiveEdit()
@@ -380,6 +436,10 @@ extension EditorViewModel {
     }
 
     func removeKeyframe(target: KeyframeTarget, id: UUID) {
+        if selectedTextItem != nil {
+            removeTextKeyframe(target: target, id: id)
+            return
+        }
         guard selectedClipID != nil else { return }
         updateSelectedClip { clip in
             if target.isScaleTarget {
@@ -400,6 +460,15 @@ extension EditorViewModel {
         startTime: Double,
         interactive: Bool = false
     ) {
+        if selectedTextItem != nil {
+            setTextInterpolation(
+                interpolation,
+                section: section,
+                startTime: startTime,
+                interactive: interactive
+            )
+            return
+        }
         guard selectedClipID != nil else { return }
         if interactive {
             beginInteractiveEdit()
@@ -440,6 +509,10 @@ extension EditorViewModel {
     }
 
     func selectAdjacentKeyframe(target: KeyframeTarget, direction: Int) {
+        if selectedTextItem != nil {
+            selectAdjacentTextKeyframe(target: target, direction: direction)
+            return
+        }
         guard let clip = selectedClip,
             let property = clip.animatableProperty(for: target),
             !property.keyframes.isEmpty
@@ -493,6 +566,14 @@ extension EditorViewModel {
     }
 
     func setScaleLinked(_ isLinked: Bool) {
+        if selectedTextItem != nil {
+            updateSelectedText { item in
+                item.visuals.transform.scale.isLinked = isLinked
+                self.activeKeyframeTarget = isLinked ? .scale : .scaleX
+                self.selectedKeyframeID = nil
+            }
+            return
+        }
         updateSelectedClip { clip in
             clip.transform.scale.isLinked = isLinked
             self.activeKeyframeTarget = isLinked ? .scale : .scaleX

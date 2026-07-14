@@ -31,7 +31,10 @@ struct ProjectDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: project.id) {
             do {
-                content = try await projectStore.repository.load(projectID: project.id).content
+                content = try await projectStore.repository.load(
+                    projectID: project.id,
+                    preferredTitle: project.title
+                ).content
             } catch ProjectRepositoryError.missingContent {
                 content = ProjectContent(editorProject: EditorProject.empty(title: project.title))
             } catch {

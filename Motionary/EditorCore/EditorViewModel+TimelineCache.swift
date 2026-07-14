@@ -5,7 +5,7 @@ import Foundation
 struct TimelineRenderSnapshot: Equatable {
     let revision: Int
     let tracks: [TimelineTrack]
-    let clipsByTrackID: [UUID: [TimelineClip]]
+    let itemsByTrackID: [UUID: [TimelineItem]]
     let selectedClipID: UUID?
     let duration: Double
     let keyframeTolerance: Double
@@ -28,7 +28,9 @@ extension EditorViewModel {
             timelineSnapshot = TimelineRenderSnapshot(
                 revision: timelineContentRevision,
                 tracks: project.tracks,
-                clipsByTrackID: timelineClipCache,
+                itemsByTrackID: Dictionary(
+                    uniqueKeysWithValues: project.tracks.map { ($0.id, $0.items) }
+                ),
                 selectedClipID: selectedClipID,
                 duration: duration,
                 keyframeTolerance: keyframeTimeTolerance
@@ -39,7 +41,9 @@ extension EditorViewModel {
             ?? TimelineRenderSnapshot(
                 revision: timelineContentRevision,
                 tracks: project.tracks,
-                clipsByTrackID: [:],
+                itemsByTrackID: Dictionary(
+                    uniqueKeysWithValues: project.tracks.map { ($0.id, $0.items) }
+                ),
                 selectedClipID: selectedClipID,
                 duration: duration,
                 keyframeTolerance: keyframeTimeTolerance

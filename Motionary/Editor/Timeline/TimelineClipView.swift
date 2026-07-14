@@ -1,15 +1,15 @@
-// Timeline clip block, trim handles, and clip-level gesture state.
+// Typed timeline item block, trim handles, and item-level gesture state.
 
 import SwiftUI
 
 struct TimelineTrimPreview {
-    let clip: TimelineClip
+    let item: TimelineItem
     let result: TimelineTrimResult
 }
 
-struct TimelineClipBlock: View {
-    let clip: TimelineClip
-    let media: ClipMediaDescriptor
+struct TimelineItemBlock: View {
+    let item: TimelineItem
+    let media: ClipMediaDescriptor?
     let isSelected: Bool
     let isDragSourceHidden: Bool
     let isDragGhost: Bool
@@ -21,16 +21,16 @@ struct TimelineClipBlock: View {
     let onSelect: () -> Void
     let onBeginEdit: () -> Void
     let onClipDragBegan: () -> Void
-    let onClipDragChanged: (CGSize) -> Void
+    let onClipDragChanged: (TimelineLongPressDragValue) -> Void
     let onClipDragEnded: (Bool) -> Void
-    let onTrimStart: (Double, TimelineClip?, Bool) -> TimelineTrimResult?
-    let onPreviewTrimStart: (Double, TimelineClip?) -> TimelineTrimResult?
-    let onTrimEnd: (Double, TimelineClip?, Bool) -> TimelineTrimResult?
-    let onPreviewTrimEnd: (Double, TimelineClip?) -> TimelineTrimResult?
+    let onTrimStart: (Double, TimelineItem?, Bool) -> TimelineTrimResult?
+    let onPreviewTrimStart: (Double, TimelineItem?) -> TimelineTrimResult?
+    let onTrimEnd: (Double, TimelineItem?, Bool) -> TimelineTrimResult?
+    let onPreviewTrimEnd: (Double, TimelineItem?) -> TimelineTrimResult?
     let onFinishInteractiveEdit: () -> Void
     let onSnapGuideChanged: (Double?) -> Void
 
-    @State private var trimBaseline: TimelineClip?
+    @State private var trimBaseline: TimelineItem?
     @State private var trimPreview: TimelineTrimPreview?
     @State private var committedInteractiveEdit = false
     @State private var activeSnapKey: String?
@@ -38,12 +38,15 @@ struct TimelineClipBlock: View {
     @State private var lastSnapFeedbackAt: Date = .distantPast
 
     var body: some View {
-        let previewClip = displayedClip
-        let mediaClip = trimBaseline ?? previewClip
-        let mediaSampleWidth = trimBaseline.map { CGFloat($0.sourceRange.duration) * pixelsPerSecond }
-        let displayWidth = max(CGFloat(previewClip.sourceRange.duration) * pixelsPerSecond, 6)
+        let previewItem = displayedItem
+        let mediaClip = (trimBaseline ?? previewItem).legacyClip()
+        let mediaSampleWidth = trimBaseline.flatMap { $0.legacyClip() }.map {
+            CGFloat($0.sourceRange.duration) * pixelsPerSecond
+        }
+        let displayDuration = timelineDisplayDuration(for: previewItem)
+        let displayWidth = max(CGFloat(displayDuration) * pixelsPerSecond, 6)
         let displayOffsetX =
-            isDragSourceHidden ? 0 : CGFloat(previewClip.timelineStart - clip.timelineStart) * pixelsPerSecond
+            isDragSourceHidden ? 0 : CGFloat(previewItem.timelineStart - item.timelineStart) * pixelsPerSecond
         let isEditing = trimBaseline != nil
         let visualOpacity = isDragSourceHidden ? 0 : (isDragGhost ? 0.58 : 1)
         let selectionExtension: CGFloat = 9
@@ -61,9 +64,10 @@ struct TimelineClipBlock: View {
                     .zIndex(0)
             }
 
-            TimelineClipFill(
-                clip: mediaClip,
+            TimelineItemVisualFill(
+                item: previewItem,
                 media: media,
+                mediaClip: mediaClip,
                 width: displayWidth,
                 height: height,
                 pixelsPerSecond: pixelsPerSecond,
@@ -73,11 +77,7 @@ struct TimelineClipBlock: View {
             .foregroundStyle(Color.black.opacity(0.88))
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        clip.shape != nil
-                            ? Color.orange
-                            : (clip.mediaType == .audio ? MotionaryTheme.audio : MotionaryTheme.video)
-                    )
+                    .fill(timelineItemTint(for: previewItem))
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -92,8 +92,8 @@ struct TimelineClipBlock: View {
 
             if !isDragSourceHidden && !isDragGhost {
                 TimelineKeyframeMarkers(
-                    times: previewClip.allKeyframeTimes,
-                    duration: previewClip.sourceRange.duration,
+                    times: keyframeTimes(for: previewItem),
+                    duration: displayDuration,
                     width: displayWidth,
                     height: height
                 )
@@ -114,9 +114,7 @@ struct TimelineClipBlock: View {
                         guard !isEditing else { return }
                         onClipDragBegan()
                     },
-                    onLongPressChanged: { translation in
-                        onClipDragChanged(translation)
-                    },
+                    onLongPressChanged: onClipDragChanged,
                     onLongPressEnded: { commit in
                         onClipDragEnded(commit)
                     }
@@ -156,8 +154,53 @@ struct TimelineClipBlock: View {
         }
     }
 
-    private var displayedClip: TimelineClip {
-        trimPreview?.clip ?? clip
+    private var displayedItem: TimelineItem {
+        trimPreview?.item ?? item
+    }
+
+    private func keyframeTimes(for item: TimelineItem) -> [Double] {
+        if let clip = item.legacyClip() {
+            return clip.allKeyframeTimes
+        }
+
+        if case .text(let textItem) = item {
+            return textItem.allKeyframeTimes
+        }
+
+        let visuals: TimelineItemVisuals?
+        switch item {
+        case .adjustment(let adjustment): visuals = adjustment.visuals
+        case .compound(let compound): visuals = compound.visuals
+        case .media, .shape, .text, .caption: visuals = nil
+        }
+        guard let visuals else { return [] }
+
+        let properties = [
+            visuals.transform.positionX,
+            visuals.transform.positionY,
+            visuals.transform.rotationDegrees,
+            visuals.transform.opacity,
+            visuals.adjustments.brightness,
+            visuals.adjustments.contrast,
+            visuals.adjustments.saturation,
+            visuals.adjustments.exposure,
+            visuals.volume,
+        ]
+        let times = properties.flatMap { $0.keyframes.map(\.time) }
+            + visuals.transform.scale.keyframes.map(\.time)
+            + visuals.effectStack.effects.flatMap { $0.intensity.keyframes.map(\.time) }
+        return Array(Set(times)).sorted()
+    }
+
+    private func timelineDisplayDuration(for item: TimelineItem) -> Double {
+        switch item {
+        case .media(let mediaItem): mediaItem.sourceRange.duration
+        case .shape(let shapeItem): shapeItem.sourceRange.duration
+        case .text(let textItem): textItem.duration
+        case .caption(let caption): caption.duration
+        case .adjustment(let adjustment): adjustment.duration
+        case .compound(let compound): compound.duration
+        }
     }
 
     private var trimStartGesture: some Gesture {
@@ -167,7 +210,7 @@ struct TimelineClipBlock: View {
                 let seconds = Double(value.translation.width / max(pixelsPerSecond, 1))
                 guard let result = onPreviewTrimStart(seconds, baseline) else { return }
                 trimPreview = TimelineTrimPreview(
-                    clip: clipApplyingTrimStart(result, to: baseline),
+                    item: baseline.trimmingStart(by: result.appliedDelta),
                     result: result
                 )
                 onSnapGuideChanged(result.snapped ? result.edgeTime : nil)
@@ -192,7 +235,7 @@ struct TimelineClipBlock: View {
                 let seconds = Double(value.translation.width / max(pixelsPerSecond, 1))
                 guard let result = onPreviewTrimEnd(seconds, baseline) else { return }
                 trimPreview = TimelineTrimPreview(
-                    clip: clipApplyingTrimEnd(result, to: baseline),
+                    item: baseline.trimmingEnd(by: result.appliedDelta),
                     result: result
                 )
                 onSnapGuideChanged(result.snapped ? result.edgeTime : nil)
@@ -210,34 +253,15 @@ struct TimelineClipBlock: View {
             }
     }
 
-    private func beginTrimIfNeeded() -> TimelineClip {
+    private func beginTrimIfNeeded() -> TimelineItem {
         if let trimBaseline {
             return trimBaseline
         }
 
-        trimBaseline = clip
+        trimBaseline = item
         EditorHaptics.trimStart()
         onBeginEdit()
-        return clip
-    }
-
-    private func clipApplyingTrimStart(_ result: TimelineTrimResult, to baseline: TimelineClip) -> TimelineClip {
-        var preview = baseline
-        preview.timelineStart = result.edgeTime
-        preview.sourceRange = TimeRangeValue(
-            start: baseline.sourceRange.start + result.appliedDelta,
-            duration: max(baseline.sourceRange.duration - result.appliedDelta, 0.1)
-        )
-        return preview
-    }
-
-    private func clipApplyingTrimEnd(_ result: TimelineTrimResult, to baseline: TimelineClip) -> TimelineClip {
-        var preview = baseline
-        preview.sourceRange = TimeRangeValue(
-            start: baseline.sourceRange.start,
-            duration: max(baseline.sourceRange.duration + result.appliedDelta, 0.1)
-        )
-        return preview
+        return item
     }
 
     private func finishTimelineGesture() {
@@ -269,6 +293,23 @@ struct TimelineClipBlock: View {
         lastSnapFeedbackKey = key
         lastSnapFeedbackAt = now
         EditorHaptics.snap()
+    }
+}
+
+private struct TimelineItemLabel: View {
+    let icon: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.caption.weight(.semibold))
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 
@@ -305,6 +346,98 @@ private struct TimelineKeyframeMarkers: View {
 enum TrimHandleEdge {
     case leading
     case trailing
+}
+
+struct TimelineItemVisualFill: View {
+    let item: TimelineItem
+    let media: ClipMediaDescriptor?
+    let mediaClip: TimelineClip?
+    let width: CGFloat
+    let height: CGFloat
+    let pixelsPerSecond: CGFloat
+    let sampleWidth: CGFloat?
+
+    @ViewBuilder
+    var body: some View {
+        switch item {
+        case .shape:
+            if let mediaClip, let media {
+                TimelineClipFill(
+                    clip: mediaClip,
+                    media: media,
+                    width: width,
+                    height: height,
+                    pixelsPerSecond: pixelsPerSecond,
+                    sampleWidth: sampleWidth
+                )
+            } else {
+                Color.orange
+            }
+        case .media:
+            if let mediaClip, let media {
+                TimelineClipFill(
+                    clip: mediaClip,
+                    media: media,
+                    width: width,
+                    height: height,
+                    pixelsPerSecond: pixelsPerSecond,
+                    sampleWidth: sampleWidth
+                )
+            } else {
+                TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
+            }
+        case .text, .caption, .adjustment, .compound:
+            TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
+        }
+    }
+}
+
+func timelineItemTint(for item: TimelineItem) -> Color {
+    switch item {
+    case .media(let mediaItem):
+        mediaItem.mediaType == .audio ? MotionaryTheme.audio : MotionaryTheme.video
+    case .shape:
+        .orange
+    case .text:
+        Color(red: 0.96, green: 0.48, blue: 0.70)
+    case .caption:
+        Color(red: 0.96, green: 0.68, blue: 0.32)
+    case .adjustment:
+        Color(red: 0.38, green: 0.82, blue: 0.64)
+    case .compound:
+        Color(red: 0.48, green: 0.70, blue: 0.96)
+    }
+}
+
+private func timelineItemIcon(for item: TimelineItem) -> String {
+    switch item {
+    case .media(let mediaItem): mediaItem.mediaType == .audio ? "waveform" : "film"
+    case .shape: "square.on.circle"
+    case .text: "textformat"
+    case .caption: "captions.bubble"
+    case .adjustment: "slider.horizontal.3"
+    case .compound: "rectangle.stack"
+    }
+}
+
+private func timelineItemTitle(for item: TimelineItem) -> String {
+    switch item {
+    case .media(let mediaItem): mediaItem.name
+    case .shape(let shapeItem): shapeItem.name
+    case .text(let textItem): timelineFirstLine(of: textItem.text)
+    case .caption(let caption): timelineFirstLine(of: caption.text)
+    case .adjustment(let adjustment): adjustment.name
+    case .compound(let compound): compound.name
+    }
+}
+
+private func timelineFirstLine(of text: String) -> String {
+    let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        .first
+        .map(String.init)?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        ?? ""
+    return firstLine.isEmpty ? "Text" : firstLine
 }
 
 struct TimelineClipFill: View {

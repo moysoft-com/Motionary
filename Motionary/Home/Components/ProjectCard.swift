@@ -14,6 +14,7 @@ struct ProjectCard: View {
     @ObservedObject var projectStore: ProjectStore
 
     @State private var coverImage: UIImage?
+    @FocusState private var isProjectNameFocused: Bool
 
     var body: some View {
         Button(action: onOpen) {
@@ -25,13 +26,28 @@ struct ProjectCard: View {
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                     if isRenaming {
-                        TextField("Project name", text: $project.title)
-                            .textFieldStyle(.plain)
-                            .font(.headline.weight(.semibold))
-                            .foregroundStyle(MotionaryTheme.textPrimary)
-                            .lineLimit(1)
-                            .multilineTextAlignment(.leading)
-                            .onSubmit(onRenameCommit)
+                        HStack(spacing: 8) {
+                            TextField("Project name", text: $project.title)
+                                .textFieldStyle(.plain)
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(MotionaryTheme.textPrimary)
+                                .lineLimit(1)
+                                .multilineTextAlignment(.leading)
+                                .submitLabel(.done)
+                                .focused($isProjectNameFocused)
+                                .onAppear { isProjectNameFocused = true }
+                                .onSubmit(onRenameCommit)
+
+                            Button(action: onRenameCommit) {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(MotionaryTheme.accent)
+                                    .frame(width: 28, height: 28)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Confirm project name")
+                        }
                     } else {
                         HStack {
                             Text(project.title)

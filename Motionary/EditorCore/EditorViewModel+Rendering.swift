@@ -59,7 +59,11 @@ extension EditorViewModel {
 
         Task {
             do {
-                let asset = AVURLAsset(url: project.mediaURL(for: clip))
+                let mediaURL = projectStore.resolvedMediaURL(
+                    project.mediaURL(for: clip),
+                    projectID: projectID
+                )
+                let asset = AVURLAsset(url: mediaURL)
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                 guard !audioTracks.isEmpty else {
                     errorMessage = "This video does not contain an audio track."
@@ -71,7 +75,7 @@ extension EditorViewModel {
                 var draft = project
                 let videoClip = clip
                 let audioSource = ClipSource(
-                    url: project.mediaURL(for: videoClip),
+                    url: mediaURL,
                     mediaType: .audio,
                     originalDuration: project.originalDuration(for: videoClip),
                     naturalSize: nil
@@ -123,7 +127,7 @@ extension EditorViewModel {
         invalidation: EditorInvalidation,
         generation: Int
     ) async {
-        let seekTime = min(max(time ?? currentTime, 0), max(duration, 0))
+        let seekTime = clampedTimelineTime(time ?? currentTime)
         let shouldResume = isPlaying
         let showBuildingUI =
             invalidation.contains(.compositionTopology) || player == nil
@@ -168,6 +172,7 @@ extension EditorViewModel {
                     await seekPlayerAndWait(to: seekTime)
                 }
                 guard !Task.isCancelled, generation == previewGeneration else { return }
+                liveTextPreviewID = nil
                 previewContentRevision &+= 1
                 previewState.status = .ready(generation: generation)
                 if shouldResume, !isScrubbing {
@@ -179,6 +184,7 @@ extension EditorViewModel {
                 player = nil
                 updateCurrentTime(0)
                 isPlaying = false
+                liveTextPreviewID = nil
                 previewState.status = .ready(generation: generation)
             }
         } catch is CancellationError {
@@ -196,9 +202,10 @@ extension EditorViewModel {
 
     private func seekPlayerAndWait(to time: Double) async {
         guard let player else { return }
+        let clamped = clampedTimelineTime(time)
         await withCheckedContinuation { continuation in
             player.seek(
-                to: CMTime(seconds: time, preferredTimescale: 600),
+                to: CMTime(seconds: clamped, preferredTimescale: 600),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
             ) { _ in

@@ -1,4 +1,4 @@
-// Application entry point and root tab structure. test 😳
+// Application entry point and root tab structure. 😳
 
 import SwiftUI
 import FirebaseAppCheck

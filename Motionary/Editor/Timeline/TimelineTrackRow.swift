@@ -4,7 +4,7 @@ import SwiftUI
 
 struct TimelineTrackRow: View {
     let track: TimelineTrack
-    let clips: [TimelineClip]
+    let items: [TimelineItem]
     let trackIndex: Int
     let trackCount: Int
     let selectedClipID: UUID?
@@ -15,80 +15,79 @@ struct TimelineTrackRow: View {
     let projectDuration: Double
     let pixelsPerSecond: CGFloat
     let centerPadding: CGFloat
+    let horizontalScrollOffset: CGFloat
     let height: CGFloat
     let rowStride: CGFloat
     let onSelectTrack: () -> Void
+    let onTapEmptySpace: () -> Void
     let onDeleteTrack: () -> Void
     let onSelectClip: (UUID) -> Void
     let onBeginEditClip: (UUID) -> Void
-    let onClipDragBegan: (TimelineClip) -> Void
-    let onClipDragChanged: (TimelineClip, CGSize) -> Void
+    let onClipDragBegan: (TimelineItem) -> Void
+    let onClipDragChanged: (TimelineItem, TimelineLongPressDragValue) -> Void
     let onClipDragEnded: (Bool) -> Void
-    let onTrimStart: (UUID, Double, TimelineClip?, Bool) -> TimelineTrimResult?
-    let onPreviewTrimStart: (UUID, Double, TimelineClip?) -> TimelineTrimResult?
-    let onTrimEnd: (UUID, Double, TimelineClip?, Bool) -> TimelineTrimResult?
-    let onPreviewTrimEnd: (UUID, Double, TimelineClip?) -> TimelineTrimResult?
+    let onTrimStart: (UUID, Double, TimelineItem?, Bool) -> TimelineTrimResult?
+    let onPreviewTrimStart: (UUID, Double, TimelineItem?) -> TimelineTrimResult?
+    let onTrimEnd: (UUID, Double, TimelineItem?, Bool) -> TimelineTrimResult?
+    let onPreviewTrimEnd: (UUID, Double, TimelineItem?) -> TimelineTrimResult?
     let onFinishInteractiveEdit: () -> Void
-    let mediaForClip: (TimelineClip) -> ClipMediaDescriptor?
+    let mediaForItem: (TimelineItem) -> ClipMediaDescriptor?
     let onSnapGuideChanged: (Double?) -> Void
     let onTrackDragBegan: () -> Void
-    let onTrackDragChanged: (CGSize) -> Void
+    let onTrackDragChanged: (TimelineLongPressDragValue) -> Void
     let onTrackDragEnded: (Bool) -> Void
 
     @State private var isShowingDeleteConfirmation = false
 
     var body: some View {
         ZStack(alignment: .leading) {
-            trackLabel
-                .offset(x: 10)
-                .overlay(
-                    TimelineLongPressInteractionTarget(
-                        minimumPressDuration: 0.32,
-                        allowableMovement: 16,
-                        onTap: onSelectTrack,
-                        onDoubleTap: {
-                            EditorHaptics.tap()
-                            isShowingDeleteConfirmation = true
-                        },
-                        onLongPressBegan: onTrackDragBegan,
-                        onLongPressChanged: onTrackDragChanged,
-                        onLongPressEnded: onTrackDragEnded
-                    )
+            trackLabelControl
+                .position(
+                    x: trackLabelOffset + trackLabelWidth * 0.5,
+                    y: height * 0.5
                 )
-                .zIndex(activeTrackDrag?.trackID == track.id ? 4 : 0)
+                .zIndex(300)
 
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.white.opacity(0.035))
                 .frame(width: max(10 + CGFloat(projectDuration) * pixelsPerSecond, 0), height: height)
                 .offset(x: centerPadding - 5)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onTapEmptySpace)
 
-            ForEach(clips) { clip in
-                if let media = mediaForClip(clip) {
-                    TimelineClipBlock(
-                        clip: clip,
-                        media: media,
-                        isSelected: selectedClipID == clip.id,
-                    isDragSourceHidden: activeClipDrag?.clipID == clip.id,
+            ForEach(items) { item in
+                TimelineItemBlock(
+                    item: item,
+                    media: mediaForItem(item),
+                    isSelected: selectedClipID == item.id,
+                    isDragSourceHidden: activeClipDrag?.clipID == item.id,
                     isDragGhost: false,
                     currentTime: currentTime,
                     keyframeTolerance: keyframeTolerance,
                     pixelsPerSecond: pixelsPerSecond,
                     height: height - 8,
                     allowsClipInteraction: true,
-                    onSelect: { onSelectClip(clip.id) },
-                    onBeginEdit: { onBeginEditClip(clip.id) },
-                    onClipDragBegan: { onClipDragBegan(clip) },
-                    onClipDragChanged: { translation in onClipDragChanged(clip, translation) },
+                    onSelect: { onSelectClip(item.id) },
+                    onBeginEdit: { onBeginEditClip(item.id) },
+                    onClipDragBegan: { onClipDragBegan(item) },
+                    onClipDragChanged: { value in onClipDragChanged(item, value) },
                     onClipDragEnded: onClipDragEnded,
-                    onTrimStart: { delta, baseline, interactive in onTrimStart(clip.id, delta, baseline, interactive) },
-                    onPreviewTrimStart: { delta, baseline in onPreviewTrimStart(clip.id, delta, baseline) },
-                    onTrimEnd: { delta, baseline, interactive in onTrimEnd(clip.id, delta, baseline, interactive) },
-                    onPreviewTrimEnd: { delta, baseline in onPreviewTrimEnd(clip.id, delta, baseline) },
+                    onTrimStart: { delta, baseline, interactive in
+                        onTrimStart(item.id, delta, baseline, interactive)
+                    },
+                    onPreviewTrimStart: { delta, baseline in
+                        onPreviewTrimStart(item.id, delta, baseline)
+                    },
+                    onTrimEnd: { delta, baseline, interactive in
+                        onTrimEnd(item.id, delta, baseline, interactive)
+                    },
+                    onPreviewTrimEnd: { delta, baseline in
+                        onPreviewTrimEnd(item.id, delta, baseline)
+                    },
                     onFinishInteractiveEdit: onFinishInteractiveEdit,
-                        onSnapGuideChanged: onSnapGuideChanged
-                    )
-                    .offset(x: centerPadding + CGFloat(clip.timelineStart) * pixelsPerSecond)
-                }
+                    onSnapGuideChanged: onSnapGuideChanged
+                )
+                .offset(x: centerPadding + CGFloat(item.timelineStart) * pixelsPerSecond)
             }
         }
         .frame(height: height)
@@ -102,9 +101,49 @@ struct TimelineTrackRow: View {
         .zIndex(
             activeTrackDrag?.trackID == track.id
                 ? 200
-                : (clips.contains { $0.id == selectedClipID } ? 100 : 0)
+                : (items.contains { $0.id == selectedClipID } ? 100 : 0)
         )
     }
+
+    private var trackLabelControl: some View {
+        trackLabel
+            .overlay {
+                TimelineLongPressInteractionTarget(
+                    minimumPressDuration: 0.32,
+                    allowableMovement: 16,
+                    onTap: onSelectTrack,
+                    onDoubleTap: {
+                        EditorHaptics.tap()
+                        isShowingDeleteConfirmation = true
+                    },
+                    onLongPressBegan: onTrackDragBegan,
+                    onLongPressChanged: onTrackDragChanged,
+                    onLongPressEnded: onTrackDragEnded
+                )
+                .frame(width: trackLabelWidth, height: height)
+            }
+    }
+
+    private var trackLabelOffset: CGFloat {
+        let viewportLeadingPadding: CGFloat = 10
+        let labelWidth: CGFloat = 104
+        let layerLeadingEdge = centerPadding - 5
+        let layerSpacing: CGFloat = 8
+        let maximumOffset = layerLeadingEdge - labelWidth - layerSpacing
+        let stickyOffset = horizontalScrollOffset + viewportLeadingPadding
+        let transitionWidth: CGFloat = 24
+        let transitionHalfWidth = transitionWidth * 0.5
+        let transitionStart = maximumOffset - transitionHalfWidth
+        let transitionEnd = maximumOffset + transitionHalfWidth
+
+        guard stickyOffset > transitionStart else { return stickyOffset }
+        guard stickyOffset < transitionEnd else { return maximumOffset }
+
+        let linearProgress = (stickyOffset - transitionStart) / transitionWidth
+        return stickyOffset - transitionHalfWidth * linearProgress * linearProgress
+    }
+
+    private var trackLabelWidth: CGFloat { 104 }
 
     private var trackReorderOffset: CGFloat {
         guard let activeTrackDrag else { return 0 }
@@ -133,7 +172,7 @@ struct TimelineTrackRow: View {
         }
         .foregroundStyle(MotionaryTheme.textSecondary)
         .padding(.horizontal, 10)
-        .frame(width: 104, height: height, alignment: .leading)
+        .frame(width: trackLabelWidth, height: height, alignment: .leading)
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .popover(isPresented: $isShowingDeleteConfirmation, arrowEdge: .leading) {
             VStack(alignment: .leading, spacing: 14) {

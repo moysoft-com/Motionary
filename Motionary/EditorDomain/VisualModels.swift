@@ -327,7 +327,7 @@ struct EffectStack: Codable, Equatable {
     }
 }
 
-struct RGBAColor: Codable, Equatable, Hashable {
+struct RGBAColor: Codable, Equatable, Hashable, Sendable {
     var red: Double
     var green: Double
     var blue: Double

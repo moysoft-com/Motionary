@@ -8,9 +8,10 @@ struct TimelineClipDragState: Equatable {
     let sourceTrackIndex: Int
     let startTimelineStart: Double
     let resolvedPlacement: TimelinePlacementResult
-    let clipSnapshot: TimelineClip
+    let itemSnapshot: TimelineItem
     let selectedClipIDBeforeDrag: UUID?
     let selectedTrackIDBeforeDrag: UUID?
+    let fingerLocationInWindow: CGPoint?
 }
 
 struct TimelineTrackDragState: Equatable {

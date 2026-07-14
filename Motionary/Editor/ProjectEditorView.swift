@@ -6,6 +6,11 @@ import UniformTypeIdentifiers
 
 enum CoreEditorPanel: Equatable {
     case timeline
+    case text
+    case textType
+    case textStyle
+    case textMotion
+    case textMotionGraph
     case shape
     case transform
     case adjust
@@ -33,6 +38,7 @@ struct ProjectEditorView: View {
     @State private var miniTimelinePixelsPerSecond: CGFloat = 88
     @State private var propertyContextClipID: UUID?
     @State private var graphReturnPanel: CoreEditorPanel = .transform
+    @State private var activeTextMotionPhase: TextAnimationPhase = .entrance
     @State private var isCancelTaskConfirmationPresented = false
 
     init(projectID: UUID, projectStore: ProjectStore, initialContent: ProjectContent) {
@@ -55,7 +61,7 @@ struct ProjectEditorView: View {
         .toolbar(.hidden, for: .tabBar)
         .navigationTitle(viewModel.project.title)
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(viewModel.isPerformingLongTask)
+        .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
@@ -105,6 +111,8 @@ struct ProjectEditorView: View {
                     let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
                     var isSupported = true
                     switch panelToCheck {
+                    case .text, .textType, .textStyle, .textMotion, .textMotionGraph:
+                        isSupported = false
                     case .shape:
                         isSupported = clip.shape != nil
                     case .transform, .adjust, .effects:
@@ -115,6 +123,14 @@ struct ProjectEditorView: View {
                         isSupported = true
                     }
                     if !isSupported {
+                        activePanel = .timeline
+                    }
+                } else if case .text = viewModel.project.item(id: clipID) {
+                    let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
+                    if !panelToCheck.isTextPanel
+                        && panelToCheck != .transform
+                        && panelToCheck != .timeline
+                    {
                         activePanel = .timeline
                     }
                 }
@@ -136,7 +152,7 @@ struct ProjectEditorView: View {
         }
         .onChange(of: viewModel.project) { _, project in
             if let contextID = propertyContextClipID,
-                project.clip(id: contextID) == nil
+                project.item(id: contextID) == nil
             {
                 propertyContextClipID = nil
                 viewModel.graphSegment = nil
@@ -201,7 +217,9 @@ struct ProjectEditorView: View {
 
     private func editorCanvas(geometry: GeometryProxy) -> some View {
         let availableHeight = max(geometry.size.height - geometry.safeAreaInsets.bottom - 12, 1)
-        let showsMiniTimeline = activePanel.isPropertyPanel || activePanel == .graph
+        let showsMiniTimeline =
+            (activePanel.keyframeSection != nil || activePanel == .graph)
+            && propertyContextTimelineItem != nil
         let miniTimelineHeight: CGFloat = showsMiniTimeline ? 52 : 0
         let controlHeight: CGFloat = 42
         let previewRatio: CGFloat
@@ -225,7 +243,8 @@ struct ProjectEditorView: View {
                 EditorPlaybackControlBar(
                     viewModel: viewModel,
                     activePanel: $activePanel,
-                    graphReturnPanel: $graphReturnPanel
+                    graphReturnPanel: $graphReturnPanel,
+                    activeTextMotionPhase: $activeTextMotionPhase
                 )
                 .frame(height: controlHeight)
 
@@ -284,6 +303,40 @@ struct ProjectEditorView: View {
                 viewModel: viewModel,
                 pixelsPerSecond: $pixelsPerSecond
             )
+        case .text:
+            TextWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextText,
+                mode: .content,
+                activeMotionPhase: $activeTextMotionPhase
+            )
+        case .textType:
+            TextWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextText,
+                mode: .type,
+                activeMotionPhase: $activeTextMotionPhase
+            )
+        case .textStyle:
+            TextWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextText,
+                mode: .style,
+                activeMotionPhase: $activeTextMotionPhase
+            )
+        case .textMotion:
+            TextWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextText,
+                mode: .motion,
+                activeMotionPhase: $activeTextMotionPhase
+            )
+        case .textMotionGraph:
+            TextMotionGraphWorkspace(
+                viewModel: viewModel,
+                item: propertyContextText,
+                phase: activeTextMotionPhase
+            )
         case .shape:
             ShapeWorkspaceView(
                 viewModel: viewModel,
@@ -292,7 +345,8 @@ struct ProjectEditorView: View {
         case .transform:
             TransformWorkspaceView(
                 viewModel: viewModel,
-                clip: propertyContextClip
+                clip: propertyContextClip,
+                text: propertyContextText
             )
         case .adjust:
             AdjustWorkspaceView(
@@ -317,6 +371,18 @@ struct ProjectEditorView: View {
     private var propertyContextClip: TimelineClip? {
         guard let propertyContextClipID else { return nil }
         return viewModel.project.clip(id: propertyContextClipID)
+    }
+
+    private var propertyContextText: TextTimelineItem? {
+        guard let propertyContextClipID,
+            case .text(let item) = viewModel.project.item(id: propertyContextClipID)
+        else { return nil }
+        return item
+    }
+
+    private var propertyContextTimelineItem: TimelineItem? {
+        guard let propertyContextClipID else { return nil }
+        return viewModel.project.item(id: propertyContextClipID)
     }
 
     @ViewBuilder
@@ -346,16 +412,19 @@ private struct EditorPlaybackControlBar: View {
     @ObservedObject private var playbackState: PlaybackState
     @Binding var activePanel: CoreEditorPanel
     @Binding var graphReturnPanel: CoreEditorPanel
+    @Binding var activeTextMotionPhase: TextAnimationPhase
 
     init(
         viewModel: EditorViewModel,
         activePanel: Binding<CoreEditorPanel>,
-        graphReturnPanel: Binding<CoreEditorPanel>
+        graphReturnPanel: Binding<CoreEditorPanel>,
+        activeTextMotionPhase: Binding<TextAnimationPhase>
     ) {
         self.viewModel = viewModel
         _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
         _activePanel = activePanel
         _graphReturnPanel = graphReturnPanel
+        _activeTextMotionPhase = activeTextMotionPhase
     }
 
     var body: some View {
@@ -367,7 +436,15 @@ private struct EditorPlaybackControlBar: View {
                     .lineLimit(1)
                 Spacer()
 
-                if activePanel == .graph {
+                if activePanel == .textMotionGraph {
+                    CompactIconButton(
+                        systemName: "xmark",
+                        title: "Close motion graph",
+                        isProminent: true,
+                        action: { activePanel = .textMotion },
+                        isBordered: false
+                    )
+                } else if activePanel == .graph {
                     CompactIconButton(
                         systemName: "xmark",
                         title: "Close graphs",
@@ -376,6 +453,16 @@ private struct EditorPlaybackControlBar: View {
                             viewModel.graphSegment = nil
                             activePanel = graphReturnPanel
                         },
+                        isBordered: false
+                    )
+                } else if activePanel == .textMotion,
+                    hasSelectedTextMotion
+                {
+                    CompactIconButton(
+                        systemName: "point.topleft.down.curvedto.point.bottomright.up",
+                        title: "Edit \(activeTextMotionPhase.shortTitle) graph",
+                        isProminent: true,
+                        action: { activePanel = .textMotionGraph },
                         isBordered: false
                     )
                 } else if let section = activePanel.keyframeSection,
@@ -459,15 +546,42 @@ private struct EditorPlaybackControlBar: View {
             }
         }
     }
+
+    private var hasSelectedTextMotion: Bool {
+        guard let item = viewModel.selectedTextItem else { return false }
+        return switch activeTextMotionPhase {
+        case .entrance:
+            item.animations.entrance != nil
+        case .loop:
+            item.animations.loop != nil
+        case .exit:
+            item.animations.exit != nil
+        }
+    }
 }
 
 extension CoreEditorPanel {
     var isPropertyPanel: Bool {
-        self == .shape || self == .transform || self == .adjust || self == .effects || self == .audio
+        isTextPanel || self == .shape || self == .transform || self == .adjust || self == .effects || self == .audio
+    }
+
+    var isTextPanel: Bool {
+        switch self {
+        case .text, .textType, .textStyle, .textMotion, .textMotionGraph:
+            true
+        default:
+            false
+        }
     }
 
     var keyframeSection: KeyframeSection? {
         switch self {
+        case .text, .textMotion, .textMotionGraph:
+            nil
+        case .textType:
+            .textType
+        case .textStyle:
+            .textStyle
         case .shape:
             .shape
         case .transform:

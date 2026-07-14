@@ -63,28 +63,33 @@ struct ShapeWorkspaceView: View {
 struct TransformWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let clip: TimelineClip?
+    let text: TextTimelineItem?
 
     var body: some View {
-        PropertyWorkspaceShell(
-            viewModel: viewModel,
-            clip: clip,
-            title: "Transform",
-            systemImage: "crop.rotate",
-            section: .transform
-        ) { clip, isEnabled in
-            VStack(spacing: 12) {
-                ForEach([
-                    KeyframeTarget.positionX,
-                    .positionY,
-                    .rotation,
-                ]) { target in
-                    PropertyScrubber(
-                        viewModel: viewModel,
-                        clip: clip,
-                        target: target,
-                        isEnabled: isEnabled
-                    )
-                }
+        Group {
+            if let text {
+                TextTransformWorkspace(viewModel: viewModel, item: text)
+            } else {
+                PropertyWorkspaceShell(
+                    viewModel: viewModel,
+                    clip: clip,
+                    title: "Transform",
+                    systemImage: "crop.rotate",
+                    section: .transform
+                ) { clip, isEnabled in
+                    VStack(spacing: 12) {
+                        ForEach([
+                            KeyframeTarget.positionX,
+                            .positionY,
+                            .rotation,
+                        ]) { target in
+                            PropertyScrubber(
+                                viewModel: viewModel,
+                                clip: clip,
+                                target: target,
+                                isEnabled: isEnabled
+                            )
+                        }
 //
 //                HStack {
 //                    Text("Scale")
@@ -105,46 +110,242 @@ struct TransformWorkspaceView: View {
 //                    .disabled(!isEnabled)
 //                }
 
-                if clip.transform.scale.isLinked {
-                    PropertyScrubber(viewModel: viewModel, clip: clip, target: .scale, isEnabled: isEnabled)
-                } else {
-                    PropertyScrubber(viewModel: viewModel, clip: clip, target: .scaleX, isEnabled: isEnabled)
-                    PropertyScrubber(viewModel: viewModel, clip: clip, target: .scaleY, isEnabled: isEnabled)
-                }
+                        if clip.transform.scale.isLinked {
+                            PropertyScrubber(viewModel: viewModel, clip: clip, target: .scale, isEnabled: isEnabled)
+                        } else {
+                            PropertyScrubber(viewModel: viewModel, clip: clip, target: .scaleX, isEnabled: isEnabled)
+                            PropertyScrubber(viewModel: viewModel, clip: clip, target: .scaleY, isEnabled: isEnabled)
+                        }
 
-                HStack(spacing: 10) {
-                    TransformToggleButton(
-                        title: "Horizontal",
-                        systemImage: "arrow.left.and.right",
-                        isSelected: clip.transform.isFlippedHorizontally,
-                        isEnabled: isEnabled
-                    ) {
-                        viewModel.setSelectedTransform(
-                            isFlippedHorizontally: !clip.transform.isFlippedHorizontally
-                        )
+                        HStack(spacing: 10) {
+                            TransformToggleButton(
+                                title: "Horizontal",
+                                systemImage: "arrow.left.and.right",
+                                isSelected: clip.transform.isFlippedHorizontally,
+                                isEnabled: isEnabled
+                            ) {
+                                viewModel.setSelectedTransform(
+                                    isFlippedHorizontally: !clip.transform.isFlippedHorizontally
+                                )
+                            }
+                            TransformToggleButton(
+                                title: "Vertical",
+                                systemImage: "arrow.up.and.down",
+                                isSelected: clip.transform.isFlippedVertically,
+                                isEnabled: isEnabled
+                            ) {
+                                viewModel.setSelectedTransform(
+                                    isFlippedVertically: !clip.transform.isFlippedVertically
+                                )
+                            }
+                            Button {
+                                viewModel.updateSelectedClip { $0.transform = ClipTransform() }
+                            } label: {
+                                Image(systemName: "arrow.counterclockwise")
+                                    .frame(width: 42, height: 38)
+                                    .background(Color.white.opacity(0.08), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!isEnabled)
+                        }
                     }
-                    TransformToggleButton(
-                        title: "Vertical",
-                        systemImage: "arrow.up.and.down",
-                        isSelected: clip.transform.isFlippedVertically,
-                        isEnabled: isEnabled
-                    ) {
-                        viewModel.setSelectedTransform(
-                            isFlippedVertically: !clip.transform.isFlippedVertically
-                        )
-                    }
-                    Button {
-                        viewModel.updateSelectedClip { $0.transform = ClipTransform() }
-                    } label: {
-                        Image(systemName: "arrow.counterclockwise")
-                            .frame(width: 42, height: 38)
-                            .background(Color.white.opacity(0.08), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!isEnabled)
                 }
             }
         }
+    }
+}
+
+private struct TextTransformWorkspace: View {
+    @ObservedObject var viewModel: EditorViewModel
+    let item: TextTimelineItem
+
+    var body: some View {
+        let isEnabled = viewModel.selectedTimelineItemID == item.id
+            && viewModel.currentTime >= item.timelineStart
+            && viewModel.currentTime < item.timelineEnd
+        VStack(spacing: 10) {
+            HStack(spacing: 9) {
+                Label("Transform", systemImage: "crop.rotate")
+                    .font(.headline.weight(.semibold))
+                Spacer()
+                SectionKeyframeButton(
+                    viewModel: viewModel,
+                    itemID: item.id,
+                    section: .transform,
+                    isEnabled: isEnabled
+                )
+            }
+            .frame(height: 22)
+
+            ScrollView {
+                VStack(spacing: 12) {
+                    ForEach(TextTransformControl.allCases) { control in
+                        EditorValueScrubber(
+                            title: control.title,
+                            systemImage: control.systemImage,
+                            value: control.value(in: item, at: localTime),
+                            range: control.range,
+                            step: control.step,
+                            format: control.format,
+                            onBegan: viewModel.beginInteractiveEdit,
+                            onChanged: { value in set(value, for: control) },
+                            onEnded: viewModel.finishTextEditing
+                        )
+                    }
+
+                    HStack(spacing: 10) {
+                        TextTransformToggleButton(
+                            title: "Horizontal",
+                            systemImage: "arrow.left.and.right",
+                            isSelected: item.visuals.transform.isFlippedHorizontally
+                        ) {
+                            updateTransform { transform in
+                                transform.isFlippedHorizontally.toggle()
+                            }
+                        }
+                        TextTransformToggleButton(
+                            title: "Vertical",
+                            systemImage: "arrow.up.and.down",
+                            isSelected: item.visuals.transform.isFlippedVertically
+                        ) {
+                            updateTransform { transform in
+                                transform.isFlippedVertically.toggle()
+                            }
+                        }
+                        Button {
+                            viewModel.updateTextItem(item.id) { $0.visuals.transform = ClipTransform() }
+                        } label: {
+                            Image(systemName: "arrow.counterclockwise")
+                                .frame(width: 42, height: 38)
+                                .background(Color.white.opacity(0.08), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Reset transform")
+                    }
+                }
+                .padding(.bottom, 6)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .padding(14)
+        .opacity(isEnabled ? 1 : 0.42)
+        .disabled(!isEnabled)
+        .motionaryGlass(cornerRadius: 20)
+    }
+
+    private var localTime: Double {
+        min(max(viewModel.currentTime - item.timelineStart, 0), item.duration)
+    }
+
+    private func set(_ value: Double, for control: TextTransformControl) {
+        viewModel.setSelectedTextKeyframeValue(
+            value,
+            target: control.keyframeTarget,
+            interactive: true
+        )
+    }
+
+    private func updateTransform(_ update: @escaping (inout ClipTransform) -> Void) {
+        viewModel.updateTextItem(item.id) { item in
+            update(&item.visuals.transform)
+        }
+    }
+
+}
+
+private enum TextTransformControl: String, CaseIterable, Identifiable {
+    case positionX
+    case positionY
+    case rotation
+    case scale
+
+    var id: String { rawValue }
+
+    var keyframeTarget: KeyframeTarget {
+        switch self {
+        case .positionX: .positionX
+        case .positionY: .positionY
+        case .rotation: .rotation
+        case .scale: .scale
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .positionX: "Position X"
+        case .positionY: "Position Y"
+        case .rotation: "Rotation"
+        case .scale: "Scale"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .positionX: "arrow.left.and.right"
+        case .positionY: "arrow.up.and.down"
+        case .rotation: "rotate.right"
+        case .scale: "arrow.up.left.and.arrow.down.right"
+        }
+    }
+
+    var range: ClosedRange<Double> {
+        switch self {
+        case .positionX, .positionY: -2...2
+        case .rotation: -720...720
+        case .scale: 0.01...100
+        }
+    }
+
+    var step: Double {
+        switch self {
+        case .positionX, .positionY, .scale: 0.01
+        case .rotation: 1
+        }
+    }
+
+    var format: (Double) -> String {
+        switch self {
+        case .positionX, .positionY:
+            { $0.formatted(.number.precision(.fractionLength(2))) }
+        case .rotation:
+            { "\(Int($0.rounded()))°" }
+        case .scale:
+            { $0.formatted(.number.precision(.fractionLength(2))) + "×" }
+        }
+    }
+
+    func value(in item: TextTimelineItem, at time: Double) -> Double {
+        switch self {
+        case .positionX: item.visuals.transform.positionX.value(at: time)
+        case .positionY: item.visuals.transform.positionY.value(at: time)
+        case .rotation: item.visuals.transform.rotationDegrees.value(at: time)
+        case .scale: item.visuals.transform.scale.value(at: time).x
+        }
+    }
+}
+
+private struct TextTransformToggleButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            EditorHaptics.tap()
+            action()
+        } label: {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isSelected ? Color.black : MotionaryTheme.textPrimary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 38)
+                .background(
+                    isSelected ? MotionaryTheme.accent : Color.white.opacity(0.08),
+                    in: Capsule()
+                )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -318,7 +519,7 @@ private struct PropertyWorkspaceShell<Content: View>: View {
                         if let section {
                             SectionKeyframeButton(
                                 viewModel: viewModel,
-                                clip: clip,
+                                itemID: clip.id,
                                 section: section,
                                 isEnabled: isEnabled
                             )
@@ -664,20 +865,24 @@ private struct PropertyScrubber: View {
     }
 }
 
-private struct SectionKeyframeButton: View {
+struct SectionKeyframeButton: View {
     @ObservedObject var viewModel: EditorViewModel
-    let clip: TimelineClip
+    let itemID: UUID
     let section: KeyframeSection
     let isEnabled: Bool
 
     var body: some View {
-        let hasAny = viewModel.hasKeyframes(in: section, clip: clip)
-        let isCurrent =
-            viewModel.selectedClipID == clip.id
-            && viewModel.hasKeyframe(atPlayhead: section)
+        let times = keyframeTimes
+        let hasAny = !times.isEmpty
+        let isCurrent = viewModel.selectedTimelineItemID == itemID
+            && times.contains { abs((item?.timelineStart ?? 0) + $0 - viewModel.currentTime) <= viewModel.keyframeTimeTolerance }
 
         Button {
-            viewModel.toggleKeyframeSection(section)
+            if let item, case .text = item {
+                viewModel.toggleTextKeyframeSection(section)
+            } else {
+                viewModel.toggleKeyframeSection(section)
+            }
             EditorHaptics.tap()
         } label: {
             KeyframeDiamondShape()
@@ -693,13 +898,203 @@ private struct SectionKeyframeButton: View {
                 .frame(width: 36, height: 32)
         }
         .buttonStyle(.plain)
-        .disabled(!isEnabled || clip.keyframeTargets(in: section).isEmpty)
-        .opacity(clip.keyframeTargets(in: section).isEmpty ? 0.3 : 1)
+        .disabled(!isEnabled || availableTargetCount == 0)
+        .opacity(availableTargetCount == 0 ? 0.3 : 1)
         .accessibilityLabel("\(section.rawValue) keyframe")
+    }
+
+    private var item: TimelineItem? {
+        viewModel.project.item(id: itemID)
+    }
+
+    private var keyframeTimes: [Double] {
+        guard let item else { return [] }
+        if let clip = item.legacyClip() {
+            return clip.keyframeTimes(in: section)
+        }
+        if case .text(let text) = item {
+            return text.keyframeTimes(in: section)
+        }
+        return []
+    }
+
+    private var availableTargetCount: Int {
+        guard let item else { return 0 }
+        if let clip = item.legacyClip() {
+            return clip.keyframeTargets(in: section).count
+        }
+        if case .text(let text) = item {
+            return text.keyframeTargets(in: section).count
+        }
+        return 0
     }
 }
 
-private struct InfiniteScrubberTrack: View {
+struct EditorValueScrubber: View {
+    let title: String
+    let systemImage: String
+    let value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let format: (Double) -> String
+    let onBegan: () -> Void
+    let onChanged: (Double) -> Void
+    let onEnded: () -> Void
+
+    @State private var tickPosition: CGFloat?
+    @State private var lastHapticBucket: Int?
+    @State private var isDragging = false
+    @State private var isEditing = false
+    @State private var momentumTask: Task<Void, Never>?
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Label(title, systemImage: systemImage)
+                    .font(.callout.weight(.medium))
+                    .labelStyle(.titleOnly)
+                    .lineLimit(1)
+                Spacer()
+                Text(format(clamped(value)))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(MotionaryTheme.textSecondary)
+            }
+
+            InfiniteScrubberTrack(
+                tickPosition: tickPosition ?? position(for: value),
+                isEditing: isEditing,
+                maximumTickPosition: maximumPosition
+            )
+            .contentShape(Rectangle())
+            .overlay {
+                HorizontalScrubInteraction(
+                    onBegan: beginScrub,
+                    onChanged: updateScrub,
+                    onEnded: endScrub
+                )
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(title)
+            .accessibilityValue(format(clamped(value)))
+            .accessibilityHint("Swipe left to increase or right to decrease.")
+            .accessibilityAdjustableAction { direction in
+                let delta: Double
+                switch direction {
+                case .increment: delta = safeStep
+                case .decrement: delta = -safeStep
+                @unknown default: return
+                }
+                onBegan()
+                onChanged(quantized(value + delta))
+                onEnded()
+                EditorHaptics.tap()
+            }
+        }
+        .disabled(maximumPosition <= 0)
+        .onDisappear {
+            momentumTask?.cancel()
+            if isEditing { finishScrub() }
+        }
+    }
+
+    private var safeStep: Double { max(abs(step), 0.000_001) }
+
+    private var maximumPosition: CGFloat {
+        CGFloat(max((range.upperBound - range.lowerBound) / safeStep, 0))
+    }
+
+    private func position(for value: Double) -> CGFloat {
+        min(max(CGFloat((clamped(value) - range.lowerBound) / safeStep), 0), maximumPosition)
+    }
+
+    private func value(at position: CGFloat) -> Double {
+        quantized(range.lowerBound + Double(position) * safeStep)
+    }
+
+    private func clamped(_ value: Double) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    private func quantized(_ value: Double) -> Double {
+        let steps = ((value - range.lowerBound) / safeStep).rounded()
+        let result = clamped(range.lowerBound + steps * safeStep)
+        return result == 0 ? 0 : result
+    }
+
+    private func beginScrub() {
+        momentumTask?.cancel()
+        momentumTask = nil
+        if isEditing { onEnded() }
+        tickPosition = position(for: value)
+        isDragging = true
+        isEditing = true
+        onBegan()
+        EditorHaptics.scrubStart()
+    }
+
+    private func updateScrub(_ delta: CGFloat) {
+        guard isDragging, let currentPosition = tickPosition else { return }
+        let nextPosition = min(
+            max(currentPosition - delta / InfiniteScrubberTrack.tickSpacing, 0),
+            maximumPosition
+        )
+        tickPosition = nextPosition
+        publish(value(at: nextPosition))
+    }
+
+    private func endScrub(_ velocity: CGFloat) {
+        guard isDragging else { return }
+        isDragging = false
+        guard let startPosition = tickPosition else {
+            finishScrub()
+            return
+        }
+        let distance = min(max(-velocity * 0.18, -480), 480)
+        guard abs(distance) >= 2 else {
+            finishScrub()
+            return
+        }
+
+        momentumTask = Task { @MainActor in
+            var remaining = distance
+            var position = startPosition
+            while !Task.isCancelled, abs(remaining) >= 0.35 {
+                let frameDistance = remaining * 0.12
+                remaining *= 0.88
+                let nextPosition = min(
+                    max(position + frameDistance / InfiniteScrubberTrack.tickSpacing, 0),
+                    maximumPosition
+                )
+                guard abs(nextPosition - position) > 0.0001 else { break }
+                position = nextPosition
+                tickPosition = position
+                publish(value(at: position))
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            guard !Task.isCancelled else { return }
+            finishScrub()
+            momentumTask = nil
+        }
+    }
+
+    private func publish(_ value: Double) {
+        onChanged(value)
+        let bucket = Int(((value - range.lowerBound) / safeStep).rounded())
+        guard bucket != lastHapticBucket else { return }
+        if lastHapticBucket != nil { EditorHaptics.selection() }
+        lastHapticBucket = bucket
+    }
+
+    private func finishScrub() {
+        guard isEditing else { return }
+        tickPosition = nil
+        lastHapticBucket = nil
+        isEditing = false
+        onEnded()
+    }
+}
+
+struct InfiniteScrubberTrack: View {
     static let tickSpacing: CGFloat = 8
 
     let tickPosition: CGFloat
@@ -771,7 +1166,7 @@ private struct InfiniteScrubberTrack: View {
     }
 }
 
-private struct HorizontalScrubInteraction: UIViewRepresentable {
+struct HorizontalScrubInteraction: UIViewRepresentable {
     let onBegan: () -> Void
     let onChanged: (CGFloat) -> Void
     let onEnded: (CGFloat) -> Void
@@ -877,7 +1272,7 @@ struct SelectedLayerMiniTimeline: View {
         GeometryReader { geometry in
             if let contextClipID,
                 let track = viewModel.project.tracks.first(where: {
-                    $0.clips.contains { $0.id == contextClipID }
+                    $0.items.contains { $0.id == contextClipID }
                 })
             {
                 let centerPadding = geometry.size.width * 0.5
@@ -904,10 +1299,10 @@ struct SelectedLayerMiniTimeline: View {
                 ) {
                     ZStack(alignment: .leading) {
                         Color.clear
-                        ForEach(track.clips) { clip in
-                            let width = max(CGFloat(clip.sourceRange.duration) * pixelsPerSecond, 6)
+                        ForEach(track.items) { item in
+                            let width = max(CGFloat(item.placementDuration) * pixelsPerSecond, 6)
                             ZStack {
-                                if clip.id == contextClipID {
+                                if item.id == contextClipID {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                                         .fill(Color.white)
                                         .frame(width: width+4, height: 42)
@@ -918,31 +1313,37 @@ struct SelectedLayerMiniTimeline: View {
                                         .allowsHitTesting(false)
                                 }
 
-                                if let media = viewModel.project.mediaDescriptor(for: clip) {
-                                    TimelineClipFill(
-                                        clip: clip,
-                                        media: media,
-                                        width: width,
-                                        height: 38,
-                                        pixelsPerSecond: pixelsPerSecond,
-                                        sampleWidth: nil
-                                    )
-                                    .frame(width: width, height: 38)
-                                    .overlay {
-                                        MiniTimelineKeyframes(
-                                            clip: clip,
-                                            currentTime: viewModel.currentTime,
-                                            tolerance: viewModel.keyframeTimeTolerance,
-                                            width: width,
-                                            activeSection: activeSection,
-                                            graphSegment: graphSegment
-                                        )
-                                    }
+                                TimelineItemVisualFill(
+                                    item: item,
+                                    media: item.legacyClip().flatMap {
+                                        viewModel.project.mediaDescriptor(for: $0)
+                                    },
+                                    mediaClip: item.legacyClip(),
+                                    width: width,
+                                    height: 38,
+                                    pixelsPerSecond: pixelsPerSecond,
+                                    sampleWidth: nil
+                                )
+                                .frame(width: width, height: 38)
+                                .foregroundStyle(Color.black.opacity(0.88))
+                                .background {
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(timelineItemTint(for: item))
                                 }
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                                MiniTimelineKeyframes(
+                                    item: item,
+                                    currentTime: viewModel.currentTime,
+                                    tolerance: viewModel.keyframeTimeTolerance,
+                                    width: width,
+                                    activeSection: activeSection,
+                                    graphSegment: graphSegment
+                                )
                             }
                             .frame(width: width, height: 42)
-                            .opacity(clip.id == contextClipID ? 1 : 0.22)
-                            .offset(x: centerPadding + CGFloat(clip.timelineStart) * pixelsPerSecond)
+                            .opacity(item.id == contextClipID ? 1 : 0.22)
+                            .offset(x: centerPadding + CGFloat(item.timelineStart) * pixelsPerSecond)
                         }
                     }
                     .frame(width: contentWidth, height: geometry.size.height, alignment: .leading)
@@ -969,6 +1370,8 @@ struct SelectedLayerMiniTimeline: View {
         case .adjust: sectionValue = 3
         case .effects: sectionValue = 4
         case .audio: sectionValue = 5
+        case .textType: sectionValue = 6
+        case .textStyle: sectionValue = 7
         case nil: sectionValue = 0
         }
         let graphValue: Int
@@ -988,7 +1391,7 @@ struct SelectedLayerMiniTimeline: View {
 }
 
 private struct MiniTimelineKeyframes: View {
-    let clip: TimelineClip
+    let item: TimelineItem
     let currentTime: Double
     let tolerance: Double
     let width: CGFloat
@@ -997,12 +1400,12 @@ private struct MiniTimelineKeyframes: View {
 
     var body: some View {
         ZStack {
-            if let graphSegment, graphSegment.clipID == clip.id {
+            if let graphSegment, graphSegment.clipID == item.id {
                 graphSegmentIndicator(graphSegment)
             }
 
             ForEach(KeyframeSection.allCases) { section in
-                ForEach(clip.keyframeTimes(in: section), id: \.self) { time in
+                ForEach(keyframeTimes(in: section), id: \.self) { time in
                     marker(time: time, section: section)
                 }
             }
@@ -1015,9 +1418,9 @@ private struct MiniTimelineKeyframes: View {
         let isActiveSection = section == activeSection
         let isCurrent =
             isActiveSection
-            && abs((clip.timelineStart + time) - currentTime) <= tolerance
+            && abs((item.timelineStart + time) - currentTime) <= tolerance
         let isGraphEndpoint =
-            graphSegment?.clipID == clip.id
+            graphSegment?.clipID == item.id
             && graphSegment?.section == section
             && (
                 abs((graphSegment?.startTime ?? -.infinity) - time) <= tolerance
@@ -1049,11 +1452,22 @@ private struct MiniTimelineKeyframes: View {
 
     private func markerX(for time: Double) -> CGFloat {
         min(
-            max(CGFloat(time / max(clip.sourceRange.duration, 0.001)) * width, 7),
+            max(CGFloat(time / max(item.placementDuration, 0.001)) * width, 7),
             max(width - 7, 7)
         )
     }
+
+    private func keyframeTimes(in section: KeyframeSection) -> [Double] {
+        if let clip = item.legacyClip() {
+            return clip.keyframeTimes(in: section)
+        }
+        if case .text(let text) = item {
+            return text.keyframeTimes(in: section)
+        }
+        return []
+    }
 }
+
 
 private struct TransformToggleButton: View {
     let title: String

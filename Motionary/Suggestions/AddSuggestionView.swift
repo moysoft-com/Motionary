@@ -9,6 +9,7 @@ struct AddSuggestionView: View {
 
     @State private var title = ""
     @State private var description = ""
+    @State private var acceptsCommunityStandards = false
     @FocusState private var focusedField: Field?
 
     private enum Field {
@@ -27,6 +28,7 @@ struct AddSuggestionView: View {
     private var canSubmit: Bool {
         (4...100).contains(trimmedTitle.count)
             && (10...2_000).contains(trimmedDescription.count)
+            && acceptsCommunityStandards
     }
 
     var body: some View {
@@ -55,6 +57,13 @@ struct AddSuggestionView: View {
                     Text("Details")
                 } footer: {
                     Text("10–2,000 characters. Your suggestion will be visible to everyone using Motionary.")
+                }
+
+                Section {
+                    Toggle("I agree to the Community Standards", isOn: $acceptsCommunityStandards)
+                    Link("Read Community Standards", destination: SuggestionContentPolicy.communityURL)
+                } footer: {
+                    Text("Do not submit personal data, harassment, hate, sexual content, threats, illegal content, or spam.")
                 }
             }
             .formStyle(.grouped)

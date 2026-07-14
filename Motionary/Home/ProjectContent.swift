@@ -74,8 +74,16 @@ struct ProjectContent: Codable, Equatable {
 private extension EditorProject {
     func removingTemporaryTracks() -> EditorProject {
         var persistedProject = self
+        let fallbackTrack = persistedProject.tracks.first {
+            $0.kind == .undefined && $0.items.isEmpty
+        }
         persistedProject.tracks.removeAll { track in
             track.kind == .undefined && track.items.isEmpty
+        }
+        if persistedProject.tracks.isEmpty {
+            persistedProject.tracks = [
+                fallbackTrack ?? TimelineTrack(name: "Layer", kind: .undefined)
+            ]
         }
         return persistedProject
     }

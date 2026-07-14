@@ -9,6 +9,7 @@ enum TimelineScrollContainerPullToAdd {
 
 struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     @Binding var pixelsPerSecond: CGFloat
+    @Binding var horizontalScrollOffset: CGFloat
     let currentTime: Double
     let duration: Double
     let contentRevision: Int
@@ -26,6 +27,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
     init(
         pixelsPerSecond: Binding<CGFloat>,
+        horizontalScrollOffset: Binding<CGFloat> = .constant(0),
         currentTime: Double,
         duration: Double,
         contentRevision: Int,
@@ -42,6 +44,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         @ViewBuilder content: () -> Content
     ) {
         _pixelsPerSecond = pixelsPerSecond
+        _horizontalScrollOffset = horizontalScrollOffset
         self.currentTime = currentTime
         self.duration = duration
         self.contentRevision = contentRevision
@@ -136,6 +139,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private var isPullToAddArmed = false
         private let maximumPixelsPerSecond: CGFloat = 280
         private var lastScrubCallbackTime: CFAbsoluteTime = 0
+        private var pendingHorizontalScrollOffset: CGFloat?
+        private var isHorizontalScrollOffsetUpdateScheduled = false
         private weak var scrollView: UIScrollView?
         private var autoScrollDisplayLink: CADisplayLink?
         private var lastAutoScrollTimestamp: CFTimeInterval?
@@ -174,9 +179,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             lastAutoScrollTimestamp = link.timestamp
             guard elapsed > 0 else { return }
 
+            guard let window = scrollView.window else { return }
+            let visibleFrameInWindow = scrollView.convert(scrollView.bounds, to: window)
             let location = CGPoint(
-                x: target.x - scrollView.contentOffset.x,
-                y: target.y - scrollView.contentOffset.y
+                x: target.x - visibleFrameInWindow.minX,
+                y: target.y - visibleFrameInWindow.minY
             )
             let edgeZone: CGFloat = 64
             let maxSpeed: CGFloat = 520
@@ -228,6 +235,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            scheduleHorizontalScrollOffsetUpdate(scrollView.contentOffset.x)
+
             if !parent.allowsVerticalScrolling, abs(scrollView.contentOffset.y) > 0.5 {
                 isProgrammaticScroll = true
                 scrollView.contentOffset.y = 0
@@ -259,6 +268,21 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             }
             let time = min(max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0), parent.duration)
             emitScrubTime(time)
+        }
+
+        private func scheduleHorizontalScrollOffsetUpdate(_ offset: CGFloat) {
+            pendingHorizontalScrollOffset = offset
+            guard !isHorizontalScrollOffsetUpdateScheduled else { return }
+            isHorizontalScrollOffsetUpdateScheduled = true
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                isHorizontalScrollOffsetUpdateScheduled = false
+                guard let offset = pendingHorizontalScrollOffset else { return }
+                pendingHorizontalScrollOffset = nil
+                guard abs(parent.horizontalScrollOffset - offset) > 0.01 else { return }
+                parent.horizontalScrollOffset = offset
+            }
         }
 
         private func emitScrubTime(_ time: Double) {
@@ -365,6 +389,8 @@ func timelineTrackIcon(for kind: TrackKind) -> String {
         "square.stack.3d.up"
     case .shape:
         "square.fill"
+    case .text:
+        "textformat"
     case .audio:
         "waveform"
     }
@@ -378,6 +404,8 @@ func timelineTrackColor(for kind: TrackKind) -> Color {
         MotionaryTheme.video
     case .shape:
         .orange
+    case .text:
+        Color(red: 0.96, green: 0.48, blue: 0.70)
     case .audio:
         MotionaryTheme.audio
     }

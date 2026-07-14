@@ -24,6 +24,10 @@ final class EditorViewModel: ObservableObject {
         get { selectionState.clipID }
         set { selectionState.clipID = newValue }
     }
+    var selectedTimelineItemID: UUID? {
+        get { selectedClipID }
+        set { selectedClipID = newValue }
+    }
     var selectedTrackID: UUID? {
         get { selectionState.trackID }
         set { selectionState.trackID = newValue }
@@ -77,6 +81,7 @@ final class EditorViewModel: ObservableObject {
     @Published var selectedKeyframeID: UUID?
     @Published var graphSegment: KeyframeSegment?
     @Published var displayedGraphSegment: KeyframeSegment?
+    @Published var liveTextPreviewID: UUID?
     @Published var isRippleEditingEnabled = false
 
     let projectID: UUID
@@ -97,7 +102,7 @@ final class EditorViewModel: ObservableObject {
     var toastTask: Task<Void, Never>?
     var autosaveTask: Task<Void, Never>?
     var pendingScrubSeekTime: Double?
-    var isScrubSeekInFlight = false
+    var scrubSessionGeneration = 0
     var interactiveEditSnapshot: EditorProject?
     var timelineClipCache: [UUID: [TimelineClip]] = [:]
     var timelineClipCacheRevision = -1
@@ -109,6 +114,16 @@ final class EditorViewModel: ObservableObject {
     let clipRevealEpsilon = 0.01
 
     var duration: Double { project.duration }
+    var lastPlayableTime: Double {
+        guard duration > 0 else { return 0 }
+        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
+        return max(duration - frameDuration, 0)
+    }
+
+    func clampedTimelineTime(_ time: Double) -> Double {
+        min(max(time, 0), lastPlayableTime)
+    }
+
     var longRunningTaskTitle: String? {
         if isExporting {
             return "Exporting \(Int(exportProgress * 100))%"
@@ -124,19 +139,34 @@ final class EditorViewModel: ObservableObject {
     }
     var canExportVideo: Bool {
         project.tracks.contains { track in
-            (track.kind == .visual || track.kind == .shape)
-                && track.clips.contains { $0.mediaType != .audio }
+            !track.isMuted
+                && (track.kind == .visual || track.kind == .shape || track.kind == .text)
+                && track.items.contains { item in
+                    switch item {
+                    case .media(let media):
+                        media.mediaType != .audio
+                    case .shape, .text:
+                        true
+                    case .caption, .adjustment, .compound:
+                        false
+                    }
+                }
         }
     }
 
     var selectedClip: TimelineClip? {
+        guard selectedClipID != nil else { return nil }
+        return selectedTimelineItem?.legacyClip()
+    }
+
+    var selectedTimelineItem: TimelineItem? {
         guard let selectedClipID else { return nil }
-        return project.tracks.flatMap(\.clips).first { $0.id == selectedClipID }
+        return project.item(id: selectedClipID)
     }
 
     var selectedClipIsActiveAtPlayhead: Bool {
-        guard let selectedClip else { return false }
-        return isTimeInside(selectedClip)
+        guard let item = selectedTimelineItem else { return false }
+        return currentTime >= item.timelineStart && currentTime < item.timelineEnd
     }
 
     init(projectID: UUID, projectStore: ProjectStore, initialContent: ProjectContent) {

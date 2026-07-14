@@ -14,6 +14,13 @@ final class SuggestionsViewModel {
     private var votedSuggestionIDs: Set<String> = []
     private var checkedVoteSuggestionIDs: Set<String> = []
     private var voteOverrides: [String: Bool] = [:]
+    private(set) var blockedOwnerIDs: Set<String> = []
+
+    private static let blockedOwnersKey = "motionary.suggestions.blockedOwners"
+
+    init() {
+        blockedOwnerIDs = Set(UserDefaults.standard.stringArray(forKey: Self.blockedOwnersKey) ?? [])
+    }
 
     func listenToSuggestions() {
         guard suggestionsListener == nil else { return }
@@ -43,6 +50,11 @@ final class SuggestionsViewModel {
 
     func addSuggestion(title: String, description: String) {
         guard requireAuthenticatedUser() else { return }
+
+        if let message = SuggestionContentPolicy.validationError(title: title, description: description) {
+            notice = SuggestionNotice(title: "Suggestion Not Submitted", message: message)
+            return
+        }
 
         let normalizedTitle = Self.normalize(title)
         if let existing = suggestions.first(where: { Self.normalize($0.title) == normalizedTitle }) {
@@ -251,6 +263,11 @@ final class SuggestionsViewModel {
     func updateSuggestion(_ suggestion: Suggestion, title: String, description: String) {
         guard requireAuthenticatedUser(), suggestion.ownerID == currentUserID, let id = suggestion.id else { return }
 
+        if let message = SuggestionContentPolicy.validationError(title: title, description: description) {
+            notice = SuggestionNotice(title: "Suggestion Not Saved", message: message)
+            return
+        }
+
         let suggestionRef = db.collection("suggestions").document(id)
         let newNormalizedTitle = Self.normalize(title)
         let newKey = Self.hash(newNormalizedTitle)
@@ -326,6 +343,7 @@ final class SuggestionsViewModel {
     func reportSuggestion(
         _ suggestion: Suggestion,
         reason: SuggestionReportReason,
+        details: String = "",
         completion: @escaping (Bool) -> Void
     ) {
         guard requireAuthenticatedUser(), suggestion.ownerID != currentUserID, let suggestionID = suggestion.id else {
@@ -338,11 +356,33 @@ final class SuggestionsViewModel {
             "suggestionID": suggestionID,
             "reporterID": currentUserID,
             "reason": reason.rawValue,
+            "details": String(details.prefix(1_000)),
             "createdAt": FieldValue.serverTimestamp(),
             "status": "pending"
         ]) { error in
             completion(error == nil)
         }
+    }
+
+    func isOwnerBlocked(_ ownerID: String?) -> Bool {
+        guard let ownerID else { return false }
+        return blockedOwnerIDs.contains(ownerID)
+    }
+
+    func blockOwner(of suggestion: Suggestion) {
+        guard let ownerID = suggestion.ownerID, ownerID != currentUserID else { return }
+        blockedOwnerIDs.insert(ownerID)
+        persistBlockedOwners()
+        notice = SuggestionNotice(title: "User Blocked", message: "Suggestions from this user are now hidden on this device.")
+    }
+
+    func unblockAllOwners() {
+        blockedOwnerIDs.removeAll()
+        persistBlockedOwners()
+    }
+
+    private func persistBlockedOwners() {
+        UserDefaults.standard.set(blockedOwnerIDs.sorted(), forKey: Self.blockedOwnersKey)
     }
 
     private var voteData: [String: Any] {
@@ -452,7 +492,12 @@ private enum SuggestionMutationError: LocalizedError {
 
 enum SuggestionReportReason: String, CaseIterable, Identifiable {
     case spam
-    case abusive
+    case harassment
+    case hate
+    case sexual
+    case violence
+    case personalInformation
+    case illegal
     case duplicate
     case other
 
@@ -461,7 +506,12 @@ enum SuggestionReportReason: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .spam: "Spam or advertising"
-        case .abusive: "Abusive or inappropriate"
+        case .harassment: "Harassment or bullying"
+        case .hate: "Hateful content"
+        case .sexual: "Sexual content"
+        case .violence: "Threats or violence"
+        case .personalInformation: "Personal information"
+        case .illegal: "Potentially illegal content"
         case .duplicate: "Duplicate suggestion"
         case .other: "Something else"
         }

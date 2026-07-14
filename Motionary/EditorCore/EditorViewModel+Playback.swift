@@ -40,7 +40,8 @@ extension EditorViewModel {
         isImporting = false
         isExporting = false
         pendingScrubSeekTime = nil
-        isScrubSeekInFlight = false
+        scrubSessionGeneration &+= 1
+        lastScrubUIUpdate = 0
         isRenderingPreview = false
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
@@ -73,7 +74,8 @@ extension EditorViewModel {
 
     func togglePlayback() {
         guard let player else { return }
-        if !isPlaying && currentTime >= duration {
+        let endTolerance = max(keyframeTimeTolerance, 0.05)
+        if !isPlaying, duration > 0, currentTime >= max(duration - endTolerance, 0) {
             seek(to: 0)
         }
 
@@ -111,7 +113,7 @@ extension EditorViewModel {
         updateHistoryFlags()
         persist()
         schedulePreviewRebuild(
-            seekTo: min(currentTime, duration),
+            seekTo: clampedTimelineTime(currentTime),
             invalidation: command.invalidation
         )
     }
@@ -126,47 +128,75 @@ extension EditorViewModel {
         updateHistoryFlags()
         persist()
         schedulePreviewRebuild(
-            seekTo: min(currentTime, duration),
+            seekTo: clampedTimelineTime(currentTime),
             invalidation: command.invalidation
         )
     }
 
     func seek(to time: Double, exact: Bool = true) {
-        let clamped = min(max(time, 0), max(duration, 0))
+        let clamped = clampedTimelineTime(time)
         updateCurrentTime(clamped)
         seekPlayer(to: clamped, exact: exact)
     }
 
     func seekPlayer(to time: Double, exact: Bool) {
+        let clamped = clampedTimelineTime(time)
         let tolerance = exact ? CMTime.zero : CMTime(seconds: 0.035, preferredTimescale: 600)
         player?.seek(
-            to: CMTime(seconds: time, preferredTimescale: 600),
+            to: CMTime(seconds: clamped, preferredTimescale: 600),
             toleranceBefore: tolerance,
             toleranceAfter: tolerance
         )
     }
 
     func beginScrub() {
+        guard !isScrubbing else { return }
+        scrubSessionGeneration &+= 1
         wasPlayingBeforeScrub = isPlaying
         player?.pause()
         isPlaying = false
         isScrubbing = true
         rebuildTask?.cancel()
         rebuildTask = nil
+        scrubSeekTask?.cancel()
+        scrubSeekTask = nil
+        pendingScrubSeekTime = nil
+        lastScrubUIUpdate = 0
         previewQuality = .interactive
     }
 
     func endScrub(at time: Double) {
+        let clamped = clampedTimelineTime(time)
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
         pendingScrubSeekTime = nil
-        isScrubSeekInFlight = false
+        lastScrubUIUpdate = 0
+        scrubSessionGeneration &+= 1
+        let generation = scrubSessionGeneration
         player?.currentItem?.cancelPendingSeeks()
-        seek(to: time, exact: true)
+        updateCurrentTime(clamped)
+        previewQuality = .balanced
+
+        guard let player else {
+            finishScrub(at: clamped, generation: generation)
+            return
+        }
+        player.seek(
+            to: CMTime(seconds: clamped, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.finishScrub(at: clamped, generation: generation)
+            }
+        }
+    }
+
+    private func finishScrub(at time: Double, generation: Int) {
+        guard generation == scrubSessionGeneration, isScrubbing else { return }
         updateCurrentTime(time)
         isScrubbing = false
         wasPlayingBeforeScrub = false
-        previewQuality = .balanced
         flushDeferredPreviewRebuild(seekTo: time)
     }
 
@@ -177,7 +207,7 @@ extension EditorViewModel {
                 [clip.timelineStart, clip.timelineEnd]
                 + clip.allKeyframeTimes.map { clip.timelineStart + $0 }
         } else {
-            points = project.tracks.flatMap(\.clips).flatMap {
+            points = project.tracks.flatMap(\.items).flatMap {
                 [$0.timelineStart, $0.timelineEnd]
             }
         }
@@ -212,7 +242,7 @@ extension EditorViewModel {
 
     private func restoreSelectionIfPossible(_ clipID: UUID?) {
         if let clipID,
-            let location = project.clipLocation(id: clipID)
+            let location = project.itemLocation(id: clipID)
         {
             selectedClipID = clipID
             selectedTrackID = project.tracks[location.track].id

@@ -5,7 +5,7 @@ import Foundation
 
 /// Persisted aggregate containing canvas settings, tracks, clips, and migration metadata.
 struct EditorProject: Identifiable, Codable, Equatable {
-    static let currentSchemaVersion = 6
+    static let currentSchemaVersion = 9
 
     var id: UUID
     var schemaVersion: Int
@@ -90,14 +90,17 @@ struct EditorProject: Identifiable, Codable, Equatable {
     }
 
     mutating func synchronizeMediaLibrary() {
+        separateTextTracks()
+
         var referencedIDs = Set<MediaID>()
         for trackIndex in tracks.indices {
+            let migrationSources = tracks[trackIndex].consumePendingMigrationSources()
             for itemIndex in tracks[trackIndex].items.indices {
                 guard var clip = tracks[trackIndex].items[itemIndex].legacyClip() else { continue }
                 let mediaID = clip.mediaID
                 var shouldRewriteItem = false
 
-                if let migrationSource = clip.consumePendingMigrationSource() {
+                if let migrationSource = migrationSources[mediaID] {
                     mediaLibrary[mediaID] = MediaAsset(id: mediaID, source: migrationSource)
                     clip.mediaType = migrationSource.mediaType
                     shouldRewriteItem = true
@@ -130,6 +133,52 @@ struct EditorProject: Identifiable, Codable, Equatable {
         }
         if schemaVersion != Self.currentSchemaVersion {
             schemaVersion = Self.currentSchemaVersion
+        }
+    }
+
+    /// Text has its own compositing track category. Older projects could place
+    /// text beside visual overlays, so split those mixed tracks while loading.
+    private mutating func separateTextTracks() {
+        let normalized = Self.tracksWithSeparatedText(from: tracks)
+        if normalized != tracks {
+            tracks = normalized
+            renumberTracks()
+        }
+
+        for sequenceID in Array(sequences.keys) {
+            guard var sequence = sequences[sequenceID] else { continue }
+            sequence.tracks = Self.tracksWithSeparatedText(from: sequence.tracks)
+            sequences[sequenceID] = sequence
+        }
+    }
+
+    private static func tracksWithSeparatedText(from tracks: [TimelineTrack]) -> [TimelineTrack] {
+        tracks.flatMap { originalTrack -> [TimelineTrack] in
+            var track = originalTrack
+            let textItems = track.items.filter {
+                if case .text = $0 { return true }
+                return false
+            }
+            guard !textItems.isEmpty else { return [track] }
+
+            let otherItems = track.items.filter {
+                if case .text = $0 { return false }
+                return true
+            }
+            if otherItems.isEmpty {
+                track.kind = .text
+                return [track]
+            }
+
+            track.items = otherItems
+            let textTrack = TimelineTrack(
+                name: "Text",
+                kind: .text,
+                items: textItems,
+                isMuted: originalTrack.isMuted,
+                isLocked: originalTrack.isLocked
+            )
+            return [textTrack, track]
         }
     }
 

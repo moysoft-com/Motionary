@@ -324,6 +324,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
     var items: [TimelineItem]
     var isMuted: Bool
     var isLocked: Bool
+    private var pendingMigrationSources: [MediaID: ClipSource]
 
     var clips: [TimelineClip] {
         items.compactMap { $0.legacyClip() }
@@ -343,6 +344,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         self.items = items
         self.isMuted = isMuted
         self.isLocked = isLocked
+        self.pendingMigrationSources = [:]
     }
 
     init(
@@ -353,14 +355,16 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         isMuted: Bool = false,
         isLocked: Bool = false
     ) {
+        let migration = Self.migrateLegacyClips(clips)
         self.init(
             id: id,
             name: name,
             kind: kind,
-            items: clips.map(TimelineItem.fromLegacyClip),
+            items: migration.items,
             isMuted: isMuted,
             isLocked: isLocked
         )
+        pendingMigrationSources = migration.sources
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -380,11 +384,14 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         kind = try container.decode(TrackKind.self, forKey: .kind)
         isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
         isLocked = try container.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
+        pendingMigrationSources = [:]
         if let decodedItems = try container.decodeIfPresent([TimelineItem].self, forKey: .items) {
             items = decodedItems
         } else {
             let legacyClips = try container.decodeIfPresent([TimelineClip].self, forKey: .clips) ?? []
-            items = legacyClips.map(TimelineItem.fromLegacyClip)
+            let migration = Self.migrateLegacyClips(legacyClips)
+            items = migration.items
+            pendingMigrationSources = migration.sources
         }
     }
 
@@ -396,6 +403,31 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         try container.encode(items, forKey: .items)
         try container.encode(isMuted, forKey: .isMuted)
         try container.encode(isLocked, forKey: .isLocked)
+    }
+
+    static func == (lhs: TimelineTrack, rhs: TimelineTrack) -> Bool {
+        lhs.id == rhs.id
+            && lhs.name == rhs.name
+            && lhs.kind == rhs.kind
+            && lhs.items == rhs.items
+            && lhs.isMuted == rhs.isMuted
+            && lhs.isLocked == rhs.isLocked
+    }
+
+    private static func migrateLegacyClips(
+        _ clips: [TimelineClip]
+    ) -> (items: [TimelineItem], sources: [MediaID: ClipSource]) {
+        var migratedClips = clips
+        var sources: [MediaID: ClipSource] = [:]
+        for index in migratedClips.indices {
+            if let source = migratedClips[index].consumePendingMigrationSource() {
+                sources[migratedClips[index].mediaID] = source
+            }
+        }
+        return (
+            migratedClips.map(TimelineItem.fromLegacyClip),
+            sources
+        )
     }
 }
 
@@ -409,12 +441,23 @@ extension TimelineTrack {
     }
 
     mutating func appendLegacyClip(_ clip: TimelineClip) {
-        items.append(TimelineItem.fromLegacyClip(clip))
+        var migratedClip = clip
+        if let source = migratedClip.consumePendingMigrationSource() {
+            pendingMigrationSources[migratedClip.mediaID] = source
+        }
+        items.append(TimelineItem.fromLegacyClip(migratedClip))
         sortItems()
     }
 
     mutating func insertLegacyClip(_ clip: TimelineClip, at index: Int) {
-        items.insert(TimelineItem.fromLegacyClip(clip), at: min(max(index, 0), items.count))
+        var migratedClip = clip
+        if let source = migratedClip.consumePendingMigrationSource() {
+            pendingMigrationSources[migratedClip.mediaID] = source
+        }
+        items.insert(
+            TimelineItem.fromLegacyClip(migratedClip),
+            at: min(max(index, 0), items.count)
+        )
         sortItems()
     }
 
@@ -426,7 +469,16 @@ extension TimelineTrack {
 
     mutating func replaceLegacyClip(id: UUID, with clip: TimelineClip) {
         guard let index = itemIndex(id: id) else { return }
-        items[index] = TimelineItem.fromLegacyClip(clip)
+        var migratedClip = clip
+        if let source = migratedClip.consumePendingMigrationSource() {
+            pendingMigrationSources[migratedClip.mediaID] = source
+        }
+        items[index] = items[index].mergingLegacyClip(migratedClip)
+    }
+
+    mutating func consumePendingMigrationSources() -> [MediaID: ClipSource] {
+        defer { pendingMigrationSources.removeAll() }
+        return pendingMigrationSources
     }
 
     mutating func setTimelineStart(id: UUID, to start: Double) {

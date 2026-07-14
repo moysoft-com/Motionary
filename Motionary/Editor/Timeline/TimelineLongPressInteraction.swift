@@ -9,7 +9,7 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
     let onTap: () -> Void
     var onDoubleTap: (() -> Void)? = nil
     let onLongPressBegan: () -> Void
-    let onLongPressChanged: (CGSize) -> Void
+    let onLongPressChanged: (TimelineLongPressDragValue) -> Void
     let onLongPressEnded: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -79,7 +79,7 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
             guard let view = recognizer.view else { return }
-            let location = recognizer.location(in: nil)
+            let location = recognizer.location(in: view.window)
 
             switch recognizer.state {
             case .began:
@@ -89,9 +89,12 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
             case .changed:
                 guard isActive else { return }
                 parent.onLongPressChanged(
-                    CGSize(
-                        width: location.x - startLocation.x,
-                        height: location.y - startLocation.y
+                    TimelineLongPressDragValue(
+                        translation: CGSize(
+                            width: location.x - startLocation.x,
+                            height: location.y - startLocation.y
+                        ),
+                        locationInWindow: location
                     )
                 )
             case .ended:
@@ -176,4 +179,9 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
             latestTouchLocation = nil
         }
     }
+}
+
+struct TimelineLongPressDragValue {
+    let translation: CGSize
+    let locationInWindow: CGPoint
 }

@@ -163,6 +163,18 @@ extension TimelineClip {
                 step: 0.01,
                 fractionDigits: 2
             )
+        case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
+            .textWidthFraction, .textStroke, .textStrokeWidth, .textShadow,
+            .textShadowOffsetX, .textShadowOffsetY, .textShadowBlur,
+            .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
+            return KeyframePropertyMetadata(
+                title: "Text",
+                systemImage: "textformat",
+                group: .textStyle,
+                range: -1...1,
+                step: 0.01,
+                fractionDigits: 2
+            )
         }
     }
 
@@ -214,6 +226,8 @@ extension TimelineClip {
         case .audio:
             guard mediaType == .audio || mediaType == .video else { return [] }
             return [.volume]
+        case .textType, .textStyle:
+            return []
         }
     }
 
@@ -240,6 +254,12 @@ extension TimelineClip {
             .effects
         case .volume:
             .audio
+        case .textFontSize, .textLetterSpacing, .textLineSpacing:
+            .textType
+        case .textFill, .textWidthFraction, .textStroke, .textStrokeWidth,
+            .textShadow, .textShadowOffsetX, .textShadowOffsetY, .textShadowBlur,
+            .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
+            .textStyle
         }
     }
 
@@ -261,6 +281,11 @@ extension TimelineClip {
         case .effectIntensity(let effectID):
             effectStack.effects.first(where: { $0.id == effectID })?.intensity
         case .volume: volume
+        case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
+            .textWidthFraction, .textStroke, .textStrokeWidth, .textShadow,
+            .textShadowOffsetX, .textShadowOffsetY, .textShadowBlur,
+            .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
+            nil
         }
     }
 
@@ -300,6 +325,11 @@ extension TimelineClip {
             effectStack.effects[index].intensity = property
         case .volume:
             volume = property
+        case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
+            .textWidthFraction, .textStroke, .textStrokeWidth, .textShadow,
+            .textShadowOffsetX, .textShadowOffsetY, .textShadowBlur,
+            .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
+            break
         }
     }
 

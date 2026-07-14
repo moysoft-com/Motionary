@@ -128,7 +128,8 @@ struct ExportSettingsView: View {
                 }
             }
         }
-        .presentationDetents([.large])
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     private var videoBitrateMbps: Double {

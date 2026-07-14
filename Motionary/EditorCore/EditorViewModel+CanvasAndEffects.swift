@@ -78,13 +78,15 @@ extension EditorViewModel {
     ) {
         guard let selectedClipID else { return }
         guard let location = project.clipLocation(id: selectedClipID) else { return }
-        let before = project.tracks[location.track].clips[location.clip]
-        var after = before
-        update(&after)
-        guard after != before else { return }
+        let beforeItem = project.tracks[location.track].items[location.clip]
+        guard var updatedClip = beforeItem.legacyClip() else { return }
+        let beforeClip = updatedClip
+        update(&updatedClip)
+        guard updatedClip != beforeClip else { return }
+        let afterItem = beforeItem.mergingLegacyClip(updatedClip)
         var invalidation: EditorInvalidation = [.userInterface, .persistence]
         if rebuild {
-            invalidation.formUnion(EditorProject.renderInvalidation(before: before, after: after))
+            invalidation.formUnion(EditorProject.renderInvalidation(before: beforeClip, after: updatedClip))
         }
         if refreshTimeline {
             invalidation.insert(.timelineLayout)
@@ -92,8 +94,8 @@ extension EditorViewModel {
         perform(
             AnyEditorCommand(
                 ReplaceClipCommand(
-                    before: before,
-                    after: after,
+                    before: beforeItem,
+                    after: afterItem,
                     invalidation: invalidation
                 )
             ),
@@ -191,6 +193,11 @@ extension EditorViewModel {
     }
 
     func addKeyframe(_ target: KeyframeTarget) {
+        if selectedTextItem != nil {
+            guard !textHasKeyframe(atPlayhead: target) else { return }
+            toggleTextKeyframe(target)
+            return
+        }
         guard selectedClipID != nil else { return }
         activeKeyframeTarget = target
         updateSelectedClip { clip in

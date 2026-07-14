@@ -5,10 +5,15 @@ import Foundation
 
 extension EditorViewModel {
     func updateScrub(to time: Double) {
-        let clamped = min(max(time, 0), max(duration, 0))
-        pendingScrubSeekTime = clamped
-        processPendingScrubSeek()
+        let clamped = clampedTimelineTime(time)
         updateCurrentTime(clamped)
+        guard isScrubbing else {
+            seekPlayer(to: clamped, exact: true)
+            return
+        }
+
+        pendingScrubSeekTime = clamped
+        scheduleLatestScrubSeek()
     }
 
     func flushDeferredPreviewRebuild(seekTo time: Double) {
@@ -22,27 +27,46 @@ extension EditorViewModel {
         )
     }
 
-    private func processPendingScrubSeek() {
-        guard !isScrubSeekInFlight else { return }
+    private var scrubSeekInterval: CFTimeInterval {
+        let framesPerSecond = min(max(Double(project.renderSettings.frameRate), 24), 60)
+        return 1 / framesPerSecond
+    }
+
+    private func scheduleLatestScrubSeek() {
+        let elapsed = CFAbsoluteTimeGetCurrent() - lastScrubUIUpdate
+        if lastScrubUIUpdate == 0 || elapsed >= scrubSeekInterval {
+            issueLatestScrubSeek()
+            return
+        }
+        guard scrubSeekTask == nil else { return }
+
+        let generation = scrubSessionGeneration
+        let delay = max(scrubSeekInterval - elapsed, 0)
+        scrubSeekTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self,
+                self.isScrubbing,
+                self.scrubSessionGeneration == generation
+            else { return }
+            self.scrubSeekTask = nil
+            self.issueLatestScrubSeek()
+        }
+    }
+
+    private func issueLatestScrubSeek() {
         guard let target = pendingScrubSeekTime else { return }
         pendingScrubSeekTime = nil
         guard let player else { return }
 
-        isScrubSeekInFlight = true
-        let tolerance = CMTime(seconds: 0.12, preferredTimescale: 600)
-        
+        lastScrubUIUpdate = CFAbsoluteTimeGetCurrent()
         player.seek(
             to: CMTime(seconds: target, preferredTimescale: 600),
-            toleranceBefore: tolerance,
-            toleranceAfter: tolerance
-        ) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.isScrubSeekInFlight = false
-                if self.pendingScrubSeekTime != nil {
-                    self.processPendingScrubSeek()
-                }
-            }
-        }
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
     }
 }

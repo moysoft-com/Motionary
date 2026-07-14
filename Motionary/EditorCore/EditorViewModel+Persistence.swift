@@ -85,7 +85,7 @@ extension EditorViewModel {
                 .map(\.timelineEnd)
                 .max() ?? 0
             return visualDuration
-        case .shape:
+        case .shape, .text:
             return currentTime
         case .audio:
             return min(currentTime, max(project.duration, currentTime))
@@ -108,7 +108,7 @@ extension EditorViewModel {
             refreshTimeline: refreshTimeline
         )
         if let time {
-            updateCurrentTime(min(max(time, 0), max(duration, 0)))
+            updateCurrentTime(clampedTimelineTime(time))
         }
     }
 
@@ -168,6 +168,7 @@ extension EditorViewModel {
             project.synchronizeMediaLibrary()
         }
         project.renumberTracks()
+        updateCurrentTime(clampedTimelineTime(currentTime))
         if refreshTimeline {
             incrementTimelineContentRevision()
             timelineClipCacheRevision = -1
@@ -266,11 +267,12 @@ extension EditorViewModel {
             Task { @MainActor in
                 let seconds = CMTimeGetSeconds(time)
                 if !self.isScrubbing {
-                    self.updateCurrentTime(min(max(seconds, 0), max(self.duration, 0)))
+                    self.updateCurrentTime(self.clampedTimelineTime(seconds))
                 }
-                if self.duration > 0, seconds >= self.duration - 0.04 {
+                if self.isPlaying, self.duration > 0, seconds >= self.lastPlayableTime {
                     self.player?.pause()
                     self.isPlaying = false
+                    self.seekPlayer(to: self.lastPlayableTime, exact: true)
                 }
                 if let graphSegment = self.graphSegment,
                     let clip = self.project.clip(id: graphSegment.clipID)
@@ -292,7 +294,7 @@ extension EditorViewModel {
     }
 
     func updateCurrentTime(_ time: Double) {
-        currentTime = time
+        currentTime = clampedTimelineTime(time)
     }
 
     func updateSelection(clipID: UUID?, trackID: UUID?) {

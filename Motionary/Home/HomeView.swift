@@ -43,7 +43,7 @@ struct HomeView: View {
                                         },
                                         onRenameCommit: {
                                             editingProjectID = nil
-                                            projectStore.save()
+                                            projectStore.finalizeRename(projectID: project.id)
                                         },
                                         onDelete: {
                                             projectStore.deleteProject(with: project.id)
@@ -67,7 +67,9 @@ struct HomeView: View {
                                 selectedProject = nil
                             } label: {
                                 Image(systemName: "chevron.left")
+                                    .contentShape(Rectangle())
                             }
+                            .accessibilityLabel("Back to projects")
                         }
                     }
             }
@@ -254,7 +256,7 @@ struct HomeView: View {
                     frameRate: Int32(newProjectFrameRate)
                 )
             }
-        case .shape:
+        case .shape, .text:
             return
         case .audio:
             let trackIndex: Int

@@ -44,6 +44,7 @@ struct CoreTimelineLayout: View {
     @State private var pullToAddBounceTrigger = false
     @State private var displayTime: Double = 0
     @State private var clipDragScrollOffset: CGSize = .zero
+    @State private var horizontalScrollOffset: CGFloat = 0
     let size: CGSize
     let trackHeight: CGFloat
     let rowSpacing: CGFloat
@@ -59,7 +60,6 @@ struct CoreTimelineLayout: View {
             )
             playhead
             pullToAddIndicator
-            emptyState
         }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .motionaryGlass(cornerRadius: 20)
@@ -91,6 +91,7 @@ struct CoreTimelineLayout: View {
     private var timelineScroll: some View {
         TimelineScrollContainer(
             pixelsPerSecond: $pixelsPerSecond,
+            horizontalScrollOffset: $horizontalScrollOffset,
             currentTime: displayTime,
             duration: viewModel.duration,
             contentRevision: timelineContentRevision,
@@ -119,6 +120,7 @@ struct CoreTimelineLayout: View {
                 activeTrackDrag: $activeTrackDrag,
                 activeTrimSnapTime: $activeTrimSnapTime,
                 activeClipSnapKey: $activeClipSnapKey,
+                horizontalScrollOffset: $horizontalScrollOffset,
                 contentWidth: contentWidth,
                 contentHeight: contentHeight,
                 containerHeight: size.height,
@@ -148,13 +150,7 @@ struct CoreTimelineLayout: View {
     }
 
     private var clipAutoScrollTarget: CGPoint? {
-        guard let drag = activeClipDrag else { return nil }
-        return CGPoint(
-            x: centerPadding + CGFloat(drag.resolvedPlacement.start) * pixelsPerSecond
-                + CGFloat(drag.clipSnapshot.sourceRange.duration) * pixelsPerSecond * 0.5,
-            y: 38 + CGFloat(drag.resolvedPlacement.trackIndex) * (trackHeight + rowSpacing)
-                + trackHeight * 0.5
-        )
+        activeClipDrag?.fingerLocationInWindow
     }
 
     private var playhead: some View {
@@ -191,14 +187,6 @@ struct CoreTimelineLayout: View {
             }
     }
 
-    @ViewBuilder
-    private var emptyState: some View {
-        if viewModel.duration == 0 {
-            Text("Import media to start")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(MotionaryTheme.textSecondary)
-        }
-    }
 }
 
 private struct TimelineRulerOverlay: View {

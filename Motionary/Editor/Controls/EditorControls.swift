@@ -12,24 +12,13 @@ struct CoreToolBar: View {
     @Binding var activePanel: CoreEditorPanel
     @Binding var propertyContextClipID: UUID?
     @Binding var graphReturnPanel: CoreEditorPanel
+    @State private var extractableMediaID: MediaID?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                if canReplaceSelectedMedia {
-                    PhotosPicker(
-                        selection: $selectedReplacementItem,
-                        matching: .any(of: [.images, .videos])
-                    ) {
-                        CoreToolButtonContent(
-                            systemName: "arrow.triangle.2.circlepath",
-                            title: "Replace",
-                            isProminent: true
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isImporting)
-                    .accessibilityLabel("Replace selected media")
+                if let selectedItem = viewModel.selectedTimelineItem {
+                    selectedLayerTool(for: selectedItem)
                 } else {
                     PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
                         CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
@@ -37,132 +26,121 @@ struct CoreToolBar: View {
                     .buttonStyle(.plain)
                     .disabled(viewModel.isImporting)
                     .accessibilityLabel("Import media")
-                }
 
-                if viewModel.selectedClip?.shape != nil {
-                    CoreToolButton(
-                        systemName: "slider.horizontal.3",
-                        title: "Edit",
-                        isSelected: activePanel == .shape
-                    ) {
-                        propertyContextClipID = viewModel.selectedClipID
-                        activePanel = activePanel == .shape ? .timeline : .shape
-                    }
-                } else {
                     ShapeToolMenu(viewModel: viewModel)
-                }
-                
-                AudioImportMenu(
-                    viewModel: viewModel,
-                    isAudioVideoPickerPresented: $isAudioVideoPickerPresented,
-                    isAudioFileImporterPresented: $isAudioFileImporterPresented
-                )
 
-//                CoreToolButton(
-//                    systemName: "plus.square.dashed",
-//                    title: "Layer"
-//                ) {
-//                    viewModel.addLayer()
-//                }
-                
-                Divider()
-                    .frame(height: 38)
-                    .overlay(Color.white.opacity(0.14))
-                
-                CoreToolButton(
-                    systemName: propertyToolSystemName(for: .transform, fallback: "crop.rotate"),
-                    title: propertyToolTitle(for: .transform, fallback: "Transform"),
-                    isSelected: isPropertyToolSelected(.transform),
-                    isDisabled: isVisualToolDisabled
-                ) {
-                    if activePanel == .graph, graphReturnPanel == .transform {
-                        viewModel.graphSegment = nil
-                        activePanel = .transform
-                        return
+                    CoreToolButton(systemName: "textformat", title: "Text") {
+                        guard let itemID = viewModel.addText() else { return }
+                        propertyContextClipID = itemID
+                        activePanel = .text
                     }
-                    if let selectedClipID = viewModel.selectedClipID {
-                        propertyContextClipID = selectedClipID
-                    }
-                    activePanel = activePanel == .transform ? .timeline : .transform
-                }
-                
-                CoreToolButton(
-                    systemName: "scissors",
-                    title: "Split",
-                    isDisabled: viewModel.selectedClip == nil
-                ) {
-                    if let splitClipID = viewModel.splitSelectedClip(),
-                        activePanel.isPropertyPanel
-                    {
-                        propertyContextClipID = splitClipID
-                    }
+                    .accessibilityLabel("Add text")
+
+                    AudioImportMenu(
+                        viewModel: viewModel,
+                        isAudioVideoPickerPresented: $isAudioVideoPickerPresented,
+                        isAudioFileImporterPresented: $isAudioFileImporterPresented
+                    )
                 }
 
-                CoreToolButton(
-                    systemName: "trash",
-                    title: "Delete",
-                    isDisabled: viewModel.selectedClip == nil
-                ) {
-                    viewModel.deleteSelectedClip()
-                }
-                
-                CoreToolButton(
-                    systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
-                    title: propertyToolTitle(for: .adjust, fallback: "Adjust"),
-                    isSelected: isPropertyToolSelected(.adjust),
-                    isDisabled: isVisualToolDisabled
-                ) {
-                    if activePanel == .graph, graphReturnPanel == .adjust {
-                        viewModel.graphSegment = nil
-                        activePanel = .adjust
-                        return
-                    }
-                    if let selectedClipID = viewModel.selectedClipID {
-                        propertyContextClipID = selectedClipID
-                    }
-                    activePanel = activePanel == .adjust ? .timeline : .adjust
-                }
+                if viewModel.selectedTimelineItem != nil {
+                    Divider()
+                        .frame(height: 38)
+                        .overlay(Color.white.opacity(0.14))
 
-                CoreToolButton(
-                    systemName: propertyToolSystemName(for: .effects, fallback: "sparkles.2"),
-                    title: propertyToolTitle(for: .effects, fallback: "Effects"),
-                    isSelected: isPropertyToolSelected(.effects),
-                    isDisabled: isVisualToolDisabled
-                ) {
-                    if activePanel == .graph, graphReturnPanel == .effects {
-                        viewModel.graphSegment = nil
-                        activePanel = .effects
-                        return
+                    if isTextSelected {
+                        CoreToolButton(
+                            systemName: "textformat.size",
+                            title: "Type",
+                            isSelected: activePanel == .textType
+                        ) {
+                            openTextPanel(.textType)
+                        }
+                        CoreToolButton(
+                            systemName: "paintbrush",
+                            title: "Style",
+                            isSelected: activePanel == .textStyle
+                        ) {
+                            openTextPanel(.textStyle)
+                        }
+                        CoreToolButton(
+                            systemName: "sparkles",
+                            title: "Motion",
+                            isSelected: activePanel == .textMotion || activePanel == .textMotionGraph
+                        ) {
+                            openTextPanel(.textMotion)
+                        }
                     }
-                    if let selectedClipID = viewModel.selectedClipID {
-                        propertyContextClipID = selectedClipID
-                    }
-                    activePanel = activePanel == .effects ? .timeline : .effects
-                }
 
-                CoreToolButton(
-                    systemName: propertyToolSystemName(for: .audio, fallback: "speaker.wave.2"),
-                    title: propertyToolTitle(for: .audio, fallback: "Audio"),
-                    isSelected: isPropertyToolSelected(.audio),
-                    isDisabled: !hasAudioControls
-                ) {
-                    if activePanel == .graph, graphReturnPanel == .audio {
-                        viewModel.graphSegment = nil
-                        activePanel = .audio
-                        return
+                    if supportsTransform {
+                        CoreToolButton(
+                            systemName: propertyToolSystemName(for: .transform, fallback: "crop.rotate"),
+                            title: propertyToolTitle(for: .transform, fallback: "Transform"),
+                            isSelected: isPropertyToolSelected(.transform)
+                        ) {
+                            if activePanel == .graph, graphReturnPanel == .transform {
+                                viewModel.graphSegment = nil
+                                activePanel = .transform
+                                return
+                            }
+                            propertyContextClipID = viewModel.selectedTimelineItemID
+                            activePanel = activePanel == .transform ? .timeline : .transform
+                        }
                     }
-                    if let selectedClipID = viewModel.selectedClipID {
-                        propertyContextClipID = selectedClipID
-                    }
-                    activePanel = activePanel == .audio ? .timeline : .audio
-                }
 
-                CoreToolButton(
-                    systemName: "plus.square.on.square",
-                    title: "Duplicate",
-                    isDisabled: viewModel.selectedClip == nil
-                ) {
-                    viewModel.duplicateSelectedClip()
+                    CoreToolButton(systemName: "scissors", title: "Split") {
+                        if let splitClipID = viewModel.splitSelectedClip(),
+                            activePanel.isPropertyPanel
+                        {
+                            propertyContextClipID = splitClipID
+                        }
+                    }
+
+                    CoreToolButton(systemName: "trash", title: "Delete") {
+                        viewModel.deleteSelectedClip()
+                    }
+
+                    if canExtractAudioFromSelectedClip {
+                        CoreToolButton(
+                            systemName: "waveform.badge.plus",
+                            title: "Extract"
+                        ) {
+                            viewModel.extractAudioFromSelectedClip()
+                        }
+                        .accessibilityLabel("Extract audio")
+                    }
+
+                    if supportsVisualAdjustments {
+                        CoreToolButton(
+                            systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
+                            title: propertyToolTitle(for: .adjust, fallback: "Adjust"),
+                            isSelected: isPropertyToolSelected(.adjust)
+                        ) {
+                            openPropertyPanel(.adjust)
+                        }
+
+                        CoreToolButton(
+                            systemName: propertyToolSystemName(for: .effects, fallback: "sparkles.2"),
+                            title: propertyToolTitle(for: .effects, fallback: "Effects"),
+                            isSelected: isPropertyToolSelected(.effects)
+                        ) {
+                            openPropertyPanel(.effects)
+                        }
+                    }
+
+                    if hasAudioControls && !isAudioSelected {
+                        CoreToolButton(
+                            systemName: propertyToolSystemName(for: .audio, fallback: "speaker.wave.2"),
+                            title: propertyToolTitle(for: .audio, fallback: "Audio"),
+                            isSelected: isPropertyToolSelected(.audio)
+                        ) {
+                            openPropertyPanel(.audio)
+                        }
+                    }
+
+                    CoreToolButton(systemName: "plus.square.on.square", title: "Duplicate") {
+                        viewModel.duplicateSelectedClip()
+                    }
                 }
 
                 Divider()
@@ -176,28 +154,151 @@ struct CoreToolBar: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .motionaryGlass(cornerRadius: 20)
+        .task(id: audioExtractionTaskID) {
+            await refreshAudioExtractionAvailability()
+        }
     }
 
     private func isPropertyToolSelected(_ panel: CoreEditorPanel) -> Bool {
         activePanel == panel || (activePanel == .graph && graphReturnPanel == panel)
     }
 
-    private var hasAudioControls: Bool {
-        let clip = viewModel.selectedClip
-            ?? propertyContextClipID.flatMap { viewModel.project.clip(id: $0) }
-        return clip?.mediaType == .audio || clip?.mediaType == .video
-    }
-
-    private var canReplaceSelectedMedia: Bool {
-        guard let clip = viewModel.selectedClip else { return false }
-        return clip.mediaType != .audio && clip.shape == nil
-    }
-
-    private var isVisualToolDisabled: Bool {
-        guard let clip = viewModel.selectedClip ?? propertyContextClipID.flatMap({ viewModel.project.clip(id: $0) }) else {
-            return true
+    @ViewBuilder
+    private func selectedLayerTool(for item: TimelineItem) -> some View {
+        switch item {
+        case .media(let media) where media.mediaType == .audio:
+            CoreToolButton(
+                systemName: "waveform",
+                title: "Edit",
+                isSelected: true
+            ) {
+                openPropertyPanel(.audio)
+            }
+        case .media:
+            PhotosPicker(
+                selection: $selectedReplacementItem,
+                matching: .any(of: [.images, .videos])
+            ) {
+                CoreToolButtonContent(
+                    systemName: "arrow.triangle.2.circlepath",
+                    title: "Replace",
+                    isProminent: true
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.isImporting)
+            .accessibilityLabel("Replace selected media")
+        case .shape:
+            CoreToolButton(
+                systemName: "slider.horizontal.3",
+                title: "Edit",
+                isSelected: true
+            ) {
+                propertyContextClipID = viewModel.selectedTimelineItemID
+                activePanel = activePanel == .shape ? .timeline : .shape
+            }
+        case .text:
+            CoreToolButton(
+                systemName: "pencil",
+                title: "Edit",
+                isSelected: true
+            ) {
+                propertyContextClipID = viewModel.selectedTimelineItemID
+                activePanel = activePanel == .text ? .timeline : .text
+            }
+        case .caption, .adjustment, .compound:
+            EmptyView()
         }
-        return clip.mediaType == .audio
+    }
+
+    private var hasAudioControls: Bool {
+        guard case .media(let item) = viewModel.selectedTimelineItem else { return false }
+        return item.mediaType == .audio || item.mediaType == .video
+    }
+
+    private var isTextSelected: Bool {
+        guard case .text = viewModel.selectedTimelineItem else { return false }
+        return true
+    }
+
+    private var isAudioSelected: Bool {
+        guard case .media(let item) = viewModel.selectedTimelineItem else { return false }
+        return item.mediaType == .audio
+    }
+
+    private var audioExtractionCandidate: TimelineClip? {
+        guard let clip = viewModel.selectedClip,
+            clip.mediaType == .video,
+            let location = viewModel.project.clipLocation(id: clip.id),
+            viewModel.project.tracks[location.track].kind != .audio
+        else { return nil }
+        return clip
+    }
+
+    private var audioExtractionTaskID: String {
+        audioExtractionCandidate?.mediaID.rawValue.uuidString ?? "none"
+    }
+
+    private var canExtractAudioFromSelectedClip: Bool {
+        guard let clip = audioExtractionCandidate else { return false }
+        return extractableMediaID == clip.mediaID
+    }
+
+    private func refreshAudioExtractionAvailability() async {
+        extractableMediaID = nil
+        guard let clip = audioExtractionCandidate else { return }
+        let storedURL = viewModel.project.mediaURL(for: clip)
+        let url = viewModel.projectStore.resolvedMediaURL(
+            storedURL,
+            projectID: viewModel.projectID
+        )
+        guard let metadata = try? await MediaAssetCache.shared.metadata(for: url),
+            !Task.isCancelled,
+            metadata.audioTrack != nil,
+            audioExtractionCandidate?.mediaID == clip.mediaID
+        else { return }
+        extractableMediaID = clip.mediaID
+    }
+
+    private var supportsTransform: Bool {
+        switch viewModel.selectedTimelineItem {
+        case .media(let item):
+            item.mediaType != .audio
+        case .shape, .text:
+            true
+        default:
+            false
+        }
+    }
+
+    private var supportsVisualAdjustments: Bool {
+        switch viewModel.selectedTimelineItem {
+        case .media(let item):
+            item.mediaType != .audio
+        case .shape:
+            true
+        default:
+            false
+        }
+    }
+
+    private func openTextPanel(_ panel: CoreEditorPanel) {
+        propertyContextClipID = viewModel.selectedTimelineItemID
+        if panel == .textMotion, activePanel == .textMotionGraph {
+            activePanel = .textMotion
+            return
+        }
+        activePanel = activePanel == panel ? .timeline : panel
+    }
+
+    private func openPropertyPanel(_ panel: CoreEditorPanel) {
+        if activePanel == .graph, graphReturnPanel == panel {
+            viewModel.graphSegment = nil
+            activePanel = panel
+            return
+        }
+        propertyContextClipID = viewModel.selectedTimelineItemID
+        activePanel = activePanel == panel ? .timeline : panel
     }
 
     private func propertyToolSystemName(
@@ -250,13 +351,6 @@ private struct AudioImportMenu: View {
             } label: {
                 Label("From Video Library", systemImage: "photo.on.rectangle")
             }
-
-            Button {
-                viewModel.extractAudioFromSelectedClip()
-            } label: {
-                Label("Extract Selected Video", systemImage: "waveform.badge.plus")
-            }
-            .disabled(viewModel.selectedClip?.mediaType != .video)
 
             Button {
                 isAudioFileImporterPresented = true

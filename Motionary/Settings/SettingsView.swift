@@ -16,6 +16,8 @@ struct SettingsView: View {
     private var exportCodec = AppPreferences.defaultExportCodec
     @AppStorage(AppPreferences.exportContainerKey)
     private var exportContainer = AppPreferences.defaultExportContainer
+    @AppStorage(AppPreferences.duplicateClipsToNewLayerKey)
+    private var duplicateClipsToNewLayer = AppPreferences.defaultDuplicateClipsToNewLayer
 
     @State private var isResetConfirmationPresented = false
 
@@ -36,6 +38,20 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("New projects")
+                }
+
+                Section {
+                    Toggle(isOn: $duplicateClipsToNewLayer) {
+                        SettingsLabel(
+                            "Duplicate to new layer",
+                            systemImage: "square.stack.3d.up",
+                            colors: [.purple]
+                        )
+                    }
+                } header: {
+                    Text("Timeline")
+                } footer: {
+                    Text("Places duplicated clips on a new layer at the same time position.")
                 }
 
                 Section {
@@ -98,6 +114,13 @@ struct SettingsView: View {
                     HStack {
                         Link(destination: URL(string: "https://moysoft.com/privacy")!) {
                             SettingsLabel("Privacy", systemImage: "hand.raised.fill", colors: [.blue])
+                        }
+                        Spacer()
+                        Image(systemName: "arrow.up.forward")
+                    }
+                    HStack {
+                        Link(destination: URL(string: "https://moysoft.com/en/community")!) {
+                            SettingsLabel("Community Standards", systemImage: "person.2.badge.gearshape.fill", colors: [.blue])
                         }
                         Spacer()
                         Image(systemName: "arrow.up.forward")
@@ -177,6 +200,7 @@ struct SettingsView: View {
         exportQuality = AppPreferences.defaultExportQuality
         exportCodec = AppPreferences.defaultExportCodec
         exportContainer = AppPreferences.defaultExportContainer
+        duplicateClipsToNewLayer = AppPreferences.defaultDuplicateClipsToNewLayer
     }
 }
 

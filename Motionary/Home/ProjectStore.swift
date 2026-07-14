@@ -47,6 +47,35 @@ final class ProjectStore: ObservableObject {
         deleteContent(for: id)
     }
 
+    func finalizeRename(projectID: UUID) {
+        guard let index = projects.firstIndex(where: { $0.id == projectID }) else { return }
+        let trimmedTitle = projects[index].title
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = trimmedTitle.isEmpty ? "Untitled Project" : trimmedTitle
+        projects[index].title = title
+        projects[index].updatedAt = Date()
+        sortProjectsByLastEdited()
+
+        let repository = repository
+        Task {
+            do {
+                _ = try await repository.load(
+                    projectID: projectID,
+                    preferredTitle: title
+                )
+            } catch ProjectRepositoryError.missingContent {
+                try? await repository.save(
+                    ProjectContent(editorProject: EditorProject.empty(title: title)),
+                    projectID: projectID
+                )
+            } catch {
+                AppLogger.persistence.error(
+                    "Failed to synchronize renamed project: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
     private func load() {
         isLoading = true
         defer { isLoading = false }

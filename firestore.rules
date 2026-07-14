@@ -12,6 +12,29 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.enabled == true;
     }
 
+    function isBanned() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/bannedSuggestionUsers/$(request.auth.uid));
+    }
+
+    function validSuggestion(data) {
+      return data.keys().hasOnly([
+          'title', 'description', 'normalizedTitle', 'normalizationKey',
+          'ownerID', 'votes', 'votedUsers', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.title is string
+        && data.title.size() >= 4
+        && data.title.size() <= 100
+        && data.description is string
+        && data.description.size() >= 10
+        && data.description.size() <= 2000
+        && data.normalizedTitle is string
+        && data.normalizedTitle.size() >= 1
+        && data.normalizedTitle.size() <= 100
+        && data.normalizationKey is string
+        && data.normalizationKey.size() == 64;
+    }
+
     match /admins/{userID} {
       allow read: if signedIn() && userID == request.auth.uid;
       allow write: if false;
@@ -20,17 +43,41 @@ service cloud.firestore {
     match /suggestions/{suggestionID} {
       allow read: if signedIn();
       allow create: if isAdmin() || (signedIn()
-        && request.resource.data.ownerID == request.auth.uid);
-      allow update: if isAdmin() || (signedIn() && (
+        && !isBanned()
+        && request.resource.data.ownerID == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          'title', 'description', 'normalizedTitle', 'normalizationKey',
+          'ownerID', 'votes', 'status', 'createdAt', 'updatedAt'
+        ])
+        && validSuggestion(request.resource.data)
+        && request.resource.data.votes == 1
+        && request.resource.data.status == 'approved'
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && getAfter(/databases/$(database)/documents/suggestionCooldowns/$(request.auth.uid)).data.lastSubmittedAt == request.time
+        && (!exists(/databases/$(database)/documents/suggestionCooldowns/$(request.auth.uid))
+          || request.time >= get(/databases/$(database)/documents/suggestionCooldowns/$(request.auth.uid)).data.lastSubmittedAt + duration.value(20, 'm'))
+        && getAfter(/databases/$(database)/documents/suggestions/$(suggestionID)/votes/$(request.auth.uid)).data.userID == request.auth.uid);
+      allow update: if isAdmin() || (signedIn() && !isBanned() && (
         (resource.data.ownerID == request.auth.uid
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'title', 'description', 'normalizedTitle', 'normalizationKey', 'updatedAt'
-          ]))
+          ])
+          && validSuggestion(request.resource.data)
+          && request.resource.data.updatedAt == request.time)
         || ((request.resource.data.votes == resource.data.votes + 1
           || request.resource.data.votes == resource.data.votes - 1)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'votes', 'updatedAt'
-          ]))
+          ])
+          && request.resource.data.votes >= 0
+          && request.resource.data.updatedAt == request.time
+          && (
+            (request.resource.data.votes == resource.data.votes + 1
+              && getAfter(/databases/$(database)/documents/suggestions/$(suggestionID)/votes/$(request.auth.uid)).data.userID == request.auth.uid)
+            || (request.resource.data.votes == resource.data.votes - 1
+              && !existsAfter(/databases/$(database)/documents/suggestions/$(suggestionID)/votes/$(request.auth.uid)))
+          ))
       ));
       allow delete: if isAdmin() || (signedIn()
         && resource.data.ownerID == request.auth.uid);
@@ -41,8 +88,11 @@ service cloud.firestore {
           || get(/databases/$(database)/documents/suggestions/$(suggestionID)).data.ownerID == request.auth.uid
         ));
         allow create: if signedIn()
+          && !isBanned()
           && userID == request.auth.uid
-          && request.resource.data.userID == request.auth.uid;
+          && request.resource.data.keys().hasOnly(['userID', 'createdAt'])
+          && request.resource.data.userID == request.auth.uid
+          && request.resource.data.createdAt == request.time;
         allow delete: if isAdmin() || (signedIn() && (
           userID == request.auth.uid
           || get(/databases/$(database)/documents/suggestions/$(suggestionID)).data.ownerID == request.auth.uid
@@ -53,21 +103,56 @@ service cloud.firestore {
 
     match /suggestionKeys/{key} {
       allow read: if signedIn();
-      allow create, update: if signedIn()
-        && request.resource.data.ownerID == request.auth.uid;
+      allow create: if signedIn()
+        && !isBanned()
+        && request.resource.data.keys().hasOnly(['suggestionID', 'ownerID', 'createdAt'])
+        && request.resource.data.ownerID == request.auth.uid
+        && request.resource.data.suggestionID is string
+        && request.resource.data.createdAt == request.time;
+      allow update: if isAdmin();
       allow delete: if isAdmin() || (signedIn()
         && resource.data.ownerID == request.auth.uid);
     }
 
     match /suggestionCooldowns/{userID} {
-      allow read, create, update, delete: if isAdmin() || (signedIn()
-        && userID == request.auth.uid);
+      allow read, delete: if isAdmin() || (signedIn() && userID == request.auth.uid);
+      allow create: if isAdmin() || (signedIn()
+        && userID == request.auth.uid
+        && request.resource.data.keys().hasOnly(['ownerID', 'lastSubmittedAt'])
+        && request.resource.data.ownerID == request.auth.uid
+        && request.resource.data.lastSubmittedAt == request.time);
+      allow update: if isAdmin() || (signedIn()
+        && userID == request.auth.uid
+        && request.resource.data.keys().hasOnly(['ownerID', 'lastSubmittedAt'])
+        && resource.data.ownerID == request.auth.uid
+        && request.resource.data.ownerID == request.auth.uid
+        && request.resource.data.lastSubmittedAt == request.time
+        && request.time >= resource.data.lastSubmittedAt + duration.value(20, 'm'));
     }
 
     match /suggestionReports/{reportID} {
       allow create: if signedIn()
-        && request.resource.data.reporterID == request.auth.uid;
+        && !isBanned()
+        && request.resource.data.keys().hasOnly([
+          'suggestionID', 'reporterID', 'reason', 'details', 'createdAt', 'status'
+        ])
+        && reportID == request.resource.data.suggestionID + '_' + request.auth.uid
+        && request.resource.data.reporterID == request.auth.uid
+        && request.resource.data.reason in [
+          'spam', 'abusive', 'harassment', 'hate', 'sexual', 'violence',
+          'personalInformation', 'illegal', 'duplicate', 'other'
+        ]
+        && (!request.resource.data.keys().hasAny(['details'])
+          || (request.resource.data.details is string
+            && request.resource.data.details.size() <= 1000))
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt == request.time
+        && get(/databases/$(database)/documents/suggestions/$(request.resource.data.suggestionID)).data.ownerID != request.auth.uid;
       allow read, update, delete: if isAdmin();
+    }
+
+    match /bannedSuggestionUsers/{userID} {
+      allow read, create, update, delete: if isAdmin();
     }
   }
 }

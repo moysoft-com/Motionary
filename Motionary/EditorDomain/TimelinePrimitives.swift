@@ -14,6 +14,7 @@ enum TrackKind: String, Codable, CaseIterable {
     case undefined
     case visual
     case shape
+    case text
     case audio
 }
 
@@ -97,7 +98,7 @@ struct Keyframe<Value: Codable & Equatable>: Identifiable, Codable, Equatable {
 }
 
 /// Normalized control point used by a cubic Bézier keyframe segment.
-struct KeyframeControlPoint: Codable, Equatable {
+struct KeyframeControlPoint: Codable, Equatable, Sendable {
     var x: Double
     var y: Double
 
@@ -121,7 +122,7 @@ struct KeyframeControlPoint: Codable, Equatable {
 }
 
 /// Interpolation used from one keyframe to the following keyframe.
-enum KeyframeInterpolation: Codable, Equatable {
+enum KeyframeInterpolation: Codable, Equatable, Sendable {
     case linear
     case hold
     case cubicBezier(control1: KeyframeControlPoint, control2: KeyframeControlPoint)
@@ -190,7 +191,7 @@ enum KeyframeInterpolation: Codable, Equatable {
 }
 
 /// Built-in easing choices shown by the graph editor.
-enum KeyframeCurvePreset: String, CaseIterable, Identifiable {
+enum KeyframeCurvePreset: String, CaseIterable, Identifiable, Codable, Sendable {
     case linear
     case easeIn
     case easeOut

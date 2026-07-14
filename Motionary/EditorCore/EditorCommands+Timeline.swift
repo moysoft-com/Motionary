@@ -41,66 +41,41 @@ struct ReplaceClipMediaCommand: EditorCommand {
 
 struct SplitClipCommand: EditorCommand {
     let trackID: UUID
-    let originalClip: TimelineClip
-    let first: TimelineClip
-    let second: TimelineClip
+    let originalItem: TimelineItem
+    let first: TimelineItem
+    let second: TimelineItem
     let invalidation: EditorInvalidation
 
     func apply(to project: inout EditorProject) {
         guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }),
-            let itemIndex = project.tracks[trackIndex].itemIndex(id: originalClip.id)
+            let itemIndex = project.tracks[trackIndex].itemIndex(id: originalItem.id)
         else { return }
-        project.tracks[trackIndex].replaceLegacyClip(id: first.id, with: first)
-        project.tracks[trackIndex].insertLegacyClip(second, at: itemIndex + 1)
+        project.tracks[trackIndex].items[itemIndex] = first
+        project.tracks[trackIndex].items.insert(second, at: itemIndex + 1)
+        project.tracks[trackIndex].sortItems()
         project.synchronizeMediaLibrary()
     }
 
     func undo(on project: inout EditorProject) {
         guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
         _ = project.tracks[trackIndex].removeItem(id: second.id)
-        project.tracks[trackIndex].replaceLegacyClip(id: first.id, with: originalClip)
-        project.synchronizeMediaLibrary()
-    }
-}
-
-struct RemoveClipCommand: EditorCommand {
-    let removedTrack: TimelineTrack?
-    let trackIndex: Int
-    let itemIndex: Int
-    let item: TimelineItem
-    let invalidation: EditorInvalidation
-
-    func apply(to project: inout EditorProject) {
-        guard project.tracks.indices.contains(trackIndex) else { return }
-        project.tracks[trackIndex].items.remove(at: itemIndex)
-        if project.tracks[trackIndex].items.isEmpty {
-            project.tracks.remove(at: trackIndex)
-        }
-        project.synchronizeMediaLibrary()
-    }
-
-    func undo(on project: inout EditorProject) {
-        if let removedTrack {
-            project.tracks.insert(removedTrack, at: min(trackIndex, project.tracks.count))
-        } else if project.tracks.indices.contains(trackIndex) {
-            project.tracks[trackIndex].items.insert(
-                item,
-                at: min(itemIndex, project.tracks[trackIndex].items.count)
-            )
-        }
+        guard let firstIndex = project.tracks[trackIndex].itemIndex(id: first.id) else { return }
+        project.tracks[trackIndex].items[firstIndex] = originalItem
+        project.tracks[trackIndex].sortItems()
         project.synchronizeMediaLibrary()
     }
 }
 
 struct DuplicateClipCommand: EditorCommand {
     let trackID: UUID
-    let copy: TimelineClip
+    let copy: TimelineItem
     let insertIndex: Int
     let invalidation: EditorInvalidation
 
     func apply(to project: inout EditorProject) {
         guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
-        project.tracks[trackIndex].insertLegacyClip(copy, at: insertIndex)
+        project.tracks[trackIndex].items.insert(copy, at: min(max(insertIndex, 0), project.tracks[trackIndex].items.count))
+        project.tracks[trackIndex].sortItems()
         project.synchronizeMediaLibrary()
     }
 
@@ -145,16 +120,16 @@ struct PlaceClipCommand: EditorCommand {
 }
 
 struct TrimClipCommand: EditorCommand {
-    let before: TimelineClip
-    let after: TimelineClip
+    let before: TimelineItem
+    let after: TimelineItem
     let invalidation: EditorInvalidation
 
     func apply(to project: inout EditorProject) {
-        project.replaceClip(id: after.id, with: after)
+        project.replaceItem(id: after.id, with: after)
     }
 
     func undo(on project: inout EditorProject) {
-        project.replaceClip(id: before.id, with: before)
+        project.replaceItem(id: before.id, with: before)
     }
 }
 
@@ -234,11 +209,25 @@ enum EditorCommandFactory {
     }
 
     static func replaceClip(
+        before: TimelineItem,
+        after: TimelineItem,
+        invalidation: EditorInvalidation
+    ) -> AnyEditorCommand {
+        AnyEditorCommand(ReplaceClipCommand(before: before, after: after, invalidation: invalidation))
+    }
+
+    /// Keeps existing media/shape callers source-compatible while the command
+    /// itself operates on the shared typed timeline-item representation.
+    static func replaceClip(
         before: TimelineClip,
         after: TimelineClip,
         invalidation: EditorInvalidation
     ) -> AnyEditorCommand {
-        AnyEditorCommand(ReplaceClipCommand(before: before, after: after, invalidation: invalidation))
+        replaceClip(
+            before: .fromLegacyClip(before),
+            after: .fromLegacyClip(after),
+            invalidation: invalidation
+        )
     }
 
     static func trackStructure(

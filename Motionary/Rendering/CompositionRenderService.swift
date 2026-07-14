@@ -32,6 +32,7 @@ struct RenderedComposition {
     var audioMix: AVAudioMix?
     var duration: Double
     var hasVideo: Bool
+    var videoClockTrackID: CMPersistentTrackID?
     var visualTrackIDs: [UUID: CMPersistentTrackID] = [:]
     var audioTrackIDs: [UUID: CMPersistentTrackID] = [:]
     var sourceTransforms: [UUID: CGAffineTransform] = [:]
@@ -75,6 +76,7 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
     init(
         timeRange: CMTimeRange,
         clips: [RenderClipDescriptor],
+        sourceTrackIDs: [CMPersistentTrackID],
         renderSize: CGSize,
         renderScale: CGFloat,
         backgroundColor: RGBAColor
@@ -85,7 +87,9 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         self.renderSize = renderSize
         self.renderScale = renderScale
         self.backgroundColor = backgroundColor
-        self.requiredSourceTrackIDs = clips.map { NSNumber(value: $0.trackID) }
+        self.requiredSourceTrackIDs = sourceTrackIDs
+            .filter { $0 != kCMPersistentTrackID_Invalid }
+            .map { NSNumber(value: $0) }
         super.init()
     }
 
@@ -297,6 +301,10 @@ final class CompositionRenderService {
                 renderScale: CGFloat(renderSettings.width)
                     / CGFloat(max(project.renderSettings.width, 1)),
                 clips: descriptors,
+                sourceTrackIDs: sourceTrackIDs(
+                    for: descriptors,
+                    videoClockTrackID: graph.rendered.videoClockTrackID
+                ),
                 duration: project.duration
             )
             : graph.rendered.videoComposition
@@ -317,6 +325,7 @@ final class CompositionRenderService {
                 audioMix: audioMix,
                 duration: project.duration,
                 hasVideo: graph.rendered.hasVideo,
+                videoClockTrackID: graph.rendered.videoClockTrackID,
                 visualTrackIDs: graph.rendered.visualTrackIDs,
                 audioTrackIDs: graph.rendered.audioTrackIDs,
                 sourceTransforms: graph.rendered.sourceTransforms
@@ -338,15 +347,28 @@ final class CompositionRenderService {
         excluding clipID: UUID
     ) async throws -> UIImage? {
         var backgroundProject = project
-        guard let location = backgroundProject.clipLocation(id: clipID) else { return nil }
-        backgroundProject.tracks[location.track].replaceLegacyClip(
-            id: clipID,
-            with: {
-                var clip = backgroundProject.tracks[location.track].clips[location.clip]
-                clip.transform.opacity = AnimatableProperty(baseValue: 0)
-                return clip
-            }()
-        )
+        guard let item = backgroundProject.item(id: clipID) else { return nil }
+        let hiddenItem: TimelineItem
+        switch item {
+        case .media(var media):
+            media.visuals.transform.opacity = AnimatableProperty(baseValue: 0)
+            hiddenItem = .media(media)
+        case .shape(var shape):
+            shape.visuals.transform.opacity = AnimatableProperty(baseValue: 0)
+            hiddenItem = .shape(shape)
+        case .text(var text):
+            text.visuals.transform.opacity = AnimatableProperty(baseValue: 0)
+            hiddenItem = .text(text)
+        case .adjustment(var adjustment):
+            adjustment.visuals.transform.opacity = AnimatableProperty(baseValue: 0)
+            hiddenItem = .adjustment(adjustment)
+        case .compound(var compound):
+            compound.visuals.transform.opacity = AnimatableProperty(baseValue: 0)
+            hiddenItem = .compound(compound)
+        case .caption:
+            return nil
+        }
+        backgroundProject.replaceItem(id: clipID, with: hiddenItem)
 
         let renderSettings = previewRenderSettings(for: project.renderSettings, quality: .balanced)
         let rendered = try await makeComposition(
@@ -385,9 +407,10 @@ final class CompositionRenderService {
         var audioTrackIDs: [UUID: CMPersistentTrackID] = [:]
         var sourceTransforms: [UUID: CGAffineTransform] = [:]
         var renderOrder = 0
+        var videoClockTrackID: CMPersistentTrackID?
 
         let visualTracks = project.tracks.filter {
-            ($0.kind == .visual || $0.kind == .shape) && !$0.isMuted
+            ($0.kind == .visual || $0.kind == .shape || $0.kind == .text) && !$0.isMuted
         }
         for track in visualTracks.reversed() {
             try Task.checkCancellation()
@@ -484,11 +507,24 @@ final class CompositionRenderService {
         }
 
         let duration = max(project.duration, 0)
+        if duration > 0,
+            renderClips.contains(where: { $0.text != nil })
+        {
+            videoClockTrackID = try await insertGeneratedVideoClock(
+                duration: duration,
+                frameRate: renderSettings.frameRate,
+                composition: composition
+            )
+        }
         let videoComposition = makeVideoComposition(
             renderSettings: renderSettings,
             renderScale: CGFloat(renderSettings.width)
                 / CGFloat(max(project.renderSettings.width, 1)),
             clips: renderClips,
+            sourceTrackIDs: sourceTrackIDs(
+                for: renderClips,
+                videoClockTrackID: videoClockTrackID
+            ),
             duration: duration
         )
 
@@ -498,6 +534,7 @@ final class CompositionRenderService {
             audioMix: makeAudioMix(parameters: audioParameters),
             duration: duration,
             hasVideo: !renderClips.isEmpty,
+            videoClockTrackID: videoClockTrackID,
             visualTrackIDs: visualTrackIDs,
             audioTrackIDs: audioTrackIDs,
             sourceTransforms: sourceTransforms
@@ -508,6 +545,7 @@ final class CompositionRenderService {
         renderSettings: RenderSettings,
         renderScale: CGFloat,
         clips: [RenderClipDescriptor],
+        sourceTrackIDs: [CMPersistentTrackID],
         duration: Double
     ) -> AVVideoComposition? {
         guard !clips.isEmpty, duration > 0 else { return nil }
@@ -520,12 +558,52 @@ final class CompositionRenderService {
             MotionaryVideoCompositionInstruction(
                 timeRange: CMTimeRange(start: .zero, duration: cmTime(duration)),
                 clips: clips,
+                sourceTrackIDs: sourceTrackIDs,
                 renderSize: renderSettings.size,
                 renderScale: renderScale,
                 backgroundColor: renderSettings.backgroundColor
             )
         ]
         return AVVideoComposition(configuration: configuration)
+    }
+
+    private func sourceTrackIDs(
+        for clips: [RenderClipDescriptor],
+        videoClockTrackID: CMPersistentTrackID?
+    ) -> [CMPersistentTrackID] {
+        var result = clips
+            .map(\.trackID)
+            .filter { $0 != kCMPersistentTrackID_Invalid }
+        if let videoClockTrackID {
+            result.append(videoClockTrackID)
+        }
+        return Array(Set(result)).sorted()
+    }
+
+    private func insertGeneratedVideoClock(
+        duration: Double,
+        frameRate: Int32,
+        composition: AVMutableComposition
+    ) async throws -> CMPersistentTrackID? {
+        let url = try await MediaConversionHelper.blankVideoClockURL(
+            duration: duration,
+            frameRate: frameRate
+        )
+        try Task.checkCancellation()
+        let metadata = try await assetCache.metadata(for: url)
+        try Task.checkCancellation()
+        guard let sourceTrack = metadata.videoTrack,
+            let destinationTrack = composition.addMutableTrack(
+                withMediaType: .video,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            )
+        else { return nil }
+        try destinationTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: cmTime(duration)),
+            of: sourceTrack,
+            at: .zero
+        )
+        return destinationTrack.trackID
     }
 
     private func previewRenderSettings(
@@ -769,7 +847,7 @@ final class CompositionRenderService {
         var descriptors: [RenderClipDescriptor] = []
         var renderOrder = 0
         let visualTracks = project.tracks.filter {
-            ($0.kind == .visual || $0.kind == .shape) && !$0.isMuted
+            ($0.kind == .visual || $0.kind == .shape || $0.kind == .text) && !$0.isMuted
         }
         for track in visualTracks.reversed() {
             for item in track.items.sorted(by: { $0.timelineStart < $1.timelineStart }) {

@@ -20,11 +20,55 @@ struct SuggestionsListView: View {
 
     private var feedSuggestions: [Suggestion] {
         viewModel.suggestions
+            .filter { !viewModel.isOwnerBlocked($0.ownerID) }
             .filter { selectedFilter.includes($0, currentUserID: viewModel.currentUserID) }
             .sorted(by: selectedSort.areInIncreasingOrder)
     }
 
     var body: some View {
+        presentedContent
+            .onAppear {
+                viewModel.listenToSuggestions()
+            }
+            .onChange(of: suggestionsRevision, initial: true) { _, _ in
+                stageSuggestionUpdate(feedSuggestions)
+            }
+            .onChange(of: selectedFilter) { _, _ in
+                stageSuggestionUpdate(feedSuggestions)
+            }
+            .onChange(of: selectedSort) { _, _ in
+                stageSuggestionUpdate(feedSuggestions)
+            }
+            .onChange(of: viewModel.blockedOwnerIDs) { _, _ in
+                stageSuggestionUpdate(feedSuggestions)
+            }
+            .onDisappear {
+                reorderTask?.cancel()
+            }
+            .confirmationDialog(
+                "Delete this suggestion?",
+                isPresented: deletionConfirmationBinding,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Suggestion", role: .destructive) {
+                    guard let pendingDeletion else { return }
+                    viewModel.deleteSuggestion(pendingDeletion)
+                    self.pendingDeletion = nil
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This cannot be undone.")
+            }
+            .alert(item: $viewModel.notice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+    }
+
+    private var suggestionsContent: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
                 SuggestionFilterBar(selectedFilter: $selectedFilter)
@@ -54,79 +98,81 @@ struct SuggestionsListView: View {
         .scrollIndicators(.hidden)
         .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
         .navigationTitle("Suggestions")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Picker("Sort", selection: $selectedSort) {
-                        ForEach(SuggestionSort.allCases) { sort in
-                            Label(sort.title, systemImage: sort.systemImage)
-                                .tag(sort)
-                        }
-                    }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down")
-                }
-                .accessibilityLabel("Sort suggestions")
-            }
+        .toolbar { suggestionsToolbar }
+    }
 
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { presentedSheet = .add } label: {
-                    Image(systemName: "plus")
+    @ToolbarContentBuilder
+    private var suggestionsToolbar: some ToolbarContent {
+        ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+                sortMenuContent
+            } label: {
+                Image(systemName: "arrow.up.arrow.down")
+            }
+            .accessibilityLabel("Sort suggestions")
+        }
+
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { presentedSheet = .add } label: {
+                Image(systemName: "plus")
+            }
+            .accessibilityLabel("Add suggestion")
+        }
+    }
+
+    @ViewBuilder
+    private var sortMenuContent: some View {
+        Section("Sort") {
+            Picker("Sort", selection: $selectedSort) {
+                ForEach(SuggestionSort.allCases) { sort in
+                    Label(sort.title, systemImage: sort.systemImage)
+                        .tag(sort)
                 }
-                .accessibilityLabel("Add suggestion")
             }
         }
-        .sheet(item: $presentedSheet) { destination in
-            switch destination {
-            case .add:
-                AddSuggestionView(viewModel: viewModel)
+
+        if !viewModel.blockedOwnerIDs.isEmpty {
+            Section("Safety") {
+                Button("Unblock All Users", systemImage: "person.crop.circle.badge.checkmark") {
+                    viewModel.unblockAllOwners()
+                    stageSuggestionUpdate(feedSuggestions)
+                }
             }
         }
-        .sheet(item: $editingSuggestion) { suggestion in
-            EditSuggestionView(suggestion: suggestion, viewModel: viewModel)
-        }
-        .fullScreenCover(item: $selectedSuggestion) { suggestion in
-            SuggestionDetailView(suggestion: suggestion, viewModel: viewModel)
-        }
-        .onAppear {
-            viewModel.listenToSuggestions()
-        }
-        .onChange(of: suggestionsRevision, initial: true) { _, _ in
-            stageSuggestionUpdate(feedSuggestions)
-        }
-        .onChange(of: selectedFilter) { _, _ in
-            stageSuggestionUpdate(feedSuggestions)
-        }
-        .onChange(of: selectedSort) { _, _ in
-            stageSuggestionUpdate(feedSuggestions)
-        }
-        .onDisappear {
-            reorderTask?.cancel()
-        }
-        .confirmationDialog(
-            "Delete this suggestion?",
-            isPresented: Binding(
-                get: { pendingDeletion != nil },
-                set: { if !$0 { pendingDeletion = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Delete Suggestion", role: .destructive) {
-                guard let pendingDeletion else { return }
-                viewModel.deleteSuggestion(pendingDeletion)
-                self.pendingDeletion = nil
+
+        Section("Community") {
+            Link(destination: SuggestionContentPolicy.communityURL) {
+                Label("Community Standards", systemImage: "checkmark.shield")
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This cannot be undone.")
+            if !viewModel.currentUserID.isEmpty {
+                ShareLink(item: viewModel.currentUserID) {
+                    Label("Share My Anonymous ID", systemImage: "person.text.rectangle")
+                }
+            }
         }
-        .alert(item: $viewModel.notice) { notice in
-            Alert(
-                title: Text(notice.title),
-                message: Text(notice.message),
-                dismissButton: .default(Text("OK"))
-            )
-        }
+    }
+
+    private var presentedContent: some View {
+        suggestionsContent
+            .sheet(item: $presentedSheet) { destination in
+                switch destination {
+                case .add:
+                    AddSuggestionView(viewModel: viewModel)
+                }
+            }
+            .sheet(item: $editingSuggestion) { suggestion in
+                EditSuggestionView(suggestion: suggestion, viewModel: viewModel)
+            }
+            .fullScreenCover(item: $selectedSuggestion) { suggestion in
+                SuggestionDetailView(suggestion: suggestion, viewModel: viewModel)
+            }
+    }
+
+    private var deletionConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { pendingDeletion != nil },
+            set: { if !$0 { pendingDeletion = nil } }
+        )
     }
 
     private func stageSuggestionUpdate(_ latest: [Suggestion]) {

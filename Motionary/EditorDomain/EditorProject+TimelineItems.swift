@@ -36,12 +36,15 @@ extension EditorProject {
             duration: duration
         )
         let destinationIndex: Int
-        if let trackIndex, tracks.indices.contains(trackIndex) {
+        if let trackIndex,
+            tracks.indices.contains(trackIndex),
+            tracks[trackIndex].canAcceptClipKind(.text)
+        {
             destinationIndex = trackIndex
-        } else if let existing = tracks.firstIndex(where: { $0.canAcceptClipKind(.visual) }) {
+        } else if let existing = tracks.firstIndex(where: { $0.canAcceptClipKind(.text) }) {
             destinationIndex = existing
         } else {
-            destinationIndex = insertFreshTrack(kind: .visual)
+            destinationIndex = insertFreshTrack(kind: .text)
         }
         tracks[destinationIndex].items.append(.text(item))
         tracks[destinationIndex].sortItems()

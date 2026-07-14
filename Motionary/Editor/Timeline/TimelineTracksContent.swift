@@ -9,6 +9,7 @@ struct TimelineTracksContent: View {
     @Binding var activeTrackDrag: TimelineTrackDragState?
     @Binding var activeTrimSnapTime: Double?
     @Binding var activeClipSnapKey: String?
+    @Binding var horizontalScrollOffset: CGFloat
     let contentWidth: CGFloat
     let contentHeight: CGFloat
     let containerHeight: CGFloat
@@ -43,12 +44,11 @@ struct TimelineTracksContent: View {
                     .allowsHitTesting(false)
             }
 
-            if let activeClipDrag,
-                let media = viewModel.project.mediaDescriptor(for: dragGhostClip(for: activeClipDrag))
-            {
-                TimelineClipBlock(
-                    clip: dragGhostClip(for: activeClipDrag),
-                    media: media,
+            if let activeClipDrag {
+                let ghostItem = dragGhostItem(for: activeClipDrag)
+                TimelineItemBlock(
+                    item: ghostItem,
+                    media: mediaDescriptor(for: ghostItem),
                     isSelected: activeClipDrag.selectedClipIDBeforeDrag == activeClipDrag.clipID,
                     isDragSourceHidden: false,
                     isDragGhost: true,
@@ -104,9 +104,9 @@ struct TimelineTracksContent: View {
 
         var involvedTrackIndices = [movingTrackIndex]
         for (index, track) in snapshot.tracks.enumerated() {
-            let containsSnapTarget = track.clips.contains { clip in
-                clip.id != movingClipID
-                    && (abs(clip.timelineStart - time) < 0.001 || abs(clip.timelineEnd - time) < 0.001)
+            let containsSnapTarget = track.items.contains { item in
+                item.id != movingClipID
+                    && (abs(item.timelineStart - time) < 0.001 || abs(item.timelineEnd - time) < 0.001)
             }
             if containsSnapTarget {
                 involvedTrackIndices.append(index)
@@ -122,14 +122,14 @@ struct TimelineTracksContent: View {
 
     private func trackIndex(containing clipID: UUID) -> Int? {
         viewModel.project.tracks.firstIndex { track in
-            track.clips.contains { $0.id == clipID }
+            track.items.contains { $0.id == clipID }
         }
     }
 
     private func trackRow(track: TimelineTrack, index: Int) -> some View {
         TimelineTrackRow(
             track: track,
-            clips: snapshot.clipsByTrackID[track.id] ?? [],
+            items: snapshot.itemsByTrackID[track.id] ?? [],
             trackIndex: index,
             trackCount: snapshot.tracks.count,
             selectedClipID: snapshot.selectedClipID,
@@ -140,9 +140,11 @@ struct TimelineTracksContent: View {
             projectDuration: snapshot.duration,
             pixelsPerSecond: pixelsPerSecond,
             centerPadding: centerPadding,
+            horizontalScrollOffset: horizontalScrollOffset,
             height: trackHeight,
             rowStride: trackHeight + rowSpacing,
             onSelectTrack: { viewModel.selectClip(nil, trackID: track.id) },
+            onTapEmptySpace: { viewModel.deselectTimeline() },
             onDeleteTrack: { viewModel.deleteLayer(track.id) },
             onSelectClip: { clipID in
                 viewModel.selectClip(clipID, trackID: track.id, revealInPreview: true)
@@ -153,8 +155,8 @@ struct TimelineTracksContent: View {
             onClipDragBegan: { clip in
                 beginClipDrag(clip, sourceTrackIndex: index, trackID: track.id)
             },
-            onClipDragChanged: { clip, translation in
-                updateClipDrag(clip, translation: translation)
+            onClipDragChanged: { clip, value in
+                updateClipDrag(clip, dragValue: value)
             },
             onClipDragEnded: { commit in
                 finishClipDrag(commit: commit)
@@ -194,15 +196,15 @@ struct TimelineTracksContent: View {
             onFinishInteractiveEdit: {
                 viewModel.finishInteractiveEdit()
             },
-            mediaForClip: { viewModel.project.mediaDescriptor(for: $0) },
+            mediaForItem: mediaDescriptor,
             onSnapGuideChanged: { time in
                 activeTrimSnapTime = time
             },
             onTrackDragBegan: {
                 beginTrackDrag(trackID: track.id, sourceIndex: index)
             },
-            onTrackDragChanged: { translation in
-                updateTrackDrag(trackID: track.id, translation: translation)
+            onTrackDragChanged: { value in
+                updateTrackDrag(trackID: track.id, translation: value.translation)
             },
             onTrackDragEnded: { commit in
                 finishTrackDrag(commit: commit)
@@ -210,13 +212,18 @@ struct TimelineTracksContent: View {
         )
     }
 
-    private func dragGhostClip(for drag: TimelineClipDragState) -> TimelineClip {
-        var clip = drag.clipSnapshot
-        clip.timelineStart = drag.resolvedPlacement.start
-        return clip
+    private func dragGhostItem(for drag: TimelineClipDragState) -> TimelineItem {
+        var item = drag.itemSnapshot
+        item.timelineStart = drag.resolvedPlacement.start
+        return item
     }
 
-    private func beginClipDrag(_ clip: TimelineClip, sourceTrackIndex: Int, trackID: UUID) {
+    private func mediaDescriptor(for item: TimelineItem) -> ClipMediaDescriptor? {
+        guard let clip = item.legacyClip() else { return nil }
+        return viewModel.project.mediaDescriptor(for: clip)
+    }
+
+    private func beginClipDrag(_ clip: TimelineItem, sourceTrackIndex: Int, trackID: UUID) {
         let previousClipID = viewModel.selectedClipID
         let previousTrackID = viewModel.selectedTrackID
         activeClipDrag = TimelineClipDragState(
@@ -229,19 +236,20 @@ struct TimelineTracksContent: View {
                 snapped: false,
                 snapTime: nil
             ),
-            clipSnapshot: clip,
+            itemSnapshot: clip,
             selectedClipIDBeforeDrag: previousClipID,
-            selectedTrackIDBeforeDrag: previousTrackID
+            selectedTrackIDBeforeDrag: previousTrackID,
+            fingerLocationInWindow: nil
         )
         viewModel.selectClip(clip.id, trackID: trackID)
         EditorHaptics.dragStart()
     }
 
-    private func updateClipDrag(_ clip: TimelineClip, translation: CGSize) {
+    private func updateClipDrag(_ clip: TimelineItem, dragValue: TimelineLongPressDragValue) {
         guard let currentDrag = activeClipDrag, currentDrag.clipID == clip.id else { return }
         let adjustedTranslation = CGSize(
-            width: translation.width + clipDragScrollOffset.width,
-            height: translation.height + clipDragScrollOffset.height
+            width: dragValue.translation.width + clipDragScrollOffset.width,
+            height: dragValue.translation.height + clipDragScrollOffset.height
         )
         let rawStart = currentDrag.startTimelineStart + Double(adjustedTranslation.width / max(pixelsPerSecond, 1))
         let targetIndex = targetTrackIndex(
@@ -262,9 +270,10 @@ struct TimelineTracksContent: View {
             sourceTrackIndex: currentDrag.sourceTrackIndex,
             startTimelineStart: currentDrag.startTimelineStart,
             resolvedPlacement: placement,
-            clipSnapshot: currentDrag.clipSnapshot,
+            itemSnapshot: currentDrag.itemSnapshot,
             selectedClipIDBeforeDrag: currentDrag.selectedClipIDBeforeDrag,
-            selectedTrackIDBeforeDrag: currentDrag.selectedTrackIDBeforeDrag
+            selectedTrackIDBeforeDrag: currentDrag.selectedTrackIDBeforeDrag,
+            fingerLocationInWindow: dragValue.locationInWindow
         )
     }
 

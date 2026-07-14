@@ -16,14 +16,13 @@ struct CorePreviewSection: View {
 
     var body: some View {
         ZStack {
-            if let player = viewModel.player {
-                GeometryReader { geometry in
-                    let ratio =
-                        CGFloat(viewModel.project.renderSettings.width)
-                        / CGFloat(max(viewModel.project.renderSettings.height, 1))
-                    let canvasRect = aspectFitRect(in: geometry.size, aspectRatio: ratio)
-                    let localCanvasRect = CGRect(origin: .zero, size: canvasRect.size)
+            GeometryReader { geometry in
+                let ratio =
+                    CGFloat(viewModel.project.renderSettings.width)
+                    / CGFloat(max(viewModel.project.renderSettings.height, 1))
+                let canvasRect = aspectFitRect(in: geometry.size, aspectRatio: ratio)
 
+                ZStack {
                     ZStack {
                         viewModel.project.renderSettings.backgroundColor.swiftUIColor
 
@@ -33,41 +32,24 @@ struct CorePreviewSection: View {
                                 viewModel.deselectTimeline()
                             }
 
-                        PreviewRendererView(player: player)
-                            .frame(width: canvasRect.width, height: canvasRect.height)
-                            .allowsHitTesting(false)
-
-                        PreviewTransformCanvas(
-                            viewModel: viewModel,
-                            canvasRect: localCanvasRect
-                        )
+                        if let player = viewModel.player {
+                            PreviewRendererView(player: player)
+                                .frame(width: canvasRect.width, height: canvasRect.height)
+                                .allowsHitTesting(false)
+                        }
                     }
                     .frame(width: canvasRect.width, height: canvasRect.height)
+                    .clipped()
                     .border(.gray.opacity(0.3), width: 0.5)
                     .position(x: canvasRect.midX, y: canvasRect.midY)
+
+                    PreviewTransformCanvas(
+                        viewModel: viewModel,
+                        canvasFrame: canvasRect
+                    )
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
-            } else {
-                ZStack {
-                    viewModel.project.renderSettings.backgroundColor.swiftUIColor
-                    VStack(spacing: 12) {
-                        Image(systemName: "film")
-                            .font(.system(size: 34, weight: .regular))
-                            .foregroundStyle(MotionaryTheme.accent)
-                        PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
-                            Label("Import Media", systemImage: "plus")
-                                .font(.subheadline.weight(.semibold))
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 9)
-                                .foregroundStyle(Color.black)
-                                .background(
-                                    MotionaryTheme.accent,
-                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
 
             if previewState.isBuilding, viewModel.player == nil {

@@ -38,16 +38,16 @@ struct AnyEditorCommand: EditorCommand {
 }
 
 struct ReplaceClipCommand: EditorCommand {
-    let before: TimelineClip
-    let after: TimelineClip
+    let before: TimelineItem
+    let after: TimelineItem
     let invalidation: EditorInvalidation
 
     func apply(to project: inout EditorProject) {
-        project.replaceClip(id: after.id, with: after)
+        project.replaceItem(id: after.id, with: after)
     }
 
     func undo(on project: inout EditorProject) {
-        project.replaceClip(id: before.id, with: before)
+        project.replaceItem(id: before.id, with: before)
     }
 }
 
@@ -168,7 +168,7 @@ extension EditorProject {
         if renderSettings == previous.renderSettings,
             title == previous.title,
             trackStructureMatches(previous),
-            let change = singleClipChange(from: previous)
+            let change = singleItemChange(from: previous)
         {
             return AnyEditorCommand(
                 ReplaceClipCommand(
@@ -223,16 +223,16 @@ extension EditorProject {
         }
     }
 
-    private func singleClipChange(from previous: EditorProject) -> (before: TimelineClip, after: TimelineClip)? {
-        let oldClips = Dictionary(uniqueKeysWithValues: previous.tracks.flatMap(\.clips).map { ($0.id, $0) })
-        let newClips = Dictionary(uniqueKeysWithValues: tracks.flatMap(\.clips).map { ($0.id, $0) })
-        guard oldClips.keys == newClips.keys else { return nil }
+    private func singleItemChange(from previous: EditorProject) -> (before: TimelineItem, after: TimelineItem)? {
+        let oldItems = Dictionary(uniqueKeysWithValues: previous.tracks.flatMap(\.items).map { ($0.id, $0) })
+        let newItems = Dictionary(uniqueKeysWithValues: tracks.flatMap(\.items).map { ($0.id, $0) })
+        guard oldItems.keys == newItems.keys else { return nil }
 
-        let changedIDs = oldClips.keys.filter { oldClips[$0] != newClips[$0] }
+        let changedIDs = oldItems.keys.filter { oldItems[$0] != newItems[$0] }
         guard changedIDs.count == 1,
             let id = changedIDs.first,
-            let before = oldClips[id],
-            let after = newClips[id]
+            let before = oldItems[id],
+            let after = newItems[id]
         else { return nil }
         return (before, after)
     }
@@ -247,14 +247,42 @@ extension EditorProject {
                     id: track.id,
                     kind: track.kind,
                     isMuted: track.isMuted,
-                    clips: track.clips.map { clip in
-                        RenderClipTopology(
-                            id: clip.id,
-                            mediaID: clip.mediaID,
-                            mediaType: clip.mediaType,
-                            timelineStart: clip.timelineStart,
-                            sourceRange: clip.sourceRange,
-                            hasShape: clip.shape != nil
+                    items: track.items.map { item in
+                        let mediaID: MediaID?
+                        let mediaType: ClipMediaType?
+                        let speedSignature: UInt64
+                        let transitionOut: TimelineTransition?
+                        switch item {
+                        case .media(let media):
+                            mediaID = media.mediaID
+                            mediaType = media.mediaType
+                            speedSignature = media.speedMap.topologySignature
+                            transitionOut = media.transitionOut
+                        case .shape(let shape):
+                            mediaID = shape.mediaID
+                            mediaType = .video
+                            speedSignature = 0
+                            transitionOut = shape.transitionOut
+                        default:
+                            mediaID = nil
+                            mediaType = nil
+                            speedSignature = 0
+                            transitionOut = nil
+                        }
+                        return RenderItemTopology(
+                            id: item.id,
+                            kind: item.kind,
+                            mediaID: mediaID,
+                            mediaType: mediaType,
+                            timelineStart: item.timelineStart,
+                            placementDuration: item.placementDuration,
+                            sourceRange: item.sourceRange,
+                            hasShape: {
+                                if case .shape = item { return true }
+                                return false
+                            }(),
+                            speedSignature: speedSignature,
+                            transitionOut: transitionOut
                         )
                     }
                 )
@@ -265,14 +293,38 @@ extension EditorProject {
     private var renderVisualSignature: RenderVisualSignature {
         RenderVisualSignature(
             backgroundColor: renderSettings.backgroundColor,
-            clips: tracks.flatMap(\.clips).map {
-                RenderClipVisual(
-                    id: $0.id,
-                    transform: $0.transform,
-                    adjustments: $0.adjustments,
-                    effects: $0.effectStack,
-                    shape: $0.shape
-                )
+            items: tracks.flatMap(\.items).compactMap { item in
+                switch item {
+                case .media(let media):
+                    RenderItemVisual(
+                        id: media.id,
+                        transform: media.visuals.transform,
+                        adjustments: media.visuals.adjustments,
+                        effects: media.visuals.effectStack,
+                        shape: nil,
+                        text: nil
+                    )
+                case .shape(let shape):
+                    RenderItemVisual(
+                        id: shape.id,
+                        transform: shape.visuals.transform,
+                        adjustments: shape.visuals.adjustments,
+                        effects: shape.visuals.effectStack,
+                        shape: shape.shape,
+                        text: nil
+                    )
+                case .text(let text):
+                    RenderItemVisual(
+                        id: text.id,
+                        transform: text.visuals.transform,
+                        adjustments: text.visuals.adjustments,
+                        effects: text.visuals.effectStack,
+                        shape: nil,
+                        text: text
+                    )
+                case .caption, .adjustment, .compound:
+                    nil
+                }
             }
         )
     }
@@ -295,29 +347,34 @@ private struct RenderTrackTopology: Equatable {
     let id: UUID
     let kind: TrackKind
     let isMuted: Bool
-    let clips: [RenderClipTopology]
+    let items: [RenderItemTopology]
 }
 
-private struct RenderClipTopology: Equatable {
+private struct RenderItemTopology: Equatable {
     let id: UUID
-    let mediaID: MediaID
-    let mediaType: ClipMediaType
+    let kind: TimelineItemKind
+    let mediaID: MediaID?
+    let mediaType: ClipMediaType?
     let timelineStart: Double
+    let placementDuration: Double
     let sourceRange: TimeRangeValue
     let hasShape: Bool
+    let speedSignature: UInt64
+    let transitionOut: TimelineTransition?
 }
 
 private struct RenderVisualSignature: Equatable {
     let backgroundColor: RGBAColor
-    let clips: [RenderClipVisual]
+    let items: [RenderItemVisual]
 }
 
-private struct RenderClipVisual: Equatable {
+private struct RenderItemVisual: Equatable {
     let id: UUID
     let transform: ClipTransform
     let adjustments: AdjustmentSettings
     let effects: EffectStack
     let shape: ClipShape?
+    let text: TextTimelineItem?
 }
 
 private struct RenderClipAudio: Equatable {

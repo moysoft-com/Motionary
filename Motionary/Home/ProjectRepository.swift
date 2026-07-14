@@ -36,7 +36,10 @@ actor ProjectRepository {
         self.rootURL = rootURL
     }
 
-    func load(projectID: UUID) throws -> ProjectLoadResult {
+    func load(
+        projectID: UUID,
+        preferredTitle: String? = nil
+    ) throws -> ProjectLoadResult {
         let folderURL = projectFolderURL(for: projectID)
         let candidates: [(ProjectContentSource, URL)] = [
             (.primary, folderURL.appendingPathComponent("content.json")),
@@ -51,8 +54,16 @@ actor ProjectRepository {
         for (source, url) in candidates where fileManager.fileExists(atPath: url.path) {
             do {
                 let decoded = try JSONDecoder().decode(ProjectContent.self, from: Data(contentsOf: url))
-                let content = resolvingMediaURLs(in: decoded, projectID: projectID)
-                if source != .primary {
+                var content = resolvingMediaURLs(in: decoded, projectID: projectID)
+                let reconciledTitle = preferredTitle?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let titleChanged = reconciledTitle.map {
+                    !$0.isEmpty && content.editorProject.title != $0
+                } ?? false
+                if titleChanged, let reconciledTitle {
+                    content.editorProject.title = reconciledTitle
+                }
+                if source != .primary || titleChanged {
                     try? restorePrimary(content, projectID: projectID)
                 }
                 return ProjectLoadResult(content: content, source: source)

@@ -299,7 +299,7 @@ extension EditorViewModel {
         let removedTrack = after.tracks.remove(at: trackIndex)
 
         if let selectedClipID,
-            removedTrack.clips.contains(where: { $0.id == selectedClipID })
+            removedTrack.items.contains(where: { $0.id == selectedClipID })
         {
             self.selectedClipID = nil
         }
@@ -335,7 +335,7 @@ extension EditorViewModel {
             EditorCommandFactory.trackStructure(
                 before: before,
                 after: after.tracks,
-                invalidation: [.timelineLayout, .userInterface, .persistence]
+                invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
             )
         )
     }
@@ -345,7 +345,7 @@ extension EditorViewModel {
         if let trackID {
             resolvedTrackID = trackID
         } else if let clipID,
-            let track = project.tracks.first(where: { $0.clips.contains { $0.id == clipID } })
+            let track = project.tracks.first(where: { $0.items.contains { $0.id == clipID } })
         {
             resolvedTrackID = track.id
         } else {
@@ -354,8 +354,16 @@ extension EditorViewModel {
 
         updateSelection(clipID: clipID, trackID: resolvedTrackID)
 
-        if revealInPreview, let clipID, let clip = project.clip(id: clipID), !isTimeInside(clip) {
-            seek(to: nearestVisibleTime(for: clip), exact: true)
+        if revealInPreview, let clipID, let item = project.item(id: clipID),
+            !(currentTime >= item.timelineStart && currentTime < item.timelineEnd)
+        {
+            let edge = currentTime < item.timelineStart ? item.timelineStart : item.timelineEnd
+            let revealedTime = currentTime < item.timelineStart ? edge + clipRevealEpsilon : edge - clipRevealEpsilon
+            seek(to: revealedTime, exact: true)
         }
+    }
+
+    func selectTimelineItem(_ itemID: UUID?, trackID: UUID? = nil, revealInPreview: Bool = false) {
+        selectClip(itemID, trackID: trackID, revealInPreview: revealInPreview)
     }
 }

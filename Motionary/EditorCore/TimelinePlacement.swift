@@ -92,6 +92,12 @@ extension EditorProject {
             let insertionIndex = tracks.firstIndex(where: { $0.kind == .visual || $0.kind == .shape }) ?? 0
             tracks.insert(TimelineTrack(name: nextTrackName(for: kind), kind: kind), at: insertionIndex)
             return insertionIndex
+        case .text:
+            let insertionIndex = tracks.firstIndex(where: {
+                $0.kind == .text || $0.kind == .shape || $0.kind == .visual
+            }) ?? 0
+            tracks.insert(TimelineTrack(name: nextTrackName(for: kind), kind: kind), at: insertionIndex)
+            return insertionIndex
         case .audio:
             tracks.append(TimelineTrack(name: nextTrackName(for: kind), kind: kind))
             return tracks.count - 1
@@ -108,8 +114,8 @@ extension EditorProject {
 
         return tracks.firstIndex { track in
             guard track.kind == kind else { return false }
-            return track.clips.allSatisfy { clip in
-                clip.timelineEnd <= rangeStart || clip.timelineStart >= rangeEnd
+            return track.items.allSatisfy { item in
+                item.timelineEnd <= rangeStart || item.timelineStart >= rangeEnd
             }
         }
     }
@@ -153,9 +159,21 @@ extension EditorProject {
         tracks[index].kind = requiredKind
     }
 
+    mutating func removeTrackIfEmptyUnlessLast(at index: Int) {
+        guard tracks.indices.contains(index), tracks[index].items.isEmpty else { return }
+        if tracks.count > 1 {
+            tracks.remove(at: index)
+            return
+        }
+        tracks[index].kind = .undefined
+        tracks[index].isMuted = false
+        tracks[index].isLocked = false
+    }
+
     mutating func renumberTracks() {
         var visualIndex = 1
         var shapeIndex = 1
+        var textIndex = 1
         var audioIndex = 1
         for index in tracks.indices {
             switch tracks[index].kind {
@@ -167,6 +185,9 @@ extension EditorProject {
             case .shape:
                 tracks[index].name = "Shape \(shapeIndex)"
                 shapeIndex += 1
+            case .text:
+                tracks[index].name = "Text \(textIndex)"
+                textIndex += 1
             case .audio:
                 tracks[index].name = "Audio \(audioIndex)"
                 audioIndex += 1
@@ -181,6 +202,7 @@ extension EditorProject {
         case .undefined: return "Layer"
         case .visual: return "Layer \(count)"
         case .shape: return "Shape \(count)"
+        case .text: return "Text \(count)"
         case .audio: return "Audio \(count)"
         }
     }
@@ -218,10 +240,10 @@ extension EditorProject {
         var snapped = false
         var snapTime: Double?
 
-        let compatibleClips = tracks.flatMap(\.items).compactMap { $0.legacyClip() }
+        let compatibleItems = tracks.flatMap(\.items)
 
         var bestDistance = snapThreshold
-        let anchors = (snapAnchors + compatibleClips.flatMap { [$0.timelineStart, $0.timelineEnd] })
+        let anchors = (snapAnchors + compatibleItems.flatMap { [$0.timelineStart, $0.timelineEnd] })
             .filter { $0.isFinite }
 
         for anchor in anchors {
@@ -246,11 +268,11 @@ extension EditorProject {
             return (candidate, snapped, snapTime)
         }
 
-        let clipsInDestination = tracks[destinationTrackIndex].clips
+        let itemsInDestination = tracks[destinationTrackIndex].items
         let nonOverlappingStart = nearestNonOverlappingStart(
             proposedStart: candidate,
             duration: safeDuration,
-            clips: clipsInDestination
+            items: itemsInDestination
         )
         let alignedSnapTime = snapTime.flatMap { anchor in
             let finalEnd = nonOverlappingStart + safeDuration
@@ -273,13 +295,9 @@ extension EditorProject {
         snapAnchors: [Double] = []
     ) -> (time: Double, snapped: Bool) {
         let boundedEdge = max(0, proposedEdge)
-        let otherClips =
-            tracks
-            .flatMap(\.items)
-            .compactMap { $0.legacyClip() }
-            .filter { $0.id != clipID }
-        let otherDuration = otherClips.map(\.timelineEnd).max() ?? 0
-        let anchors = ([0, otherDuration] + snapAnchors + otherClips.flatMap { [$0.timelineStart, $0.timelineEnd] })
+        let otherItems = tracks.flatMap(\.items).filter { $0.id != clipID }
+        let otherDuration = otherItems.map(\.timelineEnd).max() ?? 0
+        let anchors = ([0, otherDuration] + snapAnchors + otherItems.flatMap { [$0.timelineStart, $0.timelineEnd] })
             .filter { $0.isFinite }
 
         guard let best = anchors.min(by: { abs($0 - boundedEdge) < abs($1 - boundedEdge) }),
@@ -291,17 +309,17 @@ extension EditorProject {
         return (max(0, best), true)
     }
 
-    private func nearestNonOverlappingStart(proposedStart: Double, duration: Double, clips: [TimelineClip]) -> Double {
-        guard !clips.isEmpty else { return max(0, proposedStart) }
+    private func nearestNonOverlappingStart(proposedStart: Double, duration: Double, items: [TimelineItem]) -> Double {
+        guard !items.isEmpty else { return max(0, proposedStart) }
 
         var ranges: [(start: Double, end: Double)] = []
         var cursor = 0.0
 
-        for clip in clips.sorted(by: { $0.timelineStart < $1.timelineStart }) {
-            if clip.timelineStart - cursor >= duration {
-                ranges.append((cursor, clip.timelineStart - duration))
+        for item in items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+            if item.timelineStart - cursor >= duration {
+                ranges.append((cursor, item.timelineStart - duration))
             }
-            cursor = max(cursor, clip.timelineEnd)
+            cursor = max(cursor, item.timelineEnd)
         }
         ranges.append((cursor, Double.greatestFiniteMagnitude / 4))
 
@@ -318,20 +336,20 @@ extension EditorProject {
 
     func neighborBounds(for clipID: UUID, in trackIndex: Int) -> (previousEnd: Double, nextStart: Double) {
         guard tracks.indices.contains(trackIndex),
-            let clip = tracks[trackIndex].clips.first(where: { $0.id == clipID })
+            let item = tracks[trackIndex].items.first(where: { $0.id == clipID })
         else {
             return (0, Double.greatestFiniteMagnitude / 4)
         }
 
-        let clips = tracks[trackIndex].clips.filter { $0.id != clipID }
+        let items = tracks[trackIndex].items.filter { $0.id != clipID }
         let previousEnd =
-            clips
-            .filter { $0.timelineEnd <= clip.timelineStart + 0.001 }
+            items
+            .filter { $0.timelineEnd <= item.timelineStart + 0.001 }
             .map(\.timelineEnd)
             .max() ?? 0
         let nextStart =
-            clips
-            .filter { $0.timelineStart >= clip.timelineEnd - 0.001 }
+            items
+            .filter { $0.timelineStart >= item.timelineEnd - 0.001 }
             .map(\.timelineStart)
             .min() ?? Double.greatestFiniteMagnitude / 4
 

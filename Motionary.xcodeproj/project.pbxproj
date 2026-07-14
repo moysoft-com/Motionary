@@ -35,6 +35,16 @@
 		8C70C7D52D7225A80070BD08 /* MotionaryUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MotionaryUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		8CF00102300A000100F00101 /* Exceptions for "Motionary" folder in "Motionary" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 8C70C7BA2D7225A60070BD08 /* Motionary */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		8C70C7CE2D7225A80070BD08 /* MotionaryTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -48,6 +58,9 @@
 		};
 		8CA5E52D3003FCA500A91E5F /* Motionary */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				8CF00102300A000100F00101 /* Exceptions for "Motionary" folder in "Motionary" target */,
+			);
 			path = Motionary;
 			sourceTree = "<group>";
 		};
@@ -195,11 +208,6 @@
 				TargetAttributes = {
 					8C70C7BA2D7225A60070BD08 = {
 						CreatedOnToolsVersion = 16.2;
-						SystemCapabilities = {
-							com.apple.AppAttest = {
-								enabled = 1;
-							};
-						};
 					};
 					8C70C7CA2D7225A80070BD08 = {
 						CreatedOnToolsVersion = 16.2;
@@ -425,12 +433,13 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_STYLE = Automatic;
-				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.debug.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
 				DEVELOPMENT_TEAM = 84TRSZD4QB;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Motionary/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Motionary;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Motionary saves exported videos to your Photos library.";
@@ -464,7 +473,8 @@
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
 				DEVELOPMENT_TEAM = 84TRSZD4QB;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Motionary/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Motionary;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Motionary saves exported videos to your Photos library.";

@@ -19,6 +19,20 @@ enum KeyframeTarget: Hashable, Identifiable {
     case exposure
     case effectIntensity(UUID)
     case volume
+    case textFontSize
+    case textLetterSpacing
+    case textLineSpacing
+    case textFill(ColorComponent)
+    case textWidthFraction
+    case textStroke(ColorComponent)
+    case textStrokeWidth
+    case textShadow(ColorComponent)
+    case textShadowOffsetX
+    case textShadowOffsetY
+    case textShadowBlur
+    case textBackground(ColorComponent)
+    case textBackgroundPadding
+    case textBackgroundCornerRadius
 
     var id: String {
         switch self {
@@ -38,6 +52,20 @@ enum KeyframeTarget: Hashable, Identifiable {
         case .exposure: "adjustments.exposure"
         case .effectIntensity(let id): "effect.\(id.uuidString).intensity"
         case .volume: "audio.volume"
+        case .textFontSize: "text.type.fontSize"
+        case .textLetterSpacing: "text.type.letterSpacing"
+        case .textLineSpacing: "text.type.lineSpacing"
+        case .textFill(let component): "text.style.fill.\(component.rawValue)"
+        case .textWidthFraction: "text.style.widthFraction"
+        case .textStroke(let component): "text.style.stroke.\(component.rawValue)"
+        case .textStrokeWidth: "text.style.stroke.width"
+        case .textShadow(let component): "text.style.shadow.\(component.rawValue)"
+        case .textShadowOffsetX: "text.style.shadow.offsetX"
+        case .textShadowOffsetY: "text.style.shadow.offsetY"
+        case .textShadowBlur: "text.style.shadow.blur"
+        case .textBackground(let component): "text.style.background.\(component.rawValue)"
+        case .textBackgroundPadding: "text.style.background.padding"
+        case .textBackgroundCornerRadius: "text.style.background.cornerRadius"
         }
     }
 }
@@ -48,6 +76,8 @@ enum KeyframeSection: String, CaseIterable, Identifiable {
     case adjust = "Adjust"
     case effects = "Effects"
     case audio = "Audio"
+    case textType = "Type"
+    case textStyle = "Style"
 
     var id: String { rawValue }
 }
@@ -58,6 +88,8 @@ enum KeyframePropertyGroup: String, CaseIterable, Identifiable {
     case adjustments = "Adjustments"
     case effects = "Effects"
     case audio = "Audio"
+    case textType = "Type"
+    case textStyle = "Style"
 
     var id: String { rawValue }
 }

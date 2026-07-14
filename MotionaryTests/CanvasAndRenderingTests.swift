@@ -186,6 +186,86 @@ struct CanvasAndRenderingTests {
         #expect(rendered.videoComposition == nil)
     }
 
+    @Test func textRendererKeepsMultilineGeometryStableDuringTypewriterReveal() async throws {
+        let style = TextStyle(
+            fontName: "Missing-Font-Falls-Back",
+            fontSize: 42,
+            color: .white,
+            alignment: .trailing,
+            letterSpacing: 2,
+            lineSpacing: 7,
+            stroke: TextStrokeStyle(width: 3),
+            shadow: TextShadowStyle(offsetX: 4, offsetY: 5, blur: 8),
+            background: TextBackgroundStyle(padding: 14, cornerRadius: 10)
+        )
+        let multiline = TextTimelineItem(
+            text: "First line\nSecond line",
+            style: style,
+            layout: TextLayout(widthFraction: 0.7),
+            timelineStart: 0,
+            duration: 2
+        )
+        let singleLine = TextTimelineItem(
+            text: "First line",
+            style: style,
+            layout: TextLayout(widthFraction: 0.7),
+            timelineStart: 0,
+            duration: 2
+        )
+        let renderer = TextLayerRenderer()
+        let hidden = renderer.render(
+            item: multiline,
+            renderSize: CGSize(width: 600, height: 800),
+            renderScale: 1,
+            glyphReveal: 0
+        )
+        let visible = renderer.render(
+            item: multiline,
+            renderSize: CGSize(width: 600, height: 800),
+            renderScale: 1,
+            glyphReveal: 1
+        )
+        let singleGeometry = TextLayerRenderer.geometry(
+            for: singleLine,
+            renderSize: CGSize(width: 600, height: 800),
+            renderScale: 1
+        )
+
+        #expect(hidden.geometry == visible.geometry)
+        #expect(visible.geometry.layerSize.height > singleGeometry.layerSize.height)
+        #expect(abs(visible.geometry.backgroundRect!.width - 420) < 0.001)
+        #expect(
+            TextLayerRenderer.resolvedFont(for: style, renderScale: 1).fontName
+                == UIFont.systemFont(ofSize: 42, weight: .semibold).fontName
+        )
+    }
+
+    @Test func textOnlyCompositionGetsTemporaryVideoClock() async throws {
+        let text = TextTimelineItem(
+            text: "Text only",
+            timelineStart: 0,
+            duration: 0.2
+        )
+        let project = EditorProject(
+            title: "Text only",
+            renderSettings: RenderSettings(width: 96, height: 128, frameRate: 10),
+            tracks: [
+                TimelineTrack(
+                    name: "Text 1",
+                    kind: .text,
+                    items: [.text(text)]
+                )
+            ]
+        )
+
+        let rendered = try await CompositionRenderService().makeComposition(for: project)
+
+        #expect(rendered.hasVideo)
+        #expect(rendered.videoComposition != nil)
+        #expect(rendered.videoClockTrackID != nil)
+        #expect(!rendered.composition.tracks(withMediaType: .video).isEmpty)
+    }
+
     @Test func zeroVolumeVideoStillParticipatesInAudioTopology() async throws {
         let clip = TimelineClip(
             name: "Muted",

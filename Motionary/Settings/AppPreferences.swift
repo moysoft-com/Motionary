@@ -8,12 +8,22 @@ enum AppPreferences {
     static let exportQualityKey = "exportQuality"
     static let exportCodecKey = "exportCodec"
     static let exportContainerKey = "exportContainer"
+    static let duplicateClipsToNewLayerKey = "duplicateClipsToNewLayer"
 
     static let defaultAppearance = AppAppearance.system.rawValue
     static let defaultFrameRate = 30
     static let defaultExportQuality = ExportQuality.balanced.rawValue
     static let defaultExportCodec = ExportVideoCodec.h264.rawValue
     static let defaultExportContainer = ExportContainer.mp4.rawValue
+    static let defaultDuplicateClipsToNewLayer = true
+
+    static var duplicateClipsToNewLayer: Bool {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: duplicateClipsToNewLayerKey) != nil else {
+            return defaultDuplicateClipsToNewLayer
+        }
+        return defaults.bool(forKey: duplicateClipsToNewLayerKey)
+    }
 
     static func reset() {
         let defaults = UserDefaults.standard
@@ -22,7 +32,8 @@ enum AppPreferences {
             newProjectFrameRateKey,
             exportQualityKey,
             exportCodecKey,
-            exportContainerKey
+            exportContainerKey,
+            duplicateClipsToNewLayerKey
         ].forEach(defaults.removeObject(forKey:))
     }
 }
@@ -74,4 +85,3 @@ enum ExportQuality: String, CaseIterable, Identifiable {
         }
     }
 }
-

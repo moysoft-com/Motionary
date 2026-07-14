@@ -10,6 +10,9 @@ import UIKit
 /// Applies clip ordering, transforms, adjustments, effects, and opacity to each output frame.
 final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     private let renderQueue = DispatchQueue(label: "com.motionary.video-compositor.render")
+    private let renderQueueSpecificKey = DispatchSpecificKey<UInt8>()
+    private let requestStateLock = NSLock()
+    private var requestGeneration: UInt = 0
     private let ciContext: CIContext = {
         if let device = MTLCreateSystemDefaultDevice() {
             return CIContext(
@@ -19,19 +22,18 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         }
         return CIContext(options: [.cacheIntermediates: false])
     }()
-    private var shouldCancelAllRequests = false
     private let shapeImageCache: NSCache<NSString, CIImage> = {
         let cache = NSCache<NSString, CIImage>()
         cache.countLimit = 48
         cache.totalCostLimit = 64 * 1_024 * 1_024
         return cache
     }()
-    private let textImageCache: NSCache<NSString, CIImage> = {
-        let cache = NSCache<NSString, CIImage>()
-        cache.countLimit = 32
-        cache.totalCostLimit = 48 * 1_024 * 1_024
-        return cache
-    }()
+    private let textLayerRenderer = TextLayerRenderer()
+
+    override init() {
+        super.init()
+        renderQueue.setSpecific(key: renderQueueSpecificKey, value: 1)
+    }
 
     var sourcePixelBufferAttributes: [String: any Sendable]? {
         [
@@ -55,14 +57,19 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         // A preview-quality or export-size change makes the previous raster layers
         // poor cache candidates and can otherwise retain several large surfaces.
         shapeImageCache.removeAllObjects()
-        textImageCache.removeAllObjects()
+        textLayerRenderer.removeAllObjects()
     }
 
     func startRequest(_ asyncVideoCompositionRequest: AVAsynchronousVideoCompositionRequest) {
+        requestStateLock.lock()
+        let generation = requestGeneration
         renderQueue.async { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                asyncVideoCompositionRequest.finishCancelledRequest()
+                return
+            }
 
-            if self.shouldCancelAllRequests {
+            guard self.isCurrentRequestGeneration(generation) else {
                 asyncVideoCompositionRequest.finishCancelledRequest()
                 return
             }
@@ -95,9 +102,15 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 let time = CMTimeGetSeconds(asyncVideoCompositionRequest.compositionTime)
 
                 for clip in instruction.activeClips(at: time) {
+                    guard self.isCurrentRequestGeneration(generation) else {
+                        asyncVideoCompositionRequest.finishCancelledRequest()
+                        return
+                    }
                     let localTime = max(0, time - clip.timelineStart)
                     var image: CIImage
+                    let textAnimationSample: TextAnimationSample?
                     if let shape = clip.shape {
+                        textAnimationSample = nil
                         image = self.shapeImage(
                             shape,
                             at: localTime,
@@ -105,13 +118,21 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                             renderScale: instruction.renderScale
                         )
                     } else if let text = clip.text {
-                        image = self.textImage(
-                            text,
+                        let sample = TextAnimationEvaluator.sample(
+                            animations: text.animations,
                             at: localTime,
-                            renderSize: renderSize,
-                            renderScale: instruction.renderScale
+                            clipDuration: text.duration
                         )
+                        textAnimationSample = sample
+                        image = self.textLayerRenderer.render(
+                            item: text,
+                            renderSize: renderSize,
+                            renderScale: instruction.renderScale,
+                            at: localTime,
+                            glyphReveal: sample.glyphReveal
+                        ).image
                     } else {
+                        textAnimationSample = nil
                         guard let sourceBuffer = asyncVideoCompositionRequest.sourceFrame(byTrackID: clip.trackID) else {
                             continue
                         }
@@ -125,15 +146,23 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         at: localTime,
                         renderScale: instruction.renderScale
                     )
+                    if let textAnimationSample {
+                        image = self.applyClipReveal(
+                            textAnimationSample.clipReveal,
+                            to: image
+                        )
+                    }
                     image = self.place(
                         image,
                         clip: clip,
                         at: localTime,
                         renderSize: renderSize,
-                        isGeneratedLayer: clip.shape != nil || clip.text != nil
+                        isGeneratedLayer: clip.shape != nil || clip.text != nil,
+                        textAnimationSample: textAnimationSample
                     )
 
                     var opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
+                    opacity *= textAnimationSample?.opacity ?? 1
                     if let transition = clip.transitionOut, transition.duration > 0 {
                         let fadeStart = max(clip.duration - transition.duration, 0)
                         if localTime >= fadeStart {
@@ -150,19 +179,38 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                     output = image.composited(over: output)
                 }
 
+                guard self.isCurrentRequestGeneration(generation) else {
+                    asyncVideoCompositionRequest.finishCancelledRequest()
+                    return
+                }
                 self.ciContext.render(output.cropped(to: canvasRect), to: destinationBuffer)
+                guard self.isCurrentRequestGeneration(generation) else {
+                    asyncVideoCompositionRequest.finishCancelledRequest()
+                    return
+                }
                 asyncVideoCompositionRequest.finish(withComposedVideoFrame: destinationBuffer)
             }
         }
+        requestStateLock.unlock()
     }
 
     func cancelAllPendingVideoCompositionRequests() {
-        renderQueue.async {
-            self.shouldCancelAllRequests = true
+        requestStateLock.lock()
+        requestGeneration &+= 1
+        requestStateLock.unlock()
+
+        // Every request captured before the generation change is now stale.
+        // Drain the serial queue so AVFoundation does not receive an old frame
+        // after this cancellation method returns.
+        if DispatchQueue.getSpecific(key: renderQueueSpecificKey) == nil {
+            renderQueue.sync {}
         }
-        renderQueue.async {
-            self.shouldCancelAllRequests = false
-        }
+    }
+
+    private func isCurrentRequestGeneration(_ generation: UInt) -> Bool {
+        requestStateLock.lock()
+        defer { requestStateLock.unlock() }
+        return generation == requestGeneration
     }
 
     private func orientedImage(
@@ -237,74 +285,6 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         return rendered
     }
 
-    private func textImage(
-        _ text: TextTimelineItem,
-        at time: Double,
-        renderSize: CGSize,
-        renderScale: CGFloat
-    ) -> CIImage {
-        let fontSize = max(text.style.fontSize * renderScale, 12)
-        let layerSize = CGSize(
-            width: max((renderSize.width * 0.8).rounded(.up), 1),
-            height: max(
-                max((renderSize.height * 0.3).rounded(.up), ceil(fontSize * 1.35)),
-                1
-            )
-        )
-        let cacheKey = [
-            text.text,
-            text.style.fontName,
-            String(text.style.fontSize),
-            text.style.alignment.rawValue,
-            String(text.style.color.red),
-            String(text.style.color.green),
-            String(text.style.color.blue),
-            String(text.style.color.alpha),
-            String(describing: renderScale),
-            "\(layerSize.width)",
-            "\(layerSize.height)"
-        ].joined(separator: ":")
-        if let cached = textImageCache.object(forKey: cacheKey as NSString) {
-            return cached
-        }
-        let paragraph = NSMutableParagraphStyle()
-        switch text.style.alignment {
-        case .leading:
-            paragraph.alignment = .left
-        case .center:
-            paragraph.alignment = .center
-        case .trailing:
-            paragraph.alignment = .right
-        }
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont(name: text.style.fontName, size: fontSize)
-                ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold),
-            .foregroundColor: UIColor(
-                red: CGFloat(text.style.color.red),
-                green: CGFloat(text.style.color.green),
-                blue: CGFloat(text.style.color.blue),
-                alpha: CGFloat(text.style.color.alpha)
-            ),
-            .paragraphStyle: paragraph
-        ]
-        let attributed = NSAttributedString(string: text.text, attributes: attributes)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = false
-        let bounds = CGRect(origin: .zero, size: layerSize)
-        let renderer = UIGraphicsImageRenderer(size: layerSize, format: format)
-        let image = renderer.image { _ in
-            attributed.draw(with: bounds, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-        }
-        let rendered = image.cgImage.map(CIImage.init(cgImage:)) ?? CIImage.empty()
-        textImageCache.setObject(
-            rendered,
-            forKey: cacheKey as NSString,
-            cost: max(Int(layerSize.width * layerSize.height * 4), 1)
-        )
-        return rendered
-    }
-
     private func quantize(_ value: Double, step: Double) -> Double {
         guard step > 0 else { return value }
         return (value / step).rounded() * step
@@ -315,7 +295,8 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         clip: RenderClipDescriptor,
         at time: Double,
         renderSize: CGSize,
-        isGeneratedLayer: Bool
+        isGeneratedLayer: Bool,
+        textAnimationSample: TextAnimationSample?
     ) -> CIImage {
         let extent = image.extent
         guard extent.width > 0, extent.height > 0 else { return image }
@@ -324,13 +305,17 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             ? 1
             : min(renderSize.width / extent.width, renderSize.height / extent.height)
         let scale = clip.transform.scale.value(at: time)
-        let scaleXValue = fitScale * max(scale.x, 0.01)
-        let scaleYValue = fitScale * max(scale.y, 0.01)
+        let animationScale = textAnimationSample?.scale ?? 1
+        let scaleXValue = fitScale * max(scale.x * animationScale, 0.001)
+        let scaleYValue = fitScale * max(scale.y * animationScale, 0.001)
         let scaleX = clip.transform.isFlippedHorizontally ? -scaleXValue : scaleXValue
         let scaleY = clip.transform.isFlippedVertically ? -scaleYValue : scaleYValue
         let rotation = clip.transform.rotationDegrees.value(at: time) * .pi / 180
+            + (textAnimationSample?.rotationRadians ?? 0)
         let positionX = clip.transform.positionX.value(at: time) * renderSize.width * 0.5
+            + (textAnimationSample?.translationX ?? 0) * extent.width
         let positionY = clip.transform.positionY.value(at: time) * renderSize.height * 0.5
+            - (textAnimationSample?.translationY ?? 0) * extent.height
 
         let centered = image.transformed(by: CGAffineTransform(translationX: -extent.midX, y: -extent.midY))
         let scaled = centered.transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
@@ -340,6 +325,28 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 translationX: renderSize.width * 0.5 + positionX,
                 y: renderSize.height * 0.5 + positionY
             ))
+    }
+
+    private func applyClipReveal(_ progress: Double, to image: CIImage) -> CIImage {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return image }
+        let progress = min(max(progress, 0), 1)
+        guard progress < 0.999_999 else { return image }
+
+        let transparent = CIImage(
+            color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)
+        ).cropped(to: extent)
+        guard progress > 0.000_001 else { return transparent }
+        let visibleRect = CGRect(
+            x: extent.minX,
+            y: extent.minY,
+            width: extent.width * progress,
+            height: extent.height
+        )
+        return image
+            .cropped(to: visibleRect)
+            .composited(over: transparent)
+            .cropped(to: extent)
     }
 
     private func applyAdjustments(_ adjustments: AdjustmentSettings, to image: CIImage, at time: Double) -> CIImage {
