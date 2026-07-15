@@ -47,6 +47,7 @@ extension EditorProject {
         using placement: TimelinePlacementResult
     ) -> TimelinePlacementResult? {
         guard let location = clipLocation(id: clipID) else { return nil }
+        let sourceTrackID = tracks[location.track].id
         var item = tracks[location.track].items.remove(at: location.clip)
         let requiredKind = item.requiredTrackKind
         let destinationIndex = compatibleTrackIndex(
@@ -55,9 +56,16 @@ extension EditorProject {
             sourceIndex: location.track
         )
         adoptTrackKindIfNeeded(at: destinationIndex, requiredKind: requiredKind)
+        let destinationTrackID = tracks[destinationIndex].id
         item.timelineStart = placement.start
         tracks[destinationIndex].items.append(item)
         tracks[destinationIndex].sortItems()
+
+        if sourceTrackID != destinationTrackID,
+            let sourceIndex = tracks.firstIndex(where: { $0.id == sourceTrackID })
+        {
+            removeTrackIfEmptyUnlessLast(at: sourceIndex)
+        }
         renumberTracks()
         return TimelinePlacementResult(
             start: item.timelineStart,

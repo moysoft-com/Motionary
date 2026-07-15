@@ -36,11 +36,11 @@ struct CoreToolButtonContent: View {
                 .font(.caption2.weight(.semibold))
                 .lineLimit(1)
         }
-        .foregroundStyle(isProminent ? Color.black : MotionaryTheme.textPrimary)
+        .foregroundStyle(isProminent ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
         .frame(width: 62, height: 54)
         .background {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(isProminent ? MotionaryTheme.accent : Color.white.opacity(0.075))
+                .fill(isProminent ? MotionaryTheme.accent : MotionaryTheme.surface)
         }
     }
 }
@@ -71,7 +71,7 @@ struct CompactIconButton: View {
                     .background {
                         if isBordered {
                             RoundedRectangle(cornerRadius: 13, style: .continuous)
-                                .fill(isProminent ? MotionaryTheme.accent : Color.white.opacity(0.09))
+                                .fill(isProminent ? MotionaryTheme.accent : MotionaryTheme.surface)
                         }
                     }
             }
@@ -82,7 +82,7 @@ struct CompactIconButton: View {
                 Image(systemName: systemName)
                     .font(.system(size: 16, weight: .semibold))
                     .frame(width: 40, height: 36)
-                    .foregroundStyle(isProminent ? Color.black : MotionaryTheme.textPrimary)
+                    .foregroundStyle(isProminent ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
             }
         }
     }

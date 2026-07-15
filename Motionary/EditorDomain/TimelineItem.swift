@@ -11,7 +11,7 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
     var sourceRange: TimeRangeValue
     var visuals: TimelineItemVisuals
     var speedMap: SpeedMap
-    var transitionOut: TimelineTransition?
+    var pitchFollowsSpeed: Bool
     var linkGroupID: UUID?
 
     var timelineEnd: Double {
@@ -31,7 +31,7 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         sourceRange: TimeRangeValue,
         visuals: TimelineItemVisuals = TimelineItemVisuals(),
         speedMap: SpeedMap = .constant,
-        transitionOut: TimelineTransition? = nil,
+        pitchFollowsSpeed: Bool = false,
         linkGroupID: UUID? = nil
     ) {
         self.id = id
@@ -41,9 +41,41 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         self.timelineStart = max(0, timelineStart)
         self.sourceRange = sourceRange
         self.visuals = visuals
-        self.speedMap = speedMap
-        self.transitionOut = transitionOut
+        self.speedMap = mediaType == .video || mediaType == .audio
+            ? .constant(speed: speedMap.speed(at: 0))
+            : .constant
+        self.pitchFollowsSpeed = pitchFollowsSpeed
         self.linkGroupID = linkGroupID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case mediaID
+        case mediaType
+        case timelineStart
+        case sourceRange
+        case visuals
+        case speedMap
+        case pitchFollowsSpeed
+        case linkGroupID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(UUID.self, forKey: .id),
+            name: try container.decode(String.self, forKey: .name),
+            mediaID: try container.decode(MediaID.self, forKey: .mediaID),
+            mediaType: try container.decode(ClipMediaType.self, forKey: .mediaType),
+            timelineStart: try container.decode(Double.self, forKey: .timelineStart),
+            sourceRange: try container.decode(TimeRangeValue.self, forKey: .sourceRange),
+            visuals: try container.decodeIfPresent(TimelineItemVisuals.self, forKey: .visuals)
+                ?? TimelineItemVisuals(),
+            speedMap: try container.decodeIfPresent(SpeedMap.self, forKey: .speedMap) ?? .constant,
+            pitchFollowsSpeed: try container.decodeIfPresent(Bool.self, forKey: .pitchFollowsSpeed) ?? false,
+            linkGroupID: try container.decodeIfPresent(UUID.self, forKey: .linkGroupID)
+        )
     }
 }
 
@@ -55,7 +87,6 @@ struct ShapeTimelineItem: Identifiable, Codable, Equatable, Sendable {
     var timelineStart: Double
     var sourceRange: TimeRangeValue
     var visuals: TimelineItemVisuals
-    var transitionOut: TimelineTransition?
 
     var timelineEnd: Double { timelineStart + sourceRange.duration }
 
@@ -66,8 +97,7 @@ struct ShapeTimelineItem: Identifiable, Codable, Equatable, Sendable {
         shape: ClipShape,
         timelineStart: Double,
         sourceRange: TimeRangeValue,
-        visuals: TimelineItemVisuals = TimelineItemVisuals(),
-        transitionOut: TimelineTransition? = nil
+        visuals: TimelineItemVisuals = TimelineItemVisuals()
     ) {
         self.id = id
         self.name = name
@@ -76,7 +106,6 @@ struct ShapeTimelineItem: Identifiable, Codable, Equatable, Sendable {
         self.timelineStart = max(0, timelineStart)
         self.sourceRange = sourceRange
         self.visuals = visuals
-        self.transitionOut = transitionOut
     }
 }
 
@@ -401,6 +430,41 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
 }
 
 extension TimelineItem {
+    var editableVisuals: TimelineItemVisuals? {
+        get {
+            switch self {
+            case .media(let item): item.visuals
+            case .shape(let item): item.visuals
+            case .text(let item): item.visuals
+            case .adjustment(let item): item.visuals
+            case .compound(let item): item.visuals
+            case .caption: nil
+            }
+        }
+        set {
+            guard let newValue else { return }
+            switch self {
+            case .media(var item):
+                item.visuals = newValue
+                self = .media(item)
+            case .shape(var item):
+                item.visuals = newValue
+                self = .shape(item)
+            case .text(var item):
+                item.visuals = newValue
+                self = .text(item)
+            case .adjustment(var item):
+                item.visuals = newValue
+                self = .adjustment(item)
+            case .compound(var item):
+                item.visuals = newValue
+                self = .compound(item)
+            case .caption:
+                break
+            }
+        }
+    }
+
     var sourceRange: TimeRangeValue {
         switch self {
         case .media(let item): item.sourceRange
@@ -428,14 +492,15 @@ extension TimelineItem {
         let replacement = TimelineItem.fromLegacyClip(clip)
         switch (self, replacement) {
         case (.media(let previous), .media(var updated)):
-            updated.speedMap = previous.speedMap
-            updated.transitionOut = previous.transitionOut
+            updated.speedMap = updated.mediaType == .video || updated.mediaType == .audio
+                ? .constant(speed: previous.speedMap.speed(at: 0))
+                : .constant
+            updated.pitchFollowsSpeed = previous.pitchFollowsSpeed
             updated.linkGroupID = previous.linkGroupID
             updated.visuals.blendMode = previous.visuals.blendMode
             updated.visuals.mask = previous.visuals.mask
             return .media(updated)
         case (.shape(let previous), .shape(var updated)):
-            updated.transitionOut = previous.transitionOut
             updated.visuals.blendMode = previous.visuals.blendMode
             updated.visuals.mask = previous.visuals.mask
             return .shape(updated)
@@ -455,10 +520,10 @@ extension TimelineItem {
             )
             guard sourceOffset > 0.08, sourceOffset < item.sourceRange.duration - 0.08 else { return nil }
             let splitVisuals = item.visuals.splittingAnimations(at: offset)
-            let transition = item.transitionOut
+            let originalSpeedMap = item.speedMap
             item.sourceRange = TimeRangeValue(start: item.sourceRange.start, duration: sourceOffset)
+            item.speedMap = originalSpeedMap.sliced(from: 0, duration: sourceOffset)
             item.visuals = splitVisuals.left
-            item.transitionOut = nil
             var second = item
             second.id = UUID()
             second.name += " split"
@@ -467,16 +532,17 @@ extension TimelineItem {
                 start: sourceRange.start + sourceOffset,
                 duration: sourceRange.duration - sourceOffset
             )
+            second.speedMap = originalSpeedMap.sliced(
+                from: sourceOffset,
+                duration: sourceRange.duration - sourceOffset
+            )
             second.visuals = splitVisuals.right
-            second.transitionOut = transition
             return (.media(item), .media(second))
 
         case .shape(var item):
             let splitVisuals = item.visuals.splittingAnimations(at: offset)
-            let transition = item.transitionOut
             item.sourceRange = TimeRangeValue(start: item.sourceRange.start, duration: offset)
             item.visuals = splitVisuals.left
-            item.transitionOut = nil
             var second = item
             second.id = UUID()
             second.name += " split"
@@ -486,7 +552,6 @@ extension TimelineItem {
                 duration: sourceRange.duration - offset
             )
             second.visuals = splitVisuals.right
-            second.transitionOut = transition
             return (.shape(item), .shape(second))
 
         case .text(var item):
@@ -556,6 +621,10 @@ extension TimelineItem {
                 start: item.sourceRange.start + sourceDelta,
                 duration: oldSourceDuration - sourceDelta
             )
+            item.speedMap = item.speedMap.sliced(
+                from: sourceDelta,
+                duration: oldSourceDuration - sourceDelta
+            )
             item.visuals.trimAnimationsAtStart(by: delta, oldDuration: oldTimelineDuration)
             result = .media(item)
         case .shape(var item):
@@ -618,6 +687,7 @@ extension TimelineItem {
                 start: item.sourceRange.start,
                 duration: newSourceDuration
             )
+            item.speedMap = item.speedMap.sliced(from: 0, duration: newSourceDuration)
             item.visuals.trimAnimationsAtEnd(
                 newDuration: newTimelineDuration,
                 oldDuration: oldTimelineDuration

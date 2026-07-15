@@ -40,7 +40,7 @@ extension TextTimelineItem {
                 targets += [.textBackgroundPadding, .textBackgroundCornerRadius]
             }
             return targets
-        case .shape, .adjust, .effects, .audio:
+        case .shape, .adjust, .effects, .audio, .speed:
             return []
         }
     }
@@ -492,24 +492,56 @@ extension TimelineItem {
 
     func keyframeTimes(in section: KeyframeSection) -> [Double] {
         switch self {
+        case .media where section == .speed:
+            return []
         case .media, .shape:
-            legacyClip()?.keyframeTimes(in: section) ?? []
+            return visibleKeyframeTimes(legacyClip()?.keyframeTimes(in: section) ?? [])
         case .text(let item):
-            item.keyframeTimes(in: section)
+            return item.keyframeTimes(in: section)
         case .caption, .adjustment, .compound:
-            []
+            return []
         }
     }
 
     var allKeyframeTimes: [Double] {
         switch self {
-        case .media, .shape:
-            legacyClip()?.allKeyframeTimes ?? []
+        case .media:
+            return visibleKeyframeTimes(legacyClip()?.allKeyframeTimes ?? [])
+        case .shape:
+            return visibleKeyframeTimes(legacyClip()?.allKeyframeTimes ?? [])
         case .text(let item):
-            item.allKeyframeTimes
-        case .caption, .adjustment, .compound:
-            []
+            return item.allKeyframeTimes
+        case .adjustment(let item):
+            return visibleKeyframeTimes(visualKeyframeTimes(item.visuals))
+        case .compound(let item):
+            return visibleKeyframeTimes(visualKeyframeTimes(item.visuals))
+        case .caption:
+            return []
         }
+    }
+
+    private func visibleKeyframeTimes(_ times: [Double]) -> [Double] {
+        times.filter {
+            $0 >= -0.000_001 && $0 <= placementDuration + 0.000_001
+        }
+    }
+
+    private func visualKeyframeTimes(_ visuals: TimelineItemVisuals) -> [Double] {
+        let properties = [
+            visuals.transform.positionX,
+            visuals.transform.positionY,
+            visuals.transform.rotationDegrees,
+            visuals.transform.opacity,
+            visuals.adjustments.brightness,
+            visuals.adjustments.contrast,
+            visuals.adjustments.saturation,
+            visuals.adjustments.exposure,
+            visuals.volume,
+        ]
+        let times = properties.flatMap { $0.keyframes.map(\.time) }
+            + visuals.transform.scale.keyframes.map(\.time)
+            + visuals.effectStack.effects.flatMap { $0.intensity.keyframes.map(\.time) }
+        return Array(Set(times)).sorted()
     }
 }
 

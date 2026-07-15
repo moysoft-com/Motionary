@@ -274,12 +274,10 @@ struct TimelinePlacementTests {
 
         viewModel.placeClip(movingID, at: 1, proposedTrackIndex: 1, rebuild: false)
 
-        #expect(viewModel.project.tracks.count == 2)
+        #expect(viewModel.project.tracks.count == 1)
         #expect(viewModel.project.tracks[0].kind == .visual)
-        #expect(viewModel.project.tracks[0].clips.isEmpty)
-        #expect(viewModel.project.tracks[1].kind == .visual)
-        #expect(viewModel.project.tracks[1].clips.first?.id == movingID)
-        #expect(viewModel.project.tracks[1].clips.first?.timelineStart == 1)
+        #expect(viewModel.project.tracks[0].clips.first?.id == movingID)
+        #expect(viewModel.project.tracks[0].clips.first?.timelineStart == 1)
     }
 
     @MainActor
@@ -323,8 +321,8 @@ struct TimelinePlacementTests {
         let destination = viewModel.project.tracks.first { track in
             track.kind == .visual && track.clips.contains { $0.name == "Lower" }
         }
-        #expect(viewModel.project.tracks.count == 3)
-        #expect(viewModel.project.tracks.first?.clips.isEmpty == true)
+        #expect(viewModel.project.tracks.count == 2)
+        #expect(viewModel.project.tracks.allSatisfy { !$0.clips.isEmpty })
         #expect(destination?.clips.contains { $0.id == movingID } == true)
     }
 

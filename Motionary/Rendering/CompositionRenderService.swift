@@ -48,9 +48,9 @@ struct RenderClipDescriptor: @unchecked Sendable {
     let transform: ClipTransform
     let adjustments: AdjustmentSettings
     let effectStack: EffectStack
+    let mask: ItemMask?
     let shape: ClipShape?
     let text: TextTimelineItem?
-    let transitionOut: TimelineTransition?
     let renderOrder: Int
 }
 
@@ -72,6 +72,7 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
     let renderSize: CGSize
     let renderScale: CGFloat
     let backgroundColor: RGBAColor
+    let frameDuration: Double
 
     init(
         timeRange: CMTimeRange,
@@ -79,7 +80,8 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         sourceTrackIDs: [CMPersistentTrackID],
         renderSize: CGSize,
         renderScale: CGFloat,
-        backgroundColor: RGBAColor
+        backgroundColor: RGBAColor,
+        frameDuration: Double
     ) {
         self.timeRange = timeRange
         self.clips = clips.sorted { $0.renderOrder < $1.renderOrder }
@@ -87,6 +89,7 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         self.renderSize = renderSize
         self.renderScale = renderScale
         self.backgroundColor = backgroundColor
+        self.frameDuration = frameDuration
         self.requiredSourceTrackIDs = sourceTrackIDs
             .filter { $0 != kCMPersistentTrackID_Invalid }
             .map { NSNumber(value: $0) }
@@ -106,7 +109,17 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         }
         guard clipIntervals.indices.contains(lower) else { return [] }
         let interval = clipIntervals[lower]
-        return time >= interval.start && time < interval.end ? interval.clips : []
+        var active = time >= interval.start && time < interval.end ? interval.clips : []
+        let frameEnd = time + frameDuration
+        for clip in clips where clip.text != nil
+            && clip.timelineStart > time
+            && clip.timelineStart < frameEnd
+            && clip.timelineStart + clip.duration > time
+            && !active.contains(where: { $0.clipID == clip.clipID })
+        {
+            active.append(clip)
+        }
+        return active.sorted { $0.renderOrder < $1.renderOrder }
     }
 
     private static func makeIntervals(
@@ -198,13 +211,6 @@ private struct PreviewTopology: Equatable {
                         speedSignature: {
                             if case .media(let media) = item { return media.speedMap.topologySignature }
                             return 0
-                        }(),
-                        transitionOut: {
-                            switch item {
-                            case .media(let media): return media.transitionOut
-                            case .shape(let shape): return shape.transitionOut
-                            default: return nil
-                            }
                         }()
                     )
                 }
@@ -230,12 +236,12 @@ private struct PreviewItemTopology: Equatable {
     let sourceRange: TimeRangeValue?
     let hasShape: Bool
     let speedSignature: UInt64
-    let transitionOut: TimelineTransition?
 }
 
 /// Converts an editor project into AVFoundation preview/export assets.
 final class CompositionRenderService {
     private let timescale: CMTimeScale = 600
+    private let retimingTimescale: CMTimeScale = 60_000
     private let assetCache: MediaAssetCache
     @MainActor private var previewGraph: PreviewRenderGraph?
 
@@ -423,7 +429,8 @@ final class CompositionRenderService {
                     try await insertVisualClip(
                         clip: clip,
                         timelineDuration: timelineDuration,
-                        transitionOut: mediaItem.transitionOut,
+                        speedMap: mediaItem.speedMap,
+                        pitchFollowsSpeed: mediaItem.pitchFollowsSpeed,
                         project: project,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
@@ -438,10 +445,8 @@ final class CompositionRenderService {
                     try await insertVisualClip(
                         clip: clip,
                         timelineDuration: clip.sourceRange.duration,
-                        transitionOut: {
-                            if case .shape(let shapeItem) = item { return shapeItem.transitionOut }
-                            return nil
-                        }(),
+                        speedMap: .constant,
+                        pitchFollowsSpeed: false,
                         project: project,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
@@ -462,9 +467,9 @@ final class CompositionRenderService {
                             transform: textItem.visuals.transform,
                             adjustments: textItem.visuals.adjustments,
                             effectStack: textItem.visuals.effectStack,
+                            mask: textItem.visuals.mask,
                             shape: nil,
                             text: textItem,
-                            transitionOut: nil,
                             renderOrder: renderOrder
                         )
                     )
@@ -477,9 +482,13 @@ final class CompositionRenderService {
 
         for track in project.tracks where track.kind == .audio && !track.isMuted {
             try Task.checkCancellation()
-            for clip in track.clips.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+            for item in track.items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
                 try Task.checkCancellation()
-                guard clip.sourceRange.duration > 0 else { continue }
+                guard case .media(let mediaItem) = item,
+                    mediaItem.mediaType == .audio,
+                    let clip = item.legacyClip(),
+                    clip.sourceRange.duration > 0
+                else { continue }
                 let metadata = try await assetCache.metadata(for: project.mediaURL(for: clip))
                 try Task.checkCancellation()
                 guard let sourceAudioTrack = metadata.audioTrack,
@@ -490,16 +499,19 @@ final class CompositionRenderService {
                 else { continue }
                 audioTrackIDs[clip.id] = compositionAudioTrack.trackID
 
-                let sourceRange = CMTimeRange(
-                    start: cmTime(clip.sourceRange.start),
-                    duration: cmTime(clip.sourceRange.duration)
+                try insertRetimedTrack(
+                    sourceTrack: sourceAudioTrack,
+                    compositionTrack: compositionAudioTrack,
+                    sourceRange: clip.sourceRange,
+                    timelineStart: clip.timelineStart,
+                    speedMap: mediaItem.speedMap
                 )
-                try compositionAudioTrack.insertTimeRange(
-                    sourceRange, of: sourceAudioTrack, at: cmTime(clip.timelineStart))
                 audioParameters.append(
                     makeAudioParameters(
                         track: compositionAudioTrack,
                         clip: clip,
+                        timelineDuration: mediaItem.timelineDuration,
+                        pitchFollowsSpeed: mediaItem.pitchFollowsSpeed,
                         frameRate: project.renderSettings.frameRate
                     )
                 )
@@ -561,7 +573,8 @@ final class CompositionRenderService {
                 sourceTrackIDs: sourceTrackIDs,
                 renderSize: renderSettings.size,
                 renderScale: renderScale,
-                backgroundColor: renderSettings.backgroundColor
+                backgroundColor: renderSettings.backgroundColor,
+                frameDuration: 1 / Double(max(renderSettings.frameRate, 1))
             )
         ]
         return AVVideoComposition(configuration: configuration)
@@ -631,7 +644,8 @@ final class CompositionRenderService {
     private func insertVisualClip(
         clip: TimelineClip,
         timelineDuration: Double,
-        transitionOut: TimelineTransition?,
+        speedMap: SpeedMap,
+        pitchFollowsSpeed: Bool,
         project: EditorProject,
         composition: AVMutableComposition,
         visualTrackIDs: inout [UUID: CMPersistentTrackID],
@@ -663,20 +677,14 @@ final class CompositionRenderService {
                 frameRate: project.renderSettings.frameRate
             )
         } else {
-            let sourceRange = CMTimeRange(
-                start: cmTime(clip.sourceRange.start),
-                duration: cmTime(clip.sourceRange.duration)
+            try insertRetimedTrack(
+                sourceTrack: sourceVideoTrack,
+                compositionTrack: compositionVideoTrack,
+                sourceRange: clip.sourceRange,
+                timelineStart: clip.timelineStart,
+                speedMap: speedMap
             )
-            try compositionVideoTrack.insertTimeRange(
-                sourceRange, of: sourceVideoTrack, at: cmTime(clip.timelineStart))
         }
-
-        try scaleInsertedVideo(
-            track: compositionVideoTrack,
-            timelineStart: clip.timelineStart,
-            sourceDuration: clip.sourceRange.duration,
-            timelineDuration: timelineDuration
-        )
 
         let sourceTransform = VideoSourceGeometry.normalizedTransform(
             naturalSize: metadata.naturalSize ?? .zero,
@@ -693,9 +701,9 @@ final class CompositionRenderService {
                 transform: clip.transform,
                 adjustments: clip.adjustments,
                 effectStack: clip.effectStack,
+                mask: project.item(id: clip.id)?.editableVisuals?.mask,
                 shape: clip.shape,
                 text: nil,
-                transitionOut: transitionOut,
                 renderOrder: renderOrder
             )
         )
@@ -714,40 +722,81 @@ final class CompositionRenderService {
             )
         {
             audioTrackIDs[clip.id] = compositionAudioTrack.trackID
-            let sourceRange = CMTimeRange(
-                start: cmTime(clip.sourceRange.start),
-                duration: cmTime(clip.sourceRange.duration)
-            )
-            try compositionAudioTrack.insertTimeRange(
-                sourceRange, of: sourceAudioTrack, at: cmTime(clip.timelineStart))
-            try scaleInsertedVideo(
-                track: compositionAudioTrack,
+            try insertRetimedTrack(
+                sourceTrack: sourceAudioTrack,
+                compositionTrack: compositionAudioTrack,
+                sourceRange: clip.sourceRange,
                 timelineStart: clip.timelineStart,
-                sourceDuration: clip.sourceRange.duration,
-                timelineDuration: timelineDuration
+                speedMap: speedMap
             )
             audioParameters.append(
                 makeAudioParameters(
                     track: compositionAudioTrack,
                     clip: clip,
                     timelineDuration: timelineDuration,
+                    pitchFollowsSpeed: pitchFollowsSpeed,
                     frameRate: project.renderSettings.frameRate
                 )
             )
         }
     }
 
-    private func scaleInsertedVideo(
-        track: AVMutableCompositionTrack,
+    private func insertRetimedTrack(
+        sourceTrack: AVAssetTrack,
+        compositionTrack: AVMutableCompositionTrack,
+        sourceRange: TimeRangeValue,
         timelineStart: Double,
-        sourceDuration: Double,
-        timelineDuration: Double
+        speedMap: SpeedMap
     ) throws {
-        guard sourceDuration > 0, abs(sourceDuration - timelineDuration) > 0.001 else { return }
-        track.scaleTimeRange(
-            CMTimeRange(start: cmTime(timelineStart), duration: cmTime(sourceDuration)),
-            toDuration: cmTime(timelineDuration)
+        if !speedMap.hasVariableSpeed {
+            let sourceTimeRange = CMTimeRange(
+                start: cmTime(sourceRange.start),
+                duration: cmTime(sourceRange.duration)
+            )
+            try compositionTrack.insertTimeRange(
+                sourceTimeRange,
+                of: sourceTrack,
+                at: cmTime(timelineStart)
+            )
+            let timelineDuration = speedMap.timelineDuration(
+                sourceDuration: sourceRange.duration
+            )
+            if abs(sourceRange.duration - timelineDuration) > 0.001 {
+                compositionTrack.scaleTimeRange(
+                    CMTimeRange(
+                        start: cmTime(timelineStart),
+                        duration: cmTime(sourceRange.duration)
+                    ),
+                    toDuration: cmTime(timelineDuration)
+                )
+            }
+            return
+        }
+
+        let sourceTimeRange = CMTimeRange(
+            start: retimingTime(sourceRange.start),
+            duration: retimingTime(sourceRange.duration)
         )
+        try compositionTrack.insertTimeRange(
+            sourceTimeRange,
+            of: sourceTrack,
+            at: retimingTime(timelineStart)
+        )
+
+        // Scale an already contiguous edit from the end towards the start. Inserting
+        // separately scaled source ranges can leave sub-frame gaps at their joins;
+        // the custom compositor then receives no source frame and renders black.
+        for segment in speedMap.renderSegments(sourceDuration: sourceRange.duration).reversed() {
+            if abs(segment.sourceDuration - segment.timelineDuration) > 0.000_5 {
+                compositionTrack.scaleTimeRange(
+                    CMTimeRange(
+                        start: retimingTime(timelineStart + segment.sourceStart),
+                        duration: retimingTime(segment.sourceDuration)
+                    ),
+                    toDuration: retimingTime(segment.timelineDuration)
+                )
+            }
+        }
     }
 
     private func insertLoopedStillImageVideo(
@@ -785,14 +834,20 @@ final class CompositionRenderService {
         CMTime(seconds: seconds, preferredTimescale: timescale)
     }
 
+    private func retimingTime(_ seconds: Double) -> CMTime {
+        CMTime(seconds: seconds, preferredTimescale: retimingTimescale)
+    }
+
     private func makeAudioParameters(
         track: AVCompositionTrack,
         clip: TimelineClip,
         timelineDuration: Double? = nil,
+        pitchFollowsSpeed: Bool = false,
         frameRate: Int32
     ) -> AVAudioMixInputParameters {
         let envelopeDuration = timelineDuration ?? clip.sourceRange.duration
         let parameters = AVMutableAudioMixInputParameters(track: track)
+        parameters.audioTimePitchAlgorithm = pitchFollowsSpeed ? .varispeed : .timeDomain
         let points = AudioEnvelopeSampler.points(
             for: clip.volume,
             duration: envelopeDuration,
@@ -866,9 +921,9 @@ final class CompositionRenderService {
                             transform: clip.transform,
                             adjustments: clip.adjustments,
                             effectStack: clip.effectStack,
+                            mask: mediaItem.visuals.mask,
                             shape: clip.shape,
                             text: nil,
-                            transitionOut: mediaItem.transitionOut,
                             renderOrder: renderOrder
                         )
                     )
@@ -877,12 +932,6 @@ final class CompositionRenderService {
                     guard let clip = item.legacyClip(),
                         let trackID = visualTrackIDs[clip.id]
                     else { continue }
-                    let transitionOut: TimelineTransition?
-                    if case .shape(let shapeItem) = item {
-                        transitionOut = shapeItem.transitionOut
-                    } else {
-                        transitionOut = nil
-                    }
                     descriptors.append(
                         RenderClipDescriptor(
                             trackID: trackID,
@@ -893,9 +942,9 @@ final class CompositionRenderService {
                             transform: clip.transform,
                             adjustments: clip.adjustments,
                             effectStack: clip.effectStack,
+                            mask: item.editableVisuals?.mask,
                             shape: clip.shape,
                             text: nil,
-                            transitionOut: transitionOut,
                             renderOrder: renderOrder
                         )
                     )
@@ -911,9 +960,9 @@ final class CompositionRenderService {
                             transform: textItem.visuals.transform,
                             adjustments: textItem.visuals.adjustments,
                             effectStack: textItem.visuals.effectStack,
+                            mask: textItem.visuals.mask,
                             shape: nil,
                             text: textItem,
-                            transitionOut: nil,
                             renderOrder: renderOrder
                         )
                     )
@@ -941,6 +990,11 @@ final class CompositionRenderService {
                 return makeAudioParameters(
                     track: track,
                     clip: clip,
+                    timelineDuration: project.item(id: clip.id)?.placementDuration,
+                    pitchFollowsSpeed: {
+                        guard case .media(let item) = project.item(id: clip.id) else { return false }
+                        return item.pitchFollowsSpeed
+                    }(),
                     frameRate: project.renderSettings.frameRate
                 )
             }

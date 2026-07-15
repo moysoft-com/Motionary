@@ -169,7 +169,7 @@ struct CoreTimelineLayout: View {
 
         return Image(systemName: "plus")
             .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(Color.black)
+            .foregroundStyle(MotionaryTheme.foregroundOnAccent)
             .frame(width: 30, height: 30)
             .symbolEffect(.bounce, value: pullToAddBounceTrigger)
             .background {
@@ -228,7 +228,7 @@ private struct TimelineRulerOverlay: View {
     }
 }
 
-private struct TimelineDisplayLink: UIViewRepresentable {
+struct TimelineDisplayLink: UIViewRepresentable {
     let player: AVPlayer?
     let isPlaying: Bool
     let onFrame: (Double) -> Void

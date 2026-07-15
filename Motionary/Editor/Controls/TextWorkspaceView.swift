@@ -47,44 +47,44 @@ struct TextWorkspaceView: View {
     @FocusState private var isTextFocused: Bool
 
     var body: some View {
-        ZStack {
-            if let currentItem {
-                let isEnabled = isWorkspaceEnabled(for: currentItem)
-                VStack(spacing: 10) {
-                    workspaceHeader(item: currentItem, isEnabled: isEnabled)
-
-                    ScrollView {
-                        Group {
-                            switch mode {
-                            case .content:
-                                contentControls(currentItem)
-                            case .type:
-                                typographyControls(currentItem)
-                            case .style:
-                                styleControls(currentItem)
-                            case .motion:
-                                TextAnimationControls(
-                                    viewModel: viewModel,
-                                    item: currentItem,
-                                    activePhase: $activeMotionPhase
-                                )
-                            }
-                        }
-                        .padding(.bottom, 6)
-                    }
-                    .scrollIndicators(.hidden)
-                    .scrollDismissesKeyboard(.interactively)
+        let isEnabled = currentItem.map(isWorkspaceEnabled(for:)) ?? false
+        EditorWorkspaceShell(
+            title: mode.title,
+            systemImage: mode.systemImage,
+            isEnabled: isEnabled,
+            emptyState: currentItem == nil
+                ? EditorWorkspaceEmptyState(title: "Select a text layer", systemImage: "textformat")
+                : nil,
+            disablesContentWhenUnavailable: true,
+            accessory: {
+                if let currentItem, let section = mode.keyframeSection {
+                    SectionKeyframeButton(
+                        viewModel: viewModel,
+                        itemID: currentItem.id,
+                        section: section,
+                        isEnabled: isEnabled
+                    )
                 }
-                .padding(14)
-                .opacity(isEnabled ? 1 : 0.42)
-                .disabled(!isEnabled)
-            } else {
-                Label("Select a text layer", systemImage: "textformat")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(MotionaryTheme.textSecondary)
+            },
+            content: {
+                if let currentItem {
+                    switch mode {
+                    case .content:
+                        contentControls(currentItem)
+                    case .type:
+                        typographyControls(currentItem)
+                    case .style:
+                        styleControls(currentItem)
+                    case .motion:
+                        TextAnimationControls(
+                            viewModel: viewModel,
+                            item: currentItem,
+                            activePhase: $activeMotionPhase
+                        )
+                    }
+                }
             }
-        }
-        .motionaryGlass(cornerRadius: 20)
+        )
         .sheet(item: $fontPickerRequest) { request in
             TextFontPickerView(selectedFontName: request.selectedFontName) { fontName in
                 update(interactive: false) { $0.style.fontName = fontName }
@@ -119,25 +119,6 @@ struct TextWorkspaceView: View {
         }
     }
 
-    private func workspaceHeader(item: TextTimelineItem, isEnabled: Bool) -> some View {
-        HStack(spacing: 9) {
-            Label(mode.title, systemImage: mode.systemImage)
-                .font(.headline.weight(.semibold))
-                .labelStyle(.titleAndIcon)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
-            if let section = mode.keyframeSection {
-                SectionKeyframeButton(
-                    viewModel: viewModel,
-                    itemID: item.id,
-                    section: section,
-                    isEnabled: isEnabled
-                )
-            }
-        }
-        .frame(height: 22)
-    }
-
     private var currentItem: TextTimelineItem? {
         guard let item,
             case .text(let current) = viewModel.project.item(id: item.id)
@@ -166,7 +147,7 @@ struct TextWorkspaceView: View {
         .frame(minHeight: 118)
         .padding(8)
         .scrollContentBackground(.hidden)
-        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(MotionaryTheme.surfaceSubtle, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityLabel("Text content")
         .accessibilityHint("Edits the selected text layer")
         .onAppear { focusEditorIfNeeded(itemID: item.id) }
@@ -174,7 +155,7 @@ struct TextWorkspaceView: View {
 
     private func typographyControls(_ item: TextTimelineItem) -> some View {
         VStack(spacing: 10) {
-            controlCard {
+            EditorWorkspaceCard {
                 Button {
                     fontPickerRequest = TextFontPickerRequest(selectedFontName: item.style.fontName)
                 } label: {
@@ -201,7 +182,7 @@ struct TextWorkspaceView: View {
                 .accessibilityValue(TextFontCatalog.displayName(for: item.style.fontName))
                 .accessibilityHint("Opens the font picker")
 
-                Divider().overlay(Color.white.opacity(0.08))
+                Divider().overlay(MotionaryTheme.separator)
 
                 animatedTextScrubber(
                     "Size",
@@ -214,7 +195,7 @@ struct TextWorkspaceView: View {
                 )
             }
 
-            controlCard {
+            EditorWorkspaceCard {
                 HStack {
                     Label("Alignment", systemImage: "text.alignleft")
                         .font(.callout.weight(.medium))
@@ -237,7 +218,7 @@ struct TextWorkspaceView: View {
                 .pickerStyle(.segmented)
             }
 
-            controlCard {
+            EditorWorkspaceCard {
                 animatedTextScrubber(
                     "Tracking",
                     systemImage: "character.cursor.ibeam",
@@ -263,28 +244,16 @@ struct TextWorkspaceView: View {
 
     private func styleControls(_ item: TextTimelineItem) -> some View {
         VStack(spacing: 10) {
-            controlCard {
-                HStack(spacing: 10) {
-                    Label("Fill", systemImage: "paintpalette")
-                        .font(.callout.weight(.semibold))
-                    Spacer()
-                    ColorPicker(
-                        "Text color",
-                        selection: Binding(
-                            get: {
-                                (item.color(for: .fill, at: localTime(for: item)) ?? item.style.color)
-                                    .swiftUIColor
-                            },
-                            set: { color in
-                                viewModel.setSelectedTextColor(
-                                    RGBAColor(color),
-                                    property: .fill
-                                )
-                            }
-                        ),
-                        supportsOpacity: true
-                    )
-                    .labelsHidden()
+            EditorWorkspaceCard {
+                EditorWorkspaceColorRow(
+                    title: "Fill",
+                    color: (item.color(for: .fill, at: localTime(for: item)) ?? item.style.color)
+                        .swiftUIColor,
+                    systemImage: "paintpalette",
+                    spacing: 10,
+                    titleWeight: .semibold
+                ) { color in
+                    viewModel.setSelectedTextColor(RGBAColor(color), property: .fill)
                 }
                 animatedTextScrubber(
                     "Opacity",
@@ -472,16 +441,6 @@ struct TextWorkspaceView: View {
         min(max(viewModel.currentTime - item.timelineStart, 0), item.duration)
     }
 
-    private func controlCard<Content: View>(
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(spacing: 12) {
-            content()
-        }
-        .padding(12)
-        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-    }
-
     private func styleSection<Content: View>(
         title: String,
         systemImage: String,
@@ -489,7 +448,7 @@ struct TextWorkspaceView: View {
         onChange: @escaping (Bool) -> Void,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        controlCard {
+        EditorWorkspaceCard {
             Button {
                 onChange(!isEnabled)
                 EditorHaptics.tap()
@@ -511,7 +470,7 @@ struct TextWorkspaceView: View {
             .accessibilityValue(isEnabled ? "On" : "Off")
 
             if isEnabled {
-                Divider().overlay(Color.white.opacity(0.08))
+                Divider().overlay(MotionaryTheme.separator)
                 content()
             }
         }
@@ -522,19 +481,8 @@ struct TextWorkspaceView: View {
         color: RGBAColor,
         onChange: @escaping (RGBAColor) -> Void
     ) -> some View {
-        HStack {
-            Text(title)
-                .font(.callout)
-            Spacer()
-            ColorPicker(
-                title,
-                selection: Binding(
-                    get: { color.swiftUIColor },
-                    set: { onChange(RGBAColor($0)) }
-                ),
-                supportsOpacity: true
-            )
-            .labelsHidden()
+        EditorWorkspaceColorRow(title: title, color: color.swiftUIColor) {
+            onChange(RGBAColor($0))
         }
     }
 

@@ -54,11 +54,11 @@ struct TimelineItemBlock: View {
         ZStack {
             if isSelected && !isDragSourceHidden && !isDragGhost {
                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .fill(Color.white)
+                    .fill(MotionaryTheme.selected)
                     .frame(width: displayWidth + selectionExtension * 2, height: height + 4)
                     .overlay {
                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .stroke(Color.white, lineWidth: 2)
+                            .stroke(MotionaryTheme.selected, lineWidth: 2)
                     }
                     .allowsHitTesting(false)
                     .zIndex(0)
@@ -82,7 +82,7 @@ struct TimelineItemBlock: View {
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(
-                        isSelected && !isDragSourceHidden && isDragGhost ? Color.white : .clear,
+                        isSelected && !isDragSourceHidden && isDragGhost ? MotionaryTheme.selected : .clear,
                         lineWidth: 2
                     )
             }
@@ -159,42 +159,12 @@ struct TimelineItemBlock: View {
     }
 
     private func keyframeTimes(for item: TimelineItem) -> [Double] {
-        if let clip = item.legacyClip() {
-            return clip.allKeyframeTimes
-        }
-
-        if case .text(let textItem) = item {
-            return textItem.allKeyframeTimes
-        }
-
-        let visuals: TimelineItemVisuals?
-        switch item {
-        case .adjustment(let adjustment): visuals = adjustment.visuals
-        case .compound(let compound): visuals = compound.visuals
-        case .media, .shape, .text, .caption: visuals = nil
-        }
-        guard let visuals else { return [] }
-
-        let properties = [
-            visuals.transform.positionX,
-            visuals.transform.positionY,
-            visuals.transform.rotationDegrees,
-            visuals.transform.opacity,
-            visuals.adjustments.brightness,
-            visuals.adjustments.contrast,
-            visuals.adjustments.saturation,
-            visuals.adjustments.exposure,
-            visuals.volume,
-        ]
-        let times = properties.flatMap { $0.keyframes.map(\.time) }
-            + visuals.transform.scale.keyframes.map(\.time)
-            + visuals.effectStack.effects.flatMap { $0.intensity.keyframes.map(\.time) }
-        return Array(Set(times)).sorted()
+        item.allKeyframeTimes
     }
 
     private func timelineDisplayDuration(for item: TimelineItem) -> Double {
         switch item {
-        case .media(let mediaItem): mediaItem.sourceRange.duration
+        case .media(let mediaItem): mediaItem.timelineDuration
         case .shape(let shapeItem): shapeItem.sourceRange.duration
         case .text(let textItem): textItem.duration
         case .caption(let caption): caption.duration
@@ -326,7 +296,7 @@ private struct TimelineKeyframeMarkers: View {
                     .fill(Color.clear)
                     .overlay {
                         KeyframeDiamondShape()
-                            .stroke(Color.white.opacity(0.72), lineWidth: 1.2)
+                            .stroke(MotionaryTheme.control.opacity(0.72), lineWidth: 1.2)
                     }
                     .frame(width: 9, height: 9)
                     .position(
@@ -365,6 +335,7 @@ struct TimelineItemVisualFill: View {
                 TimelineClipFill(
                     clip: mediaClip,
                     media: media,
+                    speedMap: .constant,
                     width: width,
                     height: height,
                     pixelsPerSecond: pixelsPerSecond,
@@ -373,11 +344,12 @@ struct TimelineItemVisualFill: View {
             } else {
                 Color.orange
             }
-        case .media:
+        case .media(let mediaItem):
             if let mediaClip, let media {
                 TimelineClipFill(
                     clip: mediaClip,
                     media: media,
+                    speedMap: mediaItem.speedMap,
                     width: width,
                     height: height,
                     pixelsPerSecond: pixelsPerSecond,
@@ -443,6 +415,7 @@ private func timelineFirstLine(of text: String) -> String {
 struct TimelineClipFill: View {
     let clip: TimelineClip
     let media: ClipMediaDescriptor
+    let speedMap: SpeedMap
     let width: CGFloat
     let height: CGFloat
     let pixelsPerSecond: CGFloat
@@ -474,6 +447,7 @@ struct TimelineClipFill: View {
                             TimelineThumbnailTile(
                                 clip: clip,
                                 media: media,
+                                speedMap: speedMap,
                                 tileIndex: index,
                                 tileWidth: thumbnailWidth,
                                 height: height,
@@ -498,6 +472,7 @@ struct TimelineClipFill: View {
                 let samples = await TimelineAudioWaveformLoader.samples(
                     for: clip,
                     media: media,
+                    speedMap: speedMap,
                     targetCount: waveformCount
                 )
                 guard !Task.isCancelled, requestID == taskID else { return }
@@ -533,6 +508,7 @@ struct TimelineClipFill: View {
             "\(quantizedWaveformSampleCount)",
             "\(Int(displayScale.rounded()))",
             media.mediaID.rawValue.uuidString,
+            "\(speedMap.topologySignature)",
             String(format: "%.3f", clip.sourceRange.start),
             String(format: "%.3f", clip.sourceRange.duration)
         ].joined(separator: "|")

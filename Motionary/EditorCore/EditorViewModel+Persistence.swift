@@ -220,6 +220,42 @@ extension EditorViewModel {
         }
     }
 
+    func scheduleInteractivePreviewRebuild(
+        invalidation: EditorInvalidation
+    ) {
+        setPreviewQualityForInteraction(true)
+        let interval = 0.06
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - lastInteractivePreviewRebuild
+
+        if elapsed >= interval, !isRenderingPreview {
+            interactivePreviewThrottleTask?.cancel()
+            interactivePreviewThrottleTask = nil
+            lastInteractivePreviewRebuild = now
+            schedulePreviewRebuild(
+                seekTo: currentTime,
+                delay: false,
+                invalidation: invalidation
+            )
+            return
+        }
+
+        guard interactivePreviewThrottleTask == nil else { return }
+        let remaining = isRenderingPreview ? interval : max(interval - elapsed, 0)
+        interactivePreviewThrottleTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(remaining))
+            guard !Task.isCancelled, let self else { return }
+            self.interactivePreviewThrottleTask = nil
+            self.scheduleInteractivePreviewRebuild(invalidation: invalidation)
+        }
+    }
+
+    func cancelInteractivePreviewRebuild() {
+        interactivePreviewThrottleTask?.cancel()
+        interactivePreviewThrottleTask = nil
+        lastInteractivePreviewRebuild = 0
+    }
+
     func persist() {
         autosaveTask?.cancel()
         let snapshot = project
@@ -303,15 +339,31 @@ extension EditorViewModel {
     }
 
     func isTimeInside(_ clip: TimelineClip) -> Bool {
-        currentTime >= clip.timelineStart && currentTime < clip.timelineEnd
+        guard let item = project.item(id: clip.id) else {
+            return currentTime >= clip.timelineStart && currentTime < clip.timelineEnd
+        }
+        return currentTime >= item.timelineStart && currentTime < item.timelineEnd
+    }
+
+    func timelinePlacementDuration(for clip: TimelineClip) -> Double {
+        project.item(id: clip.id)?.placementDuration ?? clip.sourceRange.duration
+    }
+
+    func timelineLocalTime(for clip: TimelineClip) -> Double {
+        min(
+            max(currentTime - clip.timelineStart, 0),
+            timelinePlacementDuration(for: clip)
+        )
     }
 
     func nearestVisibleTime(for clip: TimelineClip) -> Double {
-        let epsilon = min(max(clip.sourceRange.duration * 0.05, 0.001), clipRevealEpsilon)
+        let duration = timelinePlacementDuration(for: clip)
+        let timelineEnd = clip.timelineStart + duration
+        let epsilon = min(max(duration * 0.05, 0.001), clipRevealEpsilon)
         if currentTime < clip.timelineStart {
-            return min(clip.timelineStart + epsilon, max(clip.timelineStart, clip.timelineEnd - epsilon))
+            return min(clip.timelineStart + epsilon, max(clip.timelineStart, timelineEnd - epsilon))
         }
-        return max(clip.timelineStart, clip.timelineEnd - epsilon)
+        return max(clip.timelineStart, timelineEnd - epsilon)
     }
 
     func incrementTimelineContentRevision() {

@@ -61,7 +61,12 @@ actor TimelineAudioWaveformCache {
         cache.totalCostLimit = 16 * 1_024 * 1_024
     }
 
-    func samples(for clip: TimelineClip, media: ClipMediaDescriptor, targetCount: Int) async -> [CGFloat] {
+    func samples(
+        for clip: TimelineClip,
+        media: ClipMediaDescriptor,
+        speedMap: SpeedMap,
+        targetCount: Int
+    ) async -> [CGFloat] {
         let quantizedCount = max(32, Int((Double(targetCount) / 32).rounded(.up)) * 32)
         let key = [
             media.mediaID.rawValue.uuidString,
@@ -71,25 +76,41 @@ actor TimelineAudioWaveformCache {
         ].joined(separator: "|")
 
         if let cached = cache.object(forKey: key as NSString) {
-            return cached.samples
+            return TimelineAudioWaveformLoader.retimedSamples(
+                cached.samples,
+                speedMap: speedMap,
+                sourceDuration: clip.sourceRange.duration
+            )
         }
 
         if let task = inFlight[key] {
-            return await task.value
+            return TimelineAudioWaveformLoader.retimedSamples(
+                await task.value,
+                speedMap: speedMap,
+                sourceDuration: clip.sourceRange.duration
+            )
         }
 
         let task = Task {
-            await TimelineAudioWaveformLoader.generateSamples(for: clip, media: media, targetCount: quantizedCount)
+            await TimelineAudioWaveformLoader.generateSourceSamples(
+                for: clip,
+                media: media,
+                targetCount: quantizedCount
+            )
         }
         inFlight[key] = task
-        let samples = await task.value
+        let sourceSamples = await task.value
         inFlight[key] = nil
         cache.setObject(
-            TimelineWaveformBox(samples),
+            TimelineWaveformBox(sourceSamples),
             forKey: key as NSString,
-            cost: max(samples.count * MemoryLayout<CGFloat>.stride, 1)
+            cost: max(sourceSamples.count * MemoryLayout<CGFloat>.stride, 1)
         )
-        return samples
+        return TimelineAudioWaveformLoader.retimedSamples(
+            sourceSamples,
+            speedMap: speedMap,
+            sourceDuration: clip.sourceRange.duration
+        )
     }
 
     func removeAll() {
@@ -106,11 +127,21 @@ actor TimelineAudioWaveformCache {
 }
 
 enum TimelineAudioWaveformLoader {
-    static func samples(for clip: TimelineClip, media: ClipMediaDescriptor, targetCount: Int) async -> [CGFloat] {
-        await TimelineAudioWaveformCache.shared.samples(for: clip, media: media, targetCount: targetCount)
+    static func samples(
+        for clip: TimelineClip,
+        media: ClipMediaDescriptor,
+        speedMap: SpeedMap,
+        targetCount: Int
+    ) async -> [CGFloat] {
+        await TimelineAudioWaveformCache.shared.samples(
+            for: clip,
+            media: media,
+            speedMap: speedMap,
+            targetCount: targetCount
+        )
     }
 
-    fileprivate static func generateSamples(
+    fileprivate static func generateSourceSamples(
         for clip: TimelineClip,
         media: ClipMediaDescriptor,
         targetCount: Int
@@ -198,6 +229,33 @@ enum TimelineAudioWaveformLoader {
             }
             return normalized
         }.value
+    }
+
+    fileprivate static func retimedSamples(
+        _ sourceSamples: [CGFloat],
+        speedMap: SpeedMap,
+        sourceDuration: Double
+    ) -> [CGFloat] {
+        guard sourceSamples.count > 1, sourceDuration > 0 else { return sourceSamples }
+        let timelineDuration = speedMap.timelineDuration(sourceDuration: sourceDuration)
+        guard timelineDuration > 0 else { return sourceSamples }
+
+        return sourceSamples.indices.map { index in
+            let progress = Double(index) / Double(sourceSamples.count - 1)
+            let sourceTime = speedMap.sourceTime(
+                at: progress * timelineDuration,
+                sourceDuration: sourceDuration
+            )
+            let sourcePosition = min(
+                max(sourceTime / sourceDuration * Double(sourceSamples.count - 1), 0),
+                Double(sourceSamples.count - 1)
+            )
+            let lowerIndex = Int(sourcePosition.rounded(.down))
+            let upperIndex = min(lowerIndex + 1, sourceSamples.count - 1)
+            let fraction = CGFloat(sourcePosition - Double(lowerIndex))
+            return sourceSamples[lowerIndex]
+                + (sourceSamples[upperIndex] - sourceSamples[lowerIndex]) * fraction
+        }
     }
 
     private static func fallbackSamples(count: Int) -> [CGFloat] {

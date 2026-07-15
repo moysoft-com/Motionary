@@ -3,6 +3,151 @@
 import SwiftUI
 import UIKit
 
+struct CanvasWorkspaceView: View {
+    @ObservedObject var viewModel: EditorViewModel
+
+    var body: some View {
+        EditorWorkspaceShell(
+            title: "Canvas",
+            systemImage: "aspectratio"
+        ) {
+            VStack(spacing: 12) {
+                EditorWorkspaceCard(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Label("Format", systemImage: "rectangle.on.rectangle")
+                            .font(.callout.weight(.semibold))
+                        Spacer()
+                        Text(currentResolution)
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(MotionaryTheme.textSecondary)
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            CanvasFormatButton(
+                                title: "Original",
+                                aspectRatio: originalAspectRatio ?? currentAspectRatio,
+                                isSelected: isOriginalSelected,
+                                isEnabled: viewModel.canApplySelectedClipOriginalRatio
+                            ) {
+                                viewModel.setCanvasToSelectedClipOriginalRatio()
+                            }
+
+                            ForEach(CanvasRatioPreset.presets) { preset in
+                                CanvasFormatButton(
+                                    title: preset.title,
+                                    aspectRatio: CGFloat(preset.width) / CGFloat(preset.height),
+                                    isSelected: isSelected(preset)
+                                ) {
+                                    viewModel.setCanvasPreset(preset)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                EditorWorkspaceCard(alignment: .leading, spacing: 10) {
+                    Label("Background", systemImage: "paintpalette")
+                        .font(.callout.weight(.semibold))
+
+                    HStack(spacing: 10) {
+                        ColorPicker(
+                            "Canvas background",
+                            selection: Binding(
+                                get: { viewModel.project.renderSettings.backgroundColor.swiftUIColor },
+                                set: { viewModel.setCanvasBackgroundColor(RGBAColor($0)) }
+                            ),
+                            supportsOpacity: false
+                        )
+                        .labelsHidden()
+
+                        Text("Canvas color")
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        EditorWorkspaceCapsuleIconButton(
+                            systemName: "arrow.counterclockwise",
+                            accessibilityLabel: "Reset canvas background"
+                        ) {
+                            viewModel.setCanvasBackgroundColor(.black)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var isOriginalSelected: Bool {
+        guard let clip = viewModel.selectedClip,
+            clip.mediaType != .audio,
+            let size = viewModel.project.naturalSize(for: clip)?.cgSize
+        else { return false }
+        let width = max(Int(abs(size.width).rounded()), 1)
+        let height = max(Int(abs(size.height).rounded()), 1)
+        return viewModel.project.renderSettings.width == width
+            && viewModel.project.renderSettings.height == height
+    }
+
+    private func isSelected(_ preset: CanvasRatioPreset) -> Bool {
+        viewModel.project.renderSettings.width == preset.width
+            && viewModel.project.renderSettings.height == preset.height
+    }
+
+    private var currentResolution: String {
+        let settings = viewModel.project.renderSettings
+        return "\(settings.width) × \(settings.height)"
+    }
+
+    private var currentAspectRatio: CGFloat {
+        let settings = viewModel.project.renderSettings
+        return CGFloat(settings.width) / CGFloat(max(settings.height, 1))
+    }
+
+    private var originalAspectRatio: CGFloat? {
+        guard let clip = viewModel.selectedClip,
+            clip.mediaType != .audio,
+            let size = viewModel.project.naturalSize(for: clip)?.displaySafeSize
+        else { return nil }
+        return size.width / max(size.height, 1)
+    }
+}
+
+private struct CanvasFormatButton: View {
+    let title: String
+    let aspectRatio: CGFloat
+    let isSelected: Bool
+    var isEnabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            EditorHaptics.tap()
+            action()
+        } label: {
+            VStack(spacing: 7) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .strokeBorder(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary, lineWidth: 1.5)
+                    .aspectRatio(aspectRatio, contentMode: .fit)
+                    .frame(width: 28, height: 30)
+
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
+            .frame(width: 66, height: 64)
+            .background(
+                isSelected ? MotionaryTheme.accent : MotionaryTheme.surface,
+                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.35)
+        .accessibilityLabel("Canvas format \(title)")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
 struct ShapeWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let clip: TimelineClip?
@@ -39,19 +184,11 @@ struct ShapeWorkspaceView: View {
                         )
                     }
 
-                    HStack(spacing: 8) {
-                        Text("Color")
-                            .font(.callout.weight(.medium))
-                        Spacer()
-                        ColorPicker(
-                            "Color",
-                            selection: Binding(
-                                get: { shape.color.swiftUIColor },
-                                set: { viewModel.setSelectedShape(color: RGBAColor($0)) }
-                            ),
-                            supportsOpacity: true
-                        )
-                        .labelsHidden()
+                    EditorWorkspaceColorRow(
+                        title: "Color",
+                        color: shape.color.swiftUIColor
+                    ) {
+                        viewModel.setSelectedShape(color: RGBAColor($0))
                     }
                     .disabled(!isEnabled)
                 }
@@ -118,7 +255,7 @@ struct TransformWorkspaceView: View {
                         }
 
                         HStack(spacing: 10) {
-                            TransformToggleButton(
+                            EditorWorkspaceSelectionButton(
                                 title: "Horizontal",
                                 systemImage: "arrow.left.and.right",
                                 isSelected: clip.transform.isFlippedHorizontally,
@@ -128,7 +265,7 @@ struct TransformWorkspaceView: View {
                                     isFlippedHorizontally: !clip.transform.isFlippedHorizontally
                                 )
                             }
-                            TransformToggleButton(
+                            EditorWorkspaceSelectionButton(
                                 title: "Vertical",
                                 systemImage: "arrow.up.and.down",
                                 isSelected: clip.transform.isFlippedVertically,
@@ -138,15 +275,13 @@ struct TransformWorkspaceView: View {
                                     isFlippedVertically: !clip.transform.isFlippedVertically
                                 )
                             }
-                            Button {
+                            EditorWorkspaceCapsuleIconButton(
+                                systemName: "arrow.counterclockwise",
+                                accessibilityLabel: "Reset transform",
+                                isEnabled: isEnabled
+                            ) {
                                 viewModel.updateSelectedClip { $0.transform = ClipTransform() }
-                            } label: {
-                                Image(systemName: "arrow.counterclockwise")
-                                    .frame(width: 42, height: 38)
-                                    .background(Color.white.opacity(0.08), in: Capsule())
                             }
-                            .buttonStyle(.plain)
-                            .disabled(!isEnabled)
                         }
                     }
                 }
@@ -163,21 +298,20 @@ private struct TextTransformWorkspace: View {
         let isEnabled = viewModel.selectedTimelineItemID == item.id
             && viewModel.currentTime >= item.timelineStart
             && viewModel.currentTime < item.timelineEnd
-        VStack(spacing: 10) {
-            HStack(spacing: 9) {
-                Label("Transform", systemImage: "crop.rotate")
-                    .font(.headline.weight(.semibold))
-                Spacer()
+        EditorWorkspaceShell(
+            title: "Transform",
+            systemImage: "crop.rotate",
+            isEnabled: isEnabled,
+            disablesContentWhenUnavailable: true,
+            accessory: {
                 SectionKeyframeButton(
                     viewModel: viewModel,
                     itemID: item.id,
                     section: .transform,
                     isEnabled: isEnabled
                 )
-            }
-            .frame(height: 22)
-
-            ScrollView {
+            },
+            content: {
                 VStack(spacing: 12) {
                     ForEach(TextTransformControl.allCases) { control in
                         EditorValueScrubber(
@@ -194,7 +328,7 @@ private struct TextTransformWorkspace: View {
                     }
 
                     HStack(spacing: 10) {
-                        TextTransformToggleButton(
+                        EditorWorkspaceSelectionButton(
                             title: "Horizontal",
                             systemImage: "arrow.left.and.right",
                             isSelected: item.visuals.transform.isFlippedHorizontally
@@ -203,7 +337,7 @@ private struct TextTransformWorkspace: View {
                                 transform.isFlippedHorizontally.toggle()
                             }
                         }
-                        TextTransformToggleButton(
+                        EditorWorkspaceSelectionButton(
                             title: "Vertical",
                             systemImage: "arrow.up.and.down",
                             isSelected: item.visuals.transform.isFlippedVertically
@@ -212,25 +346,16 @@ private struct TextTransformWorkspace: View {
                                 transform.isFlippedVertically.toggle()
                             }
                         }
-                        Button {
+                        EditorWorkspaceCapsuleIconButton(
+                            systemName: "arrow.counterclockwise",
+                            accessibilityLabel: "Reset transform"
+                        ) {
                             viewModel.updateTextItem(item.id) { $0.visuals.transform = ClipTransform() }
-                        } label: {
-                            Image(systemName: "arrow.counterclockwise")
-                                .frame(width: 42, height: 38)
-                                .background(Color.white.opacity(0.08), in: Capsule())
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Reset transform")
                     }
                 }
-                .padding(.bottom, 6)
             }
-            .scrollIndicators(.hidden)
-        }
-        .padding(14)
-        .opacity(isEnabled ? 1 : 0.42)
-        .disabled(!isEnabled)
-        .motionaryGlass(cornerRadius: 20)
+        )
     }
 
     private var localTime: Double {
@@ -321,31 +446,6 @@ private enum TextTransformControl: String, CaseIterable, Identifiable {
         case .rotation: item.visuals.transform.rotationDegrees.value(at: time)
         case .scale: item.visuals.transform.scale.value(at: time).x
         }
-    }
-}
-
-private struct TextTransformToggleButton: View {
-    let title: String
-    let systemImage: String
-    let isSelected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button {
-            EditorHaptics.tap()
-            action()
-        } label: {
-            Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(isSelected ? Color.black : MotionaryTheme.textPrimary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 38)
-                .background(
-                    isSelected ? MotionaryTheme.accent : Color.white.opacity(0.08),
-                    in: Capsule()
-                )
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -451,16 +551,26 @@ struct EffectsWorkspaceView: View {
                                 Text(effect.kind.rawValue)
                                     .font(.caption.weight(.semibold))
                                 Spacer()
-                                EffectCommandButton(systemName: "arrow.up", isDisabled: index == 0 || !isEnabled) {
+                                EditorWorkspaceIconButton(
+                                    systemName: "arrow.up",
+                                    accessibilityLabel: "Move effect up",
+                                    isEnabled: index != 0 && isEnabled
+                                ) {
                                     viewModel.moveEffect(effect.id, offset: -1)
                                 }
-                                EffectCommandButton(
+                                EditorWorkspaceIconButton(
                                     systemName: "arrow.down",
-                                    isDisabled: index == clip.effectStack.effects.count - 1 || !isEnabled
+                                    accessibilityLabel: "Move effect down",
+                                    isEnabled: index != clip.effectStack.effects.count - 1 && isEnabled
                                 ) {
                                     viewModel.moveEffect(effect.id, offset: 1)
                                 }
-                                EffectCommandButton(systemName: "trash", isDisabled: !isEnabled, role: .destructive) {
+                                EditorWorkspaceIconButton(
+                                    systemName: "trash",
+                                    accessibilityLabel: "Remove effect",
+                                    isEnabled: isEnabled,
+                                    role: .destructive
+                                ) {
                                     viewModel.removeEffect(effect.id)
                                 }
                             }
@@ -473,7 +583,7 @@ struct EffectsWorkspaceView: View {
                             )
                         }
                         .padding(10)
-                        .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 13))
+                        .background(MotionaryTheme.surfaceSubtle, in: RoundedRectangle(cornerRadius: 13))
                     }
 
                     Menu {
@@ -485,7 +595,7 @@ struct EffectsWorkspaceView: View {
                             .font(.caption.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .frame(height: 38)
-                            .background(Color.white.opacity(0.08), in: Capsule())
+                            .background(MotionaryTheme.surface, in: Capsule())
                     }
                     .buttonStyle(.plain)
                     .disabled(!isEnabled)
@@ -495,7 +605,7 @@ struct EffectsWorkspaceView: View {
     }
 }
 
-private struct PropertyWorkspaceShell<Content: View>: View {
+struct PropertyWorkspaceShell<Content: View>: View {
     @ObservedObject var viewModel: EditorViewModel
     let clip: TimelineClip?
     let title: String
@@ -504,44 +614,42 @@ private struct PropertyWorkspaceShell<Content: View>: View {
     @ViewBuilder let content: (TimelineClip, Bool) -> Content
 
     var body: some View {
-        ZStack {
-
-            if let clip {
-                let isEnabled =
-                    viewModel.selectedClipID == clip.id
-                    && viewModel.isTimeInside(clip)
-                VStack(spacing: 10) {
-                    HStack(spacing: 9) {
-                        Label(title, systemImage: systemImage)
-                            .font(.headline.weight(.semibold))
-                            .labelStyle(.titleAndIcon)
-                        Spacer()
-                        if let section {
-                            SectionKeyframeButton(
-                                viewModel: viewModel,
-                                itemID: clip.id,
-                                section: section,
-                                isEnabled: isEnabled
-                            )
-                        }
-                    }
-                    .frame(height: 22)
-
-                    ScrollView {
-                        content(clip, isEnabled)
-                            .padding(.bottom, 6)
-                    }
-                    .scrollIndicators(.hidden)
+        let isEnabled = clip.map(isWorkspaceEnabled) ?? false
+        EditorWorkspaceShell(
+            title: title,
+            systemImage: systemImage,
+            isEnabled: isEnabled,
+            emptyState: clip == nil
+                ? EditorWorkspaceEmptyState(title: "Select a clip", systemImage: "cursorarrow.click.2")
+                : nil,
+            accessory: {
+                if let clip, let section {
+                    SectionKeyframeButton(
+                        viewModel: viewModel,
+                        itemID: clip.id,
+                        section: section,
+                        isEnabled: isEnabled
+                    )
                 }
-                .padding(14)
-                .opacity(isEnabled ? 1 : 0.42)
-            } else {
-                Label("Select a clip", systemImage: "cursorarrow.click.2")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(MotionaryTheme.textSecondary)
+            },
+            content: {
+                if let clip {
+                    content(clip, isEnabled)
+                }
             }
+        )
+    }
+
+    private func isWorkspaceEnabled(_ clip: TimelineClip) -> Bool {
+        viewModel.selectedClipID == clip.id && isTimeInsideTimelineItem(clip)
+    }
+
+    private func isTimeInsideTimelineItem(_ clip: TimelineClip) -> Bool {
+        guard let item = viewModel.project.item(id: clip.id) else {
+            return viewModel.isTimeInside(clip)
         }
-        .motionaryGlass(cornerRadius: 20)
+        return viewModel.currentTime >= item.timelineStart
+            && viewModel.currentTime < item.timelineEnd
     }
 }
 
@@ -637,7 +745,7 @@ private struct PropertyScrubber: View {
         if viewModel.selectedClipID == clip.id {
             return viewModel.displayedValue(for: target)
         }
-        let time = min(max(viewModel.currentTime - clip.timelineStart, 0), clip.sourceRange.duration)
+        let time = viewModel.timelineLocalTime(for: clip)
         return clip.animatableProperty(for: target)?.value(at: time) ?? 0
     }
 
@@ -872,10 +980,14 @@ struct SectionKeyframeButton: View {
     let isEnabled: Bool
 
     var body: some View {
-        let times = keyframeTimes
+        let times = item?.keyframeTimes(in: section) ?? []
         let hasAny = !times.isEmpty
-        let isCurrent = viewModel.selectedTimelineItemID == itemID
-            && times.contains { abs((item?.timelineStart ?? 0) + $0 - viewModel.currentTime) <= viewModel.keyframeTimeTolerance }
+        let isSelectedItem = viewModel.selectedTimelineItemID == itemID
+        let isCurrent = isSelectedItem
+            && times.contains {
+                abs((item?.timelineStart ?? 0) + $0 - viewModel.currentTime)
+                    <= viewModel.keyframeTimeTolerance
+            }
 
         Button {
             if let item, case .text = item {
@@ -901,21 +1013,14 @@ struct SectionKeyframeButton: View {
         .disabled(!isEnabled || availableTargetCount == 0)
         .opacity(availableTargetCount == 0 ? 0.3 : 1)
         .accessibilityLabel("\(section.rawValue) keyframe")
+        .accessibilityValue(isCurrent ? "At playhead" : (hasAny ? "Active" : "Inactive"))
+        .accessibilityHint(
+            isCurrent ? "Removes the keyframe at the playhead." : "Adds a keyframe at the playhead."
+        )
     }
 
     private var item: TimelineItem? {
         viewModel.project.item(id: itemID)
-    }
-
-    private var keyframeTimes: [Double] {
-        guard let item else { return [] }
-        if let clip = item.legacyClip() {
-            return clip.keyframeTimes(in: section)
-        }
-        if case .text(let text) = item {
-            return text.keyframeTimes(in: section)
-        }
-        return []
     }
 
     private var availableTargetCount: Int {
@@ -1105,7 +1210,7 @@ struct InfiniteScrubberTrack: View {
         GeometryReader { geometry in
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.white.opacity(isEditing ? 0.085 : 0.045))
+                    .fill(Color.primary.opacity(isEditing ? 0.085 : 0.045))
 
                 Canvas { context, size in
                     let spacing = Self.tickSpacing
@@ -1131,7 +1236,7 @@ struct InfiniteScrubberTrack: View {
                             context.fill(
                                 Path(roundedRect: rect, cornerRadius: 0.6),
                                 with: .color(
-                                    Color.white.opacity(isRoundNumber ? 0.52 : 0.24)
+                                    Color.primary.opacity(isRoundNumber ? 0.52 : 0.24)
                                 )
                             )
                         }
@@ -1252,6 +1357,7 @@ struct SelectedLayerMiniTimeline: View {
     @Binding var pixelsPerSecond: CGFloat
     let activeSection: KeyframeSection?
     let graphSegment: KeyframeSegment?
+    @State private var displayTime: Double = 0
 
     init(
         viewModel: EditorViewModel,
@@ -1281,7 +1387,7 @@ struct SelectedLayerMiniTimeline: View {
                     + centerPadding * 2
                 TimelineScrollContainer(
                     pixelsPerSecond: $pixelsPerSecond,
-                    currentTime: viewModel.currentTime,
+                    currentTime: displayTime,
                     duration: viewModel.duration,
                     contentRevision: miniTimelineContentRevision,
                     contentSize: CGSize(width: contentWidth, height: geometry.size.height),
@@ -1304,11 +1410,11 @@ struct SelectedLayerMiniTimeline: View {
                             ZStack {
                                 if item.id == contextClipID {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .fill(Color.white)
+                                        .fill(MotionaryTheme.selected)
                                         .frame(width: width+4, height: 42)
                                         .overlay {
                                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                                .stroke(Color.white, lineWidth: 2)
+                                                .stroke(MotionaryTheme.selected, lineWidth: 2)
                                         }
                                         .allowsHitTesting(false)
                                 }
@@ -1358,11 +1464,29 @@ struct SelectedLayerMiniTimeline: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         .motionaryGlass(cornerRadius: 13)
+        .background {
+            TimelineDisplayLink(
+                player: viewModel.player,
+                isPlaying: viewModel.isPlaying
+            ) { time in
+                displayTime = min(max(time, 0), max(viewModel.duration, 0))
+            }
+            .allowsHitTesting(false)
+        }
+        .onAppear {
+            displayTime = viewModel.currentTime
+        }
+        .onChange(of: playbackState.currentTime) { _, time in
+            guard !viewModel.isPlaying else { return }
+            displayTime = time
+        }
     }
 
     private var miniTimelineContentRevision: Int {
         let frameRate = Double(max(viewModel.project.renderSettings.frameRate, 1))
-        let playheadFrame = Int((viewModel.currentTime * frameRate).rounded())
+        let playheadFrame = viewModel.isPlaying
+            ? 0
+            : Int((viewModel.currentTime * frameRate).rounded())
         let sectionValue: Int
         switch activeSection {
         case .shape: sectionValue = 1
@@ -1370,8 +1494,9 @@ struct SelectedLayerMiniTimeline: View {
         case .adjust: sectionValue = 3
         case .effects: sectionValue = 4
         case .audio: sectionValue = 5
-        case .textType: sectionValue = 6
-        case .textStyle: sectionValue = 7
+        case .speed: sectionValue = 6
+        case .textType: sectionValue = 7
+        case .textStyle: sectionValue = 8
         case nil: sectionValue = 0
         }
         let graphValue: Int
@@ -1428,10 +1553,10 @@ private struct MiniTimelineKeyframes: View {
             )
         let size: CGFloat = isActiveSection ? 12 : 8
         KeyframeDiamondShape()
-            .fill(isCurrent || isGraphEndpoint ? Color.white : Color.clear)
+            .fill(isCurrent || isGraphEndpoint ? MotionaryTheme.control : Color.clear)
             .overlay {
                 KeyframeDiamondShape()
-                    .stroke(Color.white, lineWidth: isActiveSection ? 1.5 : 1)
+                    .stroke(MotionaryTheme.control, lineWidth: isActiveSection ? 1.5 : 1)
             }
             .frame(width: size, height: size)
             .opacity(isActiveSection ? 1 : 0.32)
@@ -1458,58 +1583,6 @@ private struct MiniTimelineKeyframes: View {
     }
 
     private func keyframeTimes(in section: KeyframeSection) -> [Double] {
-        if let clip = item.legacyClip() {
-            return clip.keyframeTimes(in: section)
-        }
-        if case .text(let text) = item {
-            return text.keyframeTimes(in: section)
-        }
-        return []
-    }
-}
-
-
-private struct TransformToggleButton: View {
-    let title: String
-    let systemImage: String
-    let isSelected: Bool
-    let isEnabled: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button {
-            EditorHaptics.tap()
-            action()
-        } label: {
-            Label(title, systemImage: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(isSelected ? Color.black : MotionaryTheme.textPrimary)
-                .frame(maxWidth: .infinity)
-                .frame(height: 38)
-                .background(
-                    isSelected ? MotionaryTheme.accent : Color.white.opacity(0.08),
-                    in: Capsule()
-                )
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
-    }
-}
-
-private struct EffectCommandButton: View {
-    let systemName: String
-    let isDisabled: Bool
-    var role: ButtonRole?
-    let action: () -> Void
-
-    var body: some View {
-        Button(role: role, action: action) {
-            Image(systemName: systemName)
-                .font(.caption.weight(.semibold))
-                .frame(width: 25, height: 25)
-        }
-        .buttonStyle(.plain)
-        .disabled(isDisabled)
-        .opacity(isDisabled ? 0.3 : 1)
+        item.keyframeTimes(in: section)
     }
 }

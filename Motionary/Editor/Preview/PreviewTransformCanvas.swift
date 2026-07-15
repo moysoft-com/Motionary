@@ -1104,7 +1104,7 @@ struct PreviewTransformCanvas: View {
     }
 
     private func localTime(for clip: TimelineClip) -> Double {
-        min(max(viewModel.currentTime - clip.timelineStart, 0), clip.sourceRange.duration)
+        viewModel.timelineLocalTime(for: clip)
     }
 
     private func localTime(for text: TextTimelineItem) -> Double {
@@ -1112,7 +1112,7 @@ struct PreviewTransformCanvas: View {
     }
 
     private func isClipVisible(_ clip: TimelineClip) -> Bool {
-        viewModel.currentTime >= clip.timelineStart && viewModel.currentTime < clip.timelineEnd
+        viewModel.isTimeInside(clip)
     }
 
     private func isTextVisible(_ text: TextTimelineItem) -> Bool {
@@ -1220,6 +1220,12 @@ struct PreviewTransformCanvas: View {
         let timelineTime = viewModel.currentTime
         let targetHeight = max(previewFrame(for: clip, transform: resolved)?.rect.height ?? 80, 80)
         let media = viewModel.project.mediaDescriptor(for: clip)
+        let speedMap: SpeedMap
+        if case .media(let item) = viewModel.project.item(id: clip.id) {
+            speedMap = item.speedMap
+        } else {
+            speedMap = .constant
+        }
         Task {
             async let backgroundImage = viewModel.renderService.makePreviewBackgroundImage(
                 for: viewModel.project,
@@ -1231,6 +1237,7 @@ struct PreviewTransformCanvas: View {
                 ? TimelineThumbnailLoader.image(
                     for: clip,
                     media: media!,
+                    speedMap: speedMap,
                     timelineTime: timelineTime,
                     targetHeight: targetHeight
                 )
@@ -1934,7 +1941,7 @@ struct PreviewSelectionBox: View {
     private func selectionControl(systemName: String) -> some View {
         Image(systemName: systemName)
             .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(Color.black)
+            .foregroundStyle(MotionaryTheme.foregroundOnAccent)
             .frame(width: 22, height: 22)
             .background(MotionaryTheme.accent, in: Circle())
             .frame(width: 30, height: 30)

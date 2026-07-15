@@ -46,7 +46,7 @@ struct CoreToolBar: View {
                 if viewModel.selectedTimelineItem != nil {
                     Divider()
                         .frame(height: 38)
-                        .overlay(Color.white.opacity(0.14))
+                        .overlay(MotionaryTheme.surfaceStrong)
 
                     if isTextSelected {
                         CoreToolButton(
@@ -110,6 +110,26 @@ struct CoreToolBar: View {
                         .accessibilityLabel("Extract audio")
                     }
 
+                    if supportsSpeed {
+                        CoreToolButton(
+                            systemName: propertyToolSystemName(for: .speed, fallback: "speedometer"),
+                            title: propertyToolTitle(for: .speed, fallback: "Speed"),
+                            isSelected: isPropertyToolSelected(.speed)
+                        ) {
+                            openPropertyPanel(.speed)
+                        }
+                    }
+
+                    if supportsMask {
+                        CoreToolButton(
+                            systemName: "circle.lefthalf.filled",
+                            title: "Mask",
+                            isSelected: isPropertyToolSelected(.mask)
+                        ) {
+                            openPropertyPanel(.mask)
+                        }
+                    }
+
                     if supportsVisualAdjustments {
                         CoreToolButton(
                             systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
@@ -145,10 +165,17 @@ struct CoreToolBar: View {
 
                 Divider()
                     .frame(height: 38)
-                    .overlay(Color.white.opacity(0.14))
+                    .overlay(MotionaryTheme.surfaceStrong)
 
-                CanvasRatioMenu(viewModel: viewModel)
-                CanvasColorMenu(viewModel: viewModel)
+                CoreToolButton(
+                    systemName: "aspectratio",
+                    title: "Canvas",
+                    isSelected: activePanel == .canvas
+                ) {
+                    propertyContextClipID = nil
+                    activePanel = activePanel == .canvas ? .timeline : .canvas
+                }
+                .accessibilityLabel("Canvas settings")
             }
             .padding(8)
         }
@@ -168,7 +195,7 @@ struct CoreToolBar: View {
         switch item {
         case .media(let media) where media.mediaType == .audio:
             CoreToolButton(
-                systemName: "waveform",
+                systemName: "speaker.wave.2",
                 title: "Edit",
                 isSelected: true
             ) {
@@ -282,6 +309,22 @@ struct CoreToolBar: View {
         }
     }
 
+    private var supportsSpeed: Bool {
+        guard case .media(let item) = viewModel.selectedTimelineItem else { return false }
+        return item.mediaType == .video || item.mediaType == .audio
+    }
+
+    private var supportsMask: Bool {
+        switch viewModel.selectedTimelineItem {
+        case .media(let item):
+            item.mediaType != .audio
+        case .shape, .text:
+            true
+        default:
+            false
+        }
+    }
+
     private func openTextPanel(_ panel: CoreEditorPanel) {
         propertyContextClipID = viewModel.selectedTimelineItemID
         if panel == .textMotion, activePanel == .textMotionGraph {
@@ -363,75 +406,5 @@ private struct AudioImportMenu: View {
         .buttonStyle(.plain)
         .disabled(viewModel.isImporting)
         .accessibilityLabel("Import audio")
-    }
-}
-
-struct CanvasRatioMenu: View {
-    @ObservedObject var viewModel: EditorViewModel
-
-    var body: some View {
-        Menu {
-            Button {
-                EditorHaptics.tap()
-                viewModel.setCanvasToSelectedClipOriginalRatio()
-            } label: {
-                Label("Original", systemImage: isOriginalSelected ? "checkmark" : "rectangle.ratio")
-            }
-            .disabled(!viewModel.canApplySelectedClipOriginalRatio)
-
-            Divider()
-
-            ForEach(CanvasRatioPreset.presets) { preset in
-                Button {
-                    EditorHaptics.tap()
-                    viewModel.setCanvasPreset(preset)
-                } label: {
-                    Label(preset.title, systemImage: isSelected(preset) ? "checkmark" : "rectangle.ratio")
-                }
-            }
-        } label: {
-            CoreToolButtonContent(systemName: "aspectratio", title: "Ratio")
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Canvas ratio")
-    }
-
-    private var isOriginalSelected: Bool {
-        guard let clip = viewModel.selectedClip,
-            clip.mediaType != .audio,
-            let size = viewModel.project.naturalSize(for: clip)?.cgSize
-        else { return false }
-        let width = max(Int(abs(size.width).rounded()), 1)
-        let height = max(Int(abs(size.height).rounded()), 1)
-        return viewModel.project.renderSettings.width == width && viewModel.project.renderSettings.height == height
-    }
-
-    private func isSelected(_ preset: CanvasRatioPreset) -> Bool {
-        viewModel.project.renderSettings.width == preset.width
-            && viewModel.project.renderSettings.height == preset.height
-    }
-}
-
-private struct CanvasColorMenu: View {
-    @ObservedObject var viewModel: EditorViewModel
-
-    var body: some View {
-        Menu {
-            ColorPicker(
-                "Canvas Color",
-                selection: Binding(
-                    get: { viewModel.project.renderSettings.backgroundColor.swiftUIColor },
-                    set: { viewModel.setCanvasBackgroundColor(RGBAColor($0)) }
-                ),
-                supportsOpacity: false
-            )
-            Button("Reset to Black") {
-                viewModel.setCanvasBackgroundColor(.black)
-            }
-        } label: {
-            CoreToolButtonContent(systemName: "paintpalette", title: "Canvas")
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Canvas color")
     }
 }

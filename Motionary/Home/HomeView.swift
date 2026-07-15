@@ -124,7 +124,7 @@ struct HomeView: View {
                     .font(.subheadline.weight(.semibold))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .foregroundStyle(Color.black)
+                    .foregroundStyle(MotionaryTheme.foregroundOnAccent)
                     .background {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .fill(MotionaryTheme.accent)
@@ -149,7 +149,7 @@ struct HomeView: View {
                     .font(.subheadline.weight(.semibold))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
-                    .foregroundStyle(Color.black)
+                    .foregroundStyle(MotionaryTheme.foregroundOnAccent)
                     .background(MotionaryTheme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)

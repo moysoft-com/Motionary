@@ -16,7 +16,13 @@ enum MotionaryTheme {
     }
     static let textPrimary = Color.primary
     static let textSecondary = Color.primary.opacity(0.66)
+    static let surfaceSubtle = Color.primary.opacity(0.055)
+    static let surface = Color.primary.opacity(0.08)
+    static let surfaceStrong = Color.primary.opacity(0.14)
+    static let separator = Color.primary.opacity(0.1)
+    static let control = Color.primary
     static let accent = Color(red: 0.44, green: 0.84, blue: 1)
+    static let foregroundOnAccent = Color.black
     static let audio = Color(red: 0.64, green: 0.38, blue: 1)
     static let video = Color(red: 0.44, green: 0.84, blue: 1)
     static let selected = Color.primary
@@ -46,10 +52,13 @@ extension View {
 /// Labeled inspector slider with an optional keyframe action.
 struct InspectorSlider: View {
     let title: String
-    let systemImage: String
+    var systemImage: String?
     @Binding var value: Double
     let range: ClosedRange<Double>
     var step: Double = 0.01
+    var format: (Double) -> String = {
+        $0.formatted(.number.precision(.fractionLength(2)))
+    }
     var isAnimated = false
     var hasKeyframeAtPlayhead = false
     var onKeyframe: (() -> Void)?
@@ -57,18 +66,19 @@ struct InspectorSlider: View {
     var onEditingChanged: (Bool) -> Void = { _ in }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
-                Image(systemName: systemImage)
-                    .foregroundStyle(MotionaryTheme.textSecondary)
-                    .frame(width: 18)
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                        .frame(width: 18)
+                }
                 Text(title)
-                    .font(.caption)
-                    .foregroundStyle(MotionaryTheme.textSecondary)
+                    .font(.caption.weight(.medium))
                 Spacer()
-                Text(value, format: .number.precision(.fractionLength(2)))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(MotionaryTheme.textPrimary)
+                Text(format(value))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(MotionaryTheme.textSecondary)
                 if let onKeyframe {
                     Button(action: onKeyframe) {
                         Image(systemName: hasKeyframeAtPlayhead ? "diamond.fill" : "diamond")

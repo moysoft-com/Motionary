@@ -160,6 +160,7 @@ extension EditorViewModel {
     }
 
     func finishInteractiveEdit(rebuild: Bool = true) {
+        cancelInteractivePreviewRebuild()
         setPreviewQualityForInteraction(false)
         guard let snapshot = interactiveEditSnapshot else {
             persist()

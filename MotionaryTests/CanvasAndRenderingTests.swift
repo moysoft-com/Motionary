@@ -1,6 +1,8 @@
 // Canvas sizing and empty-composition rendering tests.
 
 import AVFoundation
+import CoreImage
+import CoreImage.CIFilterBuiltins
 import Foundation
 import Testing
 import UIKit
@@ -9,6 +11,40 @@ import UIKit
 
 @Suite(.serialized)
 struct CanvasAndRenderingTests {
+    @Test func generatedTextIsActiveInItsFirstOverlappingFrame() {
+        let text = TextTimelineItem(
+            text: "Frame aligned",
+            timelineStart: 1.01,
+            duration: 1
+        )
+        let descriptor = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            clipID: text.id,
+            timelineStart: text.timelineStart,
+            duration: text.duration,
+            sourceTransform: .identity,
+            transform: text.visuals.transform,
+            adjustments: text.visuals.adjustments,
+            effectStack: text.visuals.effectStack,
+            mask: nil,
+            shape: nil,
+            text: text,
+            renderOrder: 0
+        )
+        let instruction = MotionaryVideoCompositionInstruction(
+            timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 3, preferredTimescale: 600)),
+            clips: [descriptor],
+            sourceTrackIDs: [],
+            renderSize: CGSize(width: 1080, height: 1920),
+            renderScale: 1,
+            backgroundColor: .black,
+            frameDuration: 1 / 30
+        )
+
+        #expect(instruction.activeClips(at: 0.97).isEmpty)
+        #expect(instruction.activeClips(at: 1).map(\.clipID) == [text.id])
+    }
+
     @MainActor
     @Test func configurableExporterWritesRequestedDimensions() async throws {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 96)).image { context in
@@ -34,10 +70,14 @@ struct CanvasAndRenderingTests {
             timelineStart: 0,
             sourceRange: TimeRangeValue(start: 0, duration: 0.2)
         )
-        let project = EditorProject(
+        var project = EditorProject(
             title: "Export",
             renderSettings: RenderSettings(width: 64, height: 96, frameRate: 10),
             tracks: [TimelineTrack(name: "Layer 1", kind: .visual, clips: [clip])]
+        )
+        project.setSpeedMap(
+            for: clip.id,
+            speedMap: .constant(speed: 0.5)
         )
         let settings = VideoExportSettings(
             width: 80,
@@ -64,7 +104,24 @@ struct CanvasAndRenderingTests {
 
         #expect(Int(outputSize.width.rounded()) == 80)
         #expect(Int(outputSize.height.rounded()) == 120)
-        #expect(CMTimeGetSeconds(try await outputAsset.load(.duration)) > 0)
+        #expect(CMTimeGetSeconds(try await outputAsset.load(.duration)) > 0.28)
+
+        let frame = try await AVAssetImageGenerator(asset: outputAsset).image(
+            at: CMTime(seconds: 0.24, preferredTimescale: 600)
+        ).image
+        let average = CIFilter.areaAverage()
+        average.inputImage = CIImage(cgImage: frame)
+        let averageImage = try #require(average.outputImage)
+        var pixel = [UInt8](repeating: 0, count: 4)
+        CIContext().render(
+            averageImage,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: nil
+        )
+        #expect(pixel[0] > 10 || pixel[1] > 10 || pixel[2] > 10)
     }
 
     @Test func videoTrackMatricesNormalizeFullDisplayGeometry() async throws {

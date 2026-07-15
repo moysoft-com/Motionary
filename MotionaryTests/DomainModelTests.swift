@@ -379,12 +379,44 @@ struct DomainModelTests {
         #expect(decoded.keyframeTimes(in: .textStyle) == [0, 2])
     }
 
-    @Test func speedMapStretchesTimelineDuration() async throws {
-        let speedMap = SpeedMap(keyframes: [
-            SpeedKeyframe(time: 0, speed: 2),
-            SpeedKeyframe(time: 4, speed: 2)
-        ])
+    @Test func staticSpeedMapRoundTripsTimelineTime() async throws {
+        let speedMap = SpeedMap.constant(speed: 2)
         let duration = speedMap.timelineDuration(sourceDuration: 4)
-        #expect(abs(duration - 2) < 0.2)
+        #expect(abs(duration - 2) < 0.000_001)
+        for sourceTime in stride(from: 0.0, through: 4.0, by: 0.125) {
+            let timelineTime = speedMap.timelineTime(at: sourceTime, sourceDuration: 4)
+            #expect(abs(speedMap.sourceTime(at: timelineTime, sourceDuration: 4) - sourceTime) < 0.000_001)
+        }
+    }
+
+    @Test func mediaItemsCollapseLegacySpeedRampsToStaticSpeed() {
+        let item = MediaTimelineItem(
+            name: "Legacy ramp",
+            mediaID: MediaID(),
+            mediaType: .audio,
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 4),
+            speedMap: SpeedMap(
+                keyframes: [
+                    SpeedKeyframe(time: 0, speed: 1.5),
+                    SpeedKeyframe(time: 2, speed: 0.5),
+                ]
+            )
+        )
+
+        #expect(item.speedMap == .constant(speed: 1.5))
+        #expect(abs(item.timelineDuration - (4 / 1.5)) < 0.000_001)
+    }
+
+    @Test func maskDecodingCanonicalizesPersistedValues() throws {
+        let data = Data(
+            #"{"shape":"ellipse","insetX":0.9,"insetY":-1,"feather":0.7}"#.utf8
+        )
+        let mask = try JSONDecoder().decode(ItemMask.self, from: data)
+
+        #expect(mask.shape == .ellipse)
+        #expect(mask.insetX == 0.48)
+        #expect(mask.insetY == 0)
+        #expect(mask.feather == 0.25)
     }
 }

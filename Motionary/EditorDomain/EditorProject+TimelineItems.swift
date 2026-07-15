@@ -1,4 +1,4 @@
-// Typed timeline item helpers for compound sequences, text, and transitions.
+// Typed timeline item helpers for compound sequences, text, and static speed.
 
 import Foundation
 
@@ -79,24 +79,12 @@ extension EditorProject {
         return item
     }
 
-    mutating func setTransitionOut(for itemID: UUID, transition: TimelineTransition?) {
-        guard let location = itemLocation(id: itemID) else { return }
-        switch tracks[location.track].items[location.item] {
-        case .media(var item):
-            item.transitionOut = transition
-            tracks[location.track].items[location.item] = .media(item)
-        case .shape(var item):
-            item.transitionOut = transition
-            tracks[location.track].items[location.item] = .shape(item)
-        default:
-            break
-        }
-    }
-
     mutating func setSpeedMap(for itemID: UUID, speedMap: SpeedMap) {
         guard let location = itemLocation(id: itemID) else { return }
         guard case .media(var item) = tracks[location.track].items[location.item] else { return }
-        item.speedMap = speedMap
+        item.speedMap = item.mediaType == .video || item.mediaType == .audio
+            ? .constant(speed: speedMap.speed(at: 0))
+            : .constant
         tracks[location.track].items[location.item] = .media(item)
     }
 

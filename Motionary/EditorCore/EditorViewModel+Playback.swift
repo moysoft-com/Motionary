@@ -21,6 +21,8 @@ extension EditorViewModel {
     func stop() {
         let content = ProjectContent(editorProject: project)
         autosaveTask?.cancel()
+        interactivePreviewThrottleTask?.cancel()
+        interactivePreviewThrottleTask = nil
         autosaveTask = Task { [projectStore, projectID] in
             try? await projectStore.repository.save(content, projectID: projectID)
         }
@@ -110,6 +112,9 @@ extension EditorViewModel {
         redoStack.append(command)
         restoreSelectionIfPossible(retainedClipID)
         incrementTimelineContentRevision()
+        if graphSegment != nil {
+            refreshGraphSegment()
+        }
         updateHistoryFlags()
         persist()
         schedulePreviewRebuild(
@@ -125,6 +130,9 @@ extension EditorViewModel {
         undoStack.append(command)
         restoreSelectionIfPossible(retainedClipID)
         incrementTimelineContentRevision()
+        if graphSegment != nil {
+            refreshGraphSegment()
+        }
         updateHistoryFlags()
         persist()
         schedulePreviewRebuild(
@@ -202,10 +210,10 @@ extension EditorViewModel {
 
     var navigationPoints: [Double] {
         let points: [Double]
-        if let clip = selectedClip {
+        if let item = selectedTimelineItem {
             points =
-                [clip.timelineStart, clip.timelineEnd]
-                + clip.allKeyframeTimes.map { clip.timelineStart + $0 }
+                [item.timelineStart, item.timelineEnd]
+                + item.allKeyframeTimes.map { item.timelineStart + $0 }
         } else {
             points = project.tracks.flatMap(\.items).flatMap {
                 [$0.timelineStart, $0.timelineEnd]

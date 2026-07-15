@@ -1,4 +1,4 @@
-// Transitions, speed maps, masks, text styles, and compound sequence metadata.
+// Speed maps, masks, text styles, and compound sequence metadata.
 
 import Foundation
 
@@ -19,73 +19,83 @@ enum BlendMode: String, Codable, CaseIterable, Sendable {
     case softLight
 }
 
-enum TransitionKind: String, Codable, CaseIterable, Sendable {
-    case crossDissolve
-    case fadeToBlack
-    case wipeLeft
-}
-
-struct TimelineTransition: Codable, Equatable, Sendable {
-    var kind: TransitionKind
-    var duration: Double
-
-    init(kind: TransitionKind = .crossDissolve, duration: Double = 0.5) {
-        self.kind = kind
-        self.duration = max(0, duration)
-    }
-}
-
 struct SpeedKeyframe: Codable, Equatable, Sendable {
     var time: Double
     var speed: Double
+}
+
+struct SpeedMapSegment: Equatable, Sendable {
+    var sourceStart: Double
+    var sourceDuration: Double
+    var timelineDuration: Double
 }
 
 struct SpeedMap: Codable, Equatable, Sendable {
     var keyframes: [SpeedKeyframe]
 
     init(keyframes: [SpeedKeyframe] = []) {
-        self.keyframes = keyframes.sorted { $0.time < $1.time }
+        let initial = keyframes
+            .map {
+                SpeedKeyframe(
+                    time: $0.time.isFinite ? max($0.time, 0) : 0,
+                    speed: Self.boundedSpeed($0.speed)
+                )
+            }
+            .sorted { $0.time < $1.time }
+            .first
+        self.keyframes = [
+            SpeedKeyframe(time: 0, speed: initial?.speed ?? 1)
+        ]
     }
 
-    static let constant = SpeedMap(keyframes: [SpeedKeyframe(time: 0, speed: 1)])
+    static let constant = constant(speed: 1)
+
+    static func constant(speed: Double) -> SpeedMap {
+        SpeedMap(
+            keyframes: [SpeedKeyframe(time: 0, speed: boundedSpeed(speed))]
+        )
+    }
+
+    var hasVariableSpeed: Bool {
+        guard let firstSpeed = keyframes.first?.speed else { return false }
+        return keyframes.dropFirst().contains {
+            abs($0.speed - firstSpeed) > 0.000_001
+        }
+    }
 
     func speed(at sourceTime: Double) -> Double {
-        guard !keyframes.isEmpty else { return 1 }
-        guard let first = keyframes.first, let last = keyframes.last else { return 1 }
-        if sourceTime <= first.time { return max(first.speed, 0.01) }
-        if sourceTime >= last.time { return max(last.speed, 0.01) }
-
-        var lower = 0
-        var upper = keyframes.count - 1
-        while lower + 1 < upper {
-            let midpoint = (lower + upper) / 2
-            if keyframes[midpoint].time <= sourceTime {
-                lower = midpoint
-            } else {
-                upper = midpoint
-            }
-        }
-        let left = keyframes[lower]
-        let right = keyframes[upper]
-        let span = max(right.time - left.time, 0.000_001)
-        let progress = (sourceTime - left.time) / span
-        return max(left.speed + (right.speed - left.speed) * progress, 0.01)
+        guard let first = keyframes.first else { return 1 }
+        let sourceTime = sourceTime.isFinite ? max(sourceTime, 0) : 0
+        return keyframes.last(where: { $0.time <= sourceTime + 0.000_001 })?.speed
+            ?? first.speed
     }
 
     func timelineDuration(sourceDuration: Double) -> Double {
-        let safeDuration = max(sourceDuration, 0)
+        let safeDuration = Self.safeDuration(sourceDuration)
         guard safeDuration > 0 else { return 0 }
-        if keyframes.isEmpty || (keyframes.count == 1 && abs(keyframes[0].speed - 1) < 0.0001) {
-            return safeDuration
+        return renderSegments(sourceDuration: safeDuration)
+            .reduce(0) { $0 + $1.timelineDuration }
+    }
+
+    func timelineTime(at sourceTime: Double, sourceDuration: Double) -> Double {
+        let safeDuration = Self.safeDuration(sourceDuration)
+        let safeSourceTime = sourceTime.isFinite ? sourceTime : 0
+        let target = min(max(safeSourceTime, 0), safeDuration)
+        var elapsed = 0.0
+        for segment in renderSegments(sourceDuration: safeDuration) {
+            let segmentSourceEnd = segment.sourceStart + segment.sourceDuration
+            if target >= segmentSourceEnd {
+                elapsed += segment.timelineDuration
+                continue
+            }
+            if target > segment.sourceStart {
+                elapsed += (target - segment.sourceStart)
+                    / segment.sourceDuration
+                    * segment.timelineDuration
+            }
+            break
         }
-        let sampleCount = min(max(Int(safeDuration * 12), 1), 96)
-        let step = safeDuration / Double(sampleCount)
-        var timelineTime = 0.0
-        for index in 0..<sampleCount {
-            let sourceTime = min(Double(index) * step, safeDuration)
-            timelineTime += step / speed(at: sourceTime)
-        }
-        return timelineTime
+        return elapsed
     }
 
     var topologySignature: UInt64 {
@@ -99,24 +109,161 @@ struct SpeedMap: Codable, Equatable, Sendable {
     }
 
     func sourceTime(at timelineTime: Double, sourceDuration: Double) -> Double {
-        let safeDuration = max(sourceDuration, 0)
-        guard safeDuration > 0, timelineTime > 0 else { return 0 }
-        let target = min(max(timelineTime, 0), timelineDuration(sourceDuration: safeDuration))
+        let safeDuration = Self.safeDuration(sourceDuration)
+        let safeTimelineTime = timelineTime.isFinite ? timelineTime : 0
+        guard safeDuration > 0, safeTimelineTime > 0 else { return 0 }
+        let target = min(
+            safeTimelineTime,
+            self.timelineDuration(sourceDuration: safeDuration)
+        )
         var elapsed = 0.0
-        let sampleCount = max(Int(safeDuration * 60), 1)
-        let step = safeDuration / Double(sampleCount)
-        var sourceCursor = 0.0
-        while sourceCursor < safeDuration {
-            let localSpeed = speed(at: sourceCursor)
-            let timelineStep = step / localSpeed
-            if elapsed + timelineStep >= target {
-                let remaining = target - elapsed
-                return min(sourceCursor + remaining * localSpeed, safeDuration)
+        for segment in renderSegments(sourceDuration: safeDuration) {
+            let segmentEnd = elapsed + segment.timelineDuration
+            if target <= segmentEnd + 0.000_000_001 {
+                let localTimelineTime = min(max(target - elapsed, 0), segment.timelineDuration)
+                return min(
+                    segment.sourceStart
+                        + localTimelineTime
+                        / segment.timelineDuration
+                        * segment.sourceDuration,
+                    segment.sourceStart + segment.sourceDuration
+                )
             }
-            elapsed += timelineStep
-            sourceCursor += step
+            elapsed = segmentEnd
         }
         return safeDuration
+    }
+
+    func renderSegments(sourceDuration: Double) -> [SpeedMapSegment] {
+        let duration = Self.safeDuration(sourceDuration)
+        guard duration > 0 else { return [] }
+        var result: [SpeedMapSegment] = []
+        var sourceStart = 0.0
+        var currentSpeed = keyframes.first?.speed ?? 1
+
+        for keyframe in keyframes.dropFirst() {
+            guard keyframe.time < duration else { break }
+            let segmentDuration = keyframe.time - sourceStart
+            if segmentDuration > 0 {
+                result.append(
+                    SpeedMapSegment(
+                        sourceStart: sourceStart,
+                        sourceDuration: segmentDuration,
+                        timelineDuration: segmentDuration / currentSpeed
+                    )
+                )
+            }
+            sourceStart = keyframe.time
+            currentSpeed = keyframe.speed
+        }
+        let finalDuration = duration - sourceStart
+        if finalDuration > 0 {
+            result.append(
+                SpeedMapSegment(
+                    sourceStart: sourceStart,
+                    sourceDuration: finalDuration,
+                    timelineDuration: finalDuration / currentSpeed
+                )
+            )
+        }
+        return result
+    }
+
+    /// Removes speed points that cannot affect this source range. The zero-time
+    /// anchor is retained because every speed map needs an initial segment value.
+    func clamped(toSourceDuration sourceDuration: Double) -> SpeedMap {
+        let duration = sourceDuration.isFinite ? max(sourceDuration, 0) : 0
+        guard duration > 0 else {
+            return .constant(speed: keyframes.first?.speed ?? 1)
+        }
+        let relevant = keyframes.filter {
+            $0.time <= 0.000_001 || $0.time < duration - 0.000_001
+        }
+        return SpeedMap(keyframes: relevant)
+    }
+
+    func sliced(from sourceStart: Double, duration: Double) -> SpeedMap {
+        let start = sourceStart.isFinite ? sourceStart : 0
+        let sliceDuration = duration.isFinite ? max(duration, 0) : 0
+        let sampledStart = max(start, 0)
+        let sourceEnd = start + sliceDuration
+        var slicedKeyframes = [SpeedKeyframe(time: 0, speed: speed(at: sampledStart))]
+        slicedKeyframes.append(
+            contentsOf: keyframes.compactMap { keyframe in
+                guard keyframe.time > sampledStart + 0.000_001,
+                    keyframe.time < sourceEnd - 0.000_001
+                else { return nil }
+                return SpeedKeyframe(
+                    time: keyframe.time - start,
+                    speed: keyframe.speed
+                )
+            }
+        )
+        return SpeedMap(keyframes: slicedKeyframes)
+    }
+
+    func hasKeyframe(at sourceTime: Double, tolerance: Double) -> Bool {
+        keyframes.contains { abs($0.time - sourceTime) <= tolerance }
+    }
+
+    func addingKeyframe(at sourceTime: Double, tolerance: Double) -> SpeedMap {
+        guard !hasKeyframe(at: sourceTime, tolerance: tolerance) else { return self }
+        let sourceTime = sourceTime.isFinite ? max(sourceTime, 0) : 0
+        var updated = keyframes
+        updated.append(
+            SpeedKeyframe(
+                time: sourceTime,
+                speed: speed(at: sourceTime)
+            )
+        )
+        return SpeedMap(keyframes: updated)
+    }
+
+    func removingKeyframe(at sourceTime: Double, tolerance: Double) -> SpeedMap {
+        guard sourceTime > tolerance else { return self }
+        let updated = keyframes.filter { abs($0.time - sourceTime) > tolerance }
+        return SpeedMap(keyframes: updated)
+    }
+
+    func settingSpeed(
+        _ speed: Double,
+        at sourceTime: Double,
+        createKeyframe: Bool,
+        tolerance: Double
+    ) -> SpeedMap {
+        guard createKeyframe else { return .constant(speed: speed) }
+        let sourceTime = sourceTime.isFinite ? max(sourceTime, 0) : 0
+        var updated = keyframes
+        if let index = updated.firstIndex(where: { abs($0.time - sourceTime) <= tolerance }) {
+            updated[index].speed = Self.boundedSpeed(speed)
+        } else {
+            updated.append(
+                SpeedKeyframe(
+                    time: sourceTime,
+                    speed: Self.boundedSpeed(speed)
+                )
+            )
+        }
+        return SpeedMap(keyframes: updated)
+    }
+
+    private static func boundedSpeed(_ speed: Double) -> Double {
+        guard speed.isFinite else { return 1 }
+        return min(max(speed, 0.1), 8)
+    }
+
+    private static func safeDuration(_ duration: Double) -> Double {
+        duration.isFinite ? max(duration, 0) : 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case keyframes
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let keyframes = try container.decodeIfPresent([SpeedKeyframe].self, forKey: .keyframes) ?? []
+        self.init(keyframes: keyframes)
     }
 }
 
@@ -138,9 +285,34 @@ struct ItemMask: Codable, Equatable, Sendable {
         feather: Double = 0
     ) {
         self.shape = shape
-        self.insetX = max(0, insetX)
-        self.insetY = max(0, insetY)
-        self.feather = max(0, feather)
+        self.insetX = Self.bounded(insetX, to: 0...0.48)
+        self.insetY = Self.bounded(insetY, to: 0...0.48)
+        self.feather = Self.bounded(feather, to: 0...0.25)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case shape
+        case insetX
+        case insetY
+        case feather
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            shape: try container.decodeIfPresent(Shape.self, forKey: .shape) ?? .rectangle,
+            insetX: try container.decodeIfPresent(Double.self, forKey: .insetX) ?? 0,
+            insetY: try container.decodeIfPresent(Double.self, forKey: .insetY) ?? 0,
+            feather: try container.decodeIfPresent(Double.self, forKey: .feather) ?? 0
+        )
+    }
+
+    private static func bounded(
+        _ value: Double,
+        to range: ClosedRange<Double>
+    ) -> Double {
+        guard value.isFinite else { return range.lowerBound }
+        return min(max(value, range.lowerBound), range.upperBound)
     }
 }
 

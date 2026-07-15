@@ -101,6 +101,8 @@ final class EditorViewModel: ObservableObject {
     var exportTask: Task<Void, Never>?
     var toastTask: Task<Void, Never>?
     var autosaveTask: Task<Void, Never>?
+    var interactivePreviewThrottleTask: Task<Void, Never>?
+    var lastInteractivePreviewRebuild: CFAbsoluteTime = 0
     var pendingScrubSeekTime: Double?
     var scrubSessionGeneration = 0
     var interactiveEditSnapshot: EditorProject?
@@ -178,6 +180,15 @@ final class EditorViewModel: ObservableObject {
             ?? initialContent.editorProject.tracks.first?.id
         selectionState.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
+            .store(in: &stateCancellables)
+        playbackState.$currentTime
+            .map { [weak self] currentTime in
+                guard let item = self?.selectedTimelineItem else { return false }
+                return currentTime >= item.timelineStart && currentTime < item.timelineEnd
+            }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &stateCancellables)
         timelineState.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }

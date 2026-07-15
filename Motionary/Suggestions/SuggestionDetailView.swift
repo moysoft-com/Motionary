@@ -76,7 +76,7 @@ struct SuggestionDetailView: View {
                         }
                         .font(.headline)
                         .padding(14)
-                        .foregroundStyle(isVoted ? Color.black : MotionaryTheme.accent)
+                        .foregroundStyle(isVoted ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.accent)
                         .background(
                             isVoted ? MotionaryTheme.accent : Color.primary.opacity(0.07),
                             in: .rect(cornerRadius: 16, style: .continuous)

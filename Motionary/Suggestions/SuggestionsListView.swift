@@ -301,7 +301,7 @@ private struct SuggestionFilterBar: View {
                             .font(.subheadline.weight(.semibold))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 9)
-                            .foregroundStyle(selectedFilter == filter ? Color.black : MotionaryTheme.textSecondary)
+                            .foregroundStyle(selectedFilter == filter ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textSecondary)
                             .background(
                                 selectedFilter == filter ? MotionaryTheme.accent : Color.primary.opacity(0.07),
                                 in: Capsule(style: .continuous)
@@ -408,7 +408,7 @@ private struct SuggestionCard: View {
                         .font(.headline.monospacedDigit())
                         .contentTransition(.numericText())
                 }
-                .foregroundStyle(isVoted ? Color.black : MotionaryTheme.accent)
+                .foregroundStyle(isVoted ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.accent)
                 .frame(width: 52, height: 58)
                 .background(
                     isVoted ? MotionaryTheme.accent : Color.primary.opacity(0.07),

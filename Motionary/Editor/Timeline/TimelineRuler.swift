@@ -48,13 +48,13 @@ struct EmbeddedTimelineRuler: View {
                         path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
                         path.addLine(to: CGPoint(x: x, y: 29))
                         context.stroke(
-                            path, with: .color(.white.opacity(isMajor ? 0.48 : 0.16)), lineWidth: isMajor ? 1.1 : 0.8)
+                            path, with: .color(.primary.opacity(isMajor ? 0.48 : 0.16)), lineWidth: isMajor ? 1.1 : 0.8)
 
                         if isMajor {
                             context.draw(
                                 Text(formatRulerTime(time, interval: majorInterval))
                                     .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.white.opacity(0.62)),
+                                    .foregroundStyle(.primary.opacity(0.62)),
                                 at: CGPoint(x: x + 22, y: 10)
                             )
                         }
@@ -136,13 +136,13 @@ struct FixedTimelineRuler: View {
                     path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
                     path.addLine(to: CGPoint(x: x, y: 29))
                     context.stroke(
-                        path, with: .color(.white.opacity(isMajor ? 0.48 : 0.16)), lineWidth: isMajor ? 1.1 : 0.8)
+                        path, with: .color(.primary.opacity(isMajor ? 0.48 : 0.16)), lineWidth: isMajor ? 1.1 : 0.8)
 
                     if isMajor {
                         context.draw(
                             Text(formatRulerTime(time, interval: majorInterval))
                                 .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.62)),
+                                .foregroundStyle(.primary.opacity(0.62)),
                             at: CGPoint(x: x + 22, y: 10)
                         )
                     }

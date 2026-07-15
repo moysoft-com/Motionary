@@ -49,7 +49,7 @@ struct TimelineTrackRow: View {
                 .zIndex(300)
 
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.white.opacity(0.035))
+                .fill(MotionaryTheme.surfaceSubtle)
                 .frame(width: max(10 + CGFloat(projectDuration) * pixelsPerSecond, 0), height: height)
                 .offset(x: centerPadding - 5)
                 .contentShape(Rectangle())
@@ -173,7 +173,7 @@ struct TimelineTrackRow: View {
         .foregroundStyle(MotionaryTheme.textSecondary)
         .padding(.horizontal, 10)
         .frame(width: trackLabelWidth, height: height, alignment: .leading)
-        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(MotionaryTheme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .popover(isPresented: $isShowingDeleteConfirmation, arrowEdge: .leading) {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Delete \(track.name)?")

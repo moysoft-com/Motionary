@@ -76,6 +76,7 @@ enum KeyframeSection: String, CaseIterable, Identifiable {
     case adjust = "Adjust"
     case effects = "Effects"
     case audio = "Audio"
+    case speed = "Speed"
     case textType = "Type"
     case textStyle = "Style"
 

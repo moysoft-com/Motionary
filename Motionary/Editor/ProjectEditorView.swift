@@ -16,6 +16,9 @@ enum CoreEditorPanel: Equatable {
     case adjust
     case effects
     case audio
+    case speed
+    case mask
+    case canvas
     case graph
 }
 
@@ -119,6 +122,14 @@ struct ProjectEditorView: View {
                         isSupported = clip.mediaType != .audio
                     case .audio:
                         isSupported = clip.mediaType == .audio || clip.mediaType == .video
+                    case .speed:
+                        if case .media(let media) = viewModel.project.item(id: clipID) {
+                            isSupported = media.mediaType == .video || media.mediaType == .audio
+                        } else {
+                            isSupported = false
+                        }
+                    case .mask:
+                        isSupported = clip.mediaType != .audio
                     default:
                         isSupported = true
                     }
@@ -129,12 +140,13 @@ struct ProjectEditorView: View {
                     let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
                     if !panelToCheck.isTextPanel
                         && panelToCheck != .transform
+                        && panelToCheck != .mask
                         && panelToCheck != .timeline
                     {
                         activePanel = .timeline
                     }
                 }
-            } else {
+            } else if activePanel != .canvas {
                 activePanel = .timeline
             }
         }
@@ -363,6 +375,18 @@ struct ProjectEditorView: View {
                 viewModel: viewModel,
                 clip: propertyContextClip
             )
+        case .speed:
+            SpeedWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextTimelineItem
+            )
+        case .mask:
+            MaskWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextTimelineItem
+            )
+        case .canvas:
+            CanvasWorkspaceView(viewModel: viewModel)
         case .graph:
             KeyframeWorkspaceView(viewModel: viewModel)
         }
@@ -562,7 +586,8 @@ private struct EditorPlaybackControlBar: View {
 
 extension CoreEditorPanel {
     var isPropertyPanel: Bool {
-        isTextPanel || self == .shape || self == .transform || self == .adjust || self == .effects || self == .audio
+        isTextPanel || self == .shape || self == .transform || self == .adjust || self == .effects
+            || self == .audio || self == .speed || self == .mask
     }
 
     var isTextPanel: Bool {
@@ -592,7 +617,9 @@ extension CoreEditorPanel {
             .effects
         case .audio:
             .audio
-        case .timeline, .graph:
+        case .speed:
+            nil
+        case .mask, .canvas, .timeline, .graph:
             nil
         }
     }

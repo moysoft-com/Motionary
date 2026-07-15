@@ -152,6 +152,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                             to: image
                         )
                     }
+                    image = self.applyMask(clip.mask, to: image)
                     image = self.place(
                         image,
                         clip: clip,
@@ -163,18 +164,6 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
 
                     var opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
                     opacity *= textAnimationSample?.opacity ?? 1
-                    if let transition = clip.transitionOut, transition.duration > 0 {
-                        let fadeStart = max(clip.duration - transition.duration, 0)
-                        if localTime >= fadeStart {
-                            let progress = min(max((localTime - fadeStart) / transition.duration, 0), 1)
-                            switch transition.kind {
-                            case .crossDissolve, .fadeToBlack:
-                                opacity *= 1 - progress
-                            case .wipeLeft:
-                                opacity *= 1 - progress
-                            }
-                        }
-                    }
                     image = self.applyOpacity(opacity, to: image)
                     output = image.composited(over: output)
                 }
@@ -346,6 +335,72 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         return image
             .cropped(to: visibleRect)
             .composited(over: transparent)
+            .cropped(to: extent)
+    }
+
+    private func applyMask(_ mask: ItemMask?, to image: CIImage) -> CIImage {
+        guard let mask else { return image }
+        let extent = image.extent
+        guard extent.width > 1, extent.height > 1 else { return image }
+
+        let insetRect = extent.insetBy(
+            dx: extent.width * CGFloat(min(max(mask.insetX, 0), 0.48)),
+            dy: extent.height * CGFloat(min(max(mask.insetY, 0), 0.48))
+        )
+        guard insetRect.width > 1, insetRect.height > 1 else {
+            return transparentImage(croppedTo: extent)
+        }
+
+        let maskImage: CIImage
+        switch mask.shape {
+        case .rectangle:
+            let black = CIImage(color: .black).cropped(to: extent)
+            let white = CIImage(color: .white).cropped(to: insetRect)
+            var rectangle = white.composited(over: black)
+            let radius = CGFloat(min(max(mask.feather, 0), 0.25)) * min(extent.width, extent.height)
+            if radius > 0.5 {
+                let blur = CIFilter.gaussianBlur()
+                // Keep transparent black outside the finite mask extent so a
+                // full-size rectangle can still feather at the layer edges.
+                blur.inputImage = rectangle
+                blur.radius = Float(radius)
+                rectangle = (blur.outputImage ?? rectangle).cropped(to: extent)
+            }
+            maskImage = rectangle
+        case .ellipse:
+            let baseRadius: CGFloat = 100
+            let featherProgress = CGFloat(min(max(mask.feather / 0.25, 0), 1))
+            let gradient = CIFilter.radialGradient()
+            gradient.center = .zero
+            gradient.radius0 = Float(baseRadius * (1 - featherProgress))
+            gradient.radius1 = Float(baseRadius)
+            gradient.color0 = .white
+            gradient.color1 = .black
+            let ellipse = (gradient.outputImage ?? CIImage(color: .black))
+                .transformed(
+                    by: CGAffineTransform(
+                        scaleX: insetRect.width / (baseRadius * 2),
+                        y: insetRect.height / (baseRadius * 2)
+                    )
+                )
+                .transformed(
+                    by: CGAffineTransform(
+                        translationX: insetRect.midX,
+                        y: insetRect.midY
+                    )
+                )
+            maskImage = ellipse.cropped(to: extent)
+        }
+
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = image
+        blend.backgroundImage = transparentImage(croppedTo: extent)
+        blend.maskImage = maskImage
+        return (blend.outputImage ?? image).cropped(to: extent)
+    }
+
+    private func transparentImage(croppedTo extent: CGRect) -> CIImage {
+        CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0))
             .cropped(to: extent)
     }
 

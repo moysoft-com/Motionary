@@ -5,7 +5,7 @@ import Foundation
 extension EditorViewModel {
     var selectedClipLocalTime: Double {
         guard let clip = selectedClip else { return 0 }
-        return min(max(currentTime - clip.timelineStart, 0), clip.sourceRange.duration)
+        return timelineLocalTime(for: clip)
     }
 
     var keyframeTimeTolerance: Double {
@@ -15,10 +15,10 @@ extension EditorViewModel {
     func snappedKeyframeTime(_ time: Double, clip: TimelineClip? = nil) -> Double {
         let frameRate = Double(max(project.renderSettings.frameRate, 1))
         let snapped = max((time * frameRate).rounded() / frameRate, 0)
-        guard let duration = clip?.sourceRange.duration ?? selectedClip?.sourceRange.duration else {
+        guard let clip = clip ?? selectedClip else {
             return snapped
         }
-        return min(snapped, duration)
+        return min(snapped, timelinePlacementDuration(for: clip))
     }
 
     func displayedValue(for target: KeyframeTarget) -> Double {
@@ -66,7 +66,10 @@ extension EditorViewModel {
             return textHasKeyframes(in: section)
         }
         guard let clip = clip ?? selectedClip else { return false }
-        return !clip.keyframeTimes(in: section).isEmpty
+        let duration = timelinePlacementDuration(for: clip)
+        return clip.keyframeTimes(in: section).contains {
+            $0 >= -0.000_001 && $0 <= duration + 0.000_001
+        }
     }
 
     func propertyRange(
@@ -84,7 +87,7 @@ extension EditorViewModel {
         switch target {
         case .shapeCornerRadius:
             guard let shape = clip.shape else { return 0...4096 }
-            let time = min(max(currentTime - clip.timelineStart, 0), clip.sourceRange.duration)
+            let time = timelineLocalTime(for: clip)
             let maximum = min(shape.width.value(at: time), shape.height.value(at: time)) * 0.5
             return 0...max(maximum, 0)
         case .positionX, .positionY:
@@ -94,10 +97,7 @@ extension EditorViewModel {
                 canvas.width / max(source.width, 1),
                 canvas.height / max(source.height, 1)
             )
-            let localTime = min(
-                max(currentTime - clip.timelineStart, 0),
-                clip.sourceRange.duration
-            )
+            let localTime = timelineLocalTime(for: clip)
             let scale = clip.transform.scale.value(at: localTime)
             let width = source.width * fitScale * max(scale.x, 0.01)
             let height = source.height * fitScale * max(scale.y, 0.01)
@@ -117,6 +117,9 @@ extension EditorViewModel {
     }
 
     func candidateGraphSegment(in section: KeyframeSection) -> KeyframeSegment? {
+        if section == .speed {
+            return nil
+        }
         if let item = selectedTextItem {
             guard currentTime >= item.timelineStart, currentTime < item.timelineEnd else { return nil }
             return textGraphSegmentCandidate(
@@ -138,7 +141,10 @@ extension EditorViewModel {
         clip: TimelineClip,
         localTime: Double
     ) -> KeyframeSegment? {
-        let times = clip.keyframeTimes(in: section)
+        let placementDuration = timelinePlacementDuration(for: clip)
+        let times = clip.keyframeTimes(in: section).filter {
+            $0 >= -0.000_001 && $0 <= placementDuration + 0.000_001
+        }
         guard times.count >= 2 else { return nil }
         let leftIndex: Int?
         if let exact = times.firstIndex(
@@ -460,6 +466,7 @@ extension EditorViewModel {
         startTime: Double,
         interactive: Bool = false
     ) {
+        guard section != .speed else { return }
         if selectedTextItem != nil {
             setTextInterpolation(
                 interpolation,

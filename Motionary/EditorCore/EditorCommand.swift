@@ -251,23 +251,19 @@ extension EditorProject {
                         let mediaID: MediaID?
                         let mediaType: ClipMediaType?
                         let speedSignature: UInt64
-                        let transitionOut: TimelineTransition?
                         switch item {
                         case .media(let media):
                             mediaID = media.mediaID
                             mediaType = media.mediaType
                             speedSignature = media.speedMap.topologySignature
-                            transitionOut = media.transitionOut
                         case .shape(let shape):
                             mediaID = shape.mediaID
                             mediaType = .video
                             speedSignature = 0
-                            transitionOut = shape.transitionOut
                         default:
                             mediaID = nil
                             mediaType = nil
                             speedSignature = 0
-                            transitionOut = nil
                         }
                         return RenderItemTopology(
                             id: item.id,
@@ -281,8 +277,7 @@ extension EditorProject {
                                 if case .shape = item { return true }
                                 return false
                             }(),
-                            speedSignature: speedSignature,
-                            transitionOut: transitionOut
+                            speedSignature: speedSignature
                         )
                     }
                 )
@@ -301,6 +296,7 @@ extension EditorProject {
                         transform: media.visuals.transform,
                         adjustments: media.visuals.adjustments,
                         effects: media.visuals.effectStack,
+                        mask: media.visuals.mask,
                         shape: nil,
                         text: nil
                     )
@@ -310,6 +306,7 @@ extension EditorProject {
                         transform: shape.visuals.transform,
                         adjustments: shape.visuals.adjustments,
                         effects: shape.visuals.effectStack,
+                        mask: shape.visuals.mask,
                         shape: shape.shape,
                         text: nil
                     )
@@ -319,6 +316,7 @@ extension EditorProject {
                         transform: text.visuals.transform,
                         adjustments: text.visuals.adjustments,
                         effects: text.visuals.effectStack,
+                        mask: text.visuals.mask,
                         shape: nil,
                         text: text
                     )
@@ -330,8 +328,19 @@ extension EditorProject {
     }
 
     private var renderAudioSignature: [RenderClipAudio] {
-        tracks.flatMap(\.clips).map {
-            RenderClipAudio(id: $0.id, volume: $0.volume)
+        tracks.flatMap(\.items).compactMap { item in
+            guard let clip = item.legacyClip() else { return nil }
+            let pitchFollowsSpeed: Bool
+            if case .media(let media) = item {
+                pitchFollowsSpeed = media.pitchFollowsSpeed
+            } else {
+                pitchFollowsSpeed = false
+            }
+            return RenderClipAudio(
+                id: clip.id,
+                volume: clip.volume,
+                pitchFollowsSpeed: pitchFollowsSpeed
+            )
         }
     }
 }
@@ -360,7 +369,6 @@ private struct RenderItemTopology: Equatable {
     let sourceRange: TimeRangeValue
     let hasShape: Bool
     let speedSignature: UInt64
-    let transitionOut: TimelineTransition?
 }
 
 private struct RenderVisualSignature: Equatable {
@@ -373,6 +381,7 @@ private struct RenderItemVisual: Equatable {
     let transform: ClipTransform
     let adjustments: AdjustmentSettings
     let effects: EffectStack
+    let mask: ItemMask?
     let shape: ClipShape?
     let text: TextTimelineItem?
 }
@@ -380,4 +389,5 @@ private struct RenderItemVisual: Equatable {
 private struct RenderClipAudio: Equatable {
     let id: UUID
     let volume: AnimatableProperty<Double>
+    let pitchFollowsSpeed: Bool
 }

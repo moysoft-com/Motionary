@@ -7,6 +7,7 @@ import UIKit
 struct TimelineThumbnailTile: View {
     let clip: TimelineClip
     let media: ClipMediaDescriptor
+    let speedMap: SpeedMap
     let tileIndex: Int
     let tileWidth: CGFloat
     let height: CGFloat
@@ -32,10 +33,12 @@ struct TimelineThumbnailTile: View {
         .frame(width: tileWidth, height: height)
         .clipped()
         .task(id: taskID) {
-            image = nil
+            try? await Task.sleep(for: .milliseconds(90))
+            guard !Task.isCancelled else { return }
             let loaded = await TimelineThumbnailLoader.tileImage(
                 for: clip,
                 media: media,
+                speedMap: speedMap,
                 tileIndex: tileIndex,
                 tileWidth: tileWidth,
                 tileHeight: height,
@@ -56,6 +59,7 @@ struct TimelineThumbnailTile: View {
             "\(Int((displayScale * 100).rounded()))",
             media.mediaID.rawValue.uuidString,
             clip.mediaType.rawValue,
+            "\(speedMap.topologySignature)",
             String(format: "%.3f", clip.sourceRange.start),
             String(format: "%.3f", clip.sourceRange.duration)
         ].joined(separator: "|")
@@ -88,6 +92,7 @@ actor TimelineThumbnailTileCache {
     func tileImage(
         for clip: TimelineClip,
         media: ClipMediaDescriptor,
+        speedMap: SpeedMap,
         tileIndex: Int,
         tileWidth: CGFloat,
         tileHeight: CGFloat,
@@ -95,13 +100,17 @@ actor TimelineThumbnailTileCache {
         displayScale: CGFloat
     ) async -> UIImage? {
         let secondsPerTile = Double(tileWidth / max(pixelsPerSecond, 1))
-        let localTime =
+        let localTimelineTime =
             clip.mediaType == .image
             ? 0
             : min(
                 max(Double(tileIndex) * secondsPerTile + secondsPerTile * 0.5, 0),
-                max(clip.sourceRange.duration - 0.001, 0))
-        let sourceTime = clip.sourceRange.start + localTime
+                max(speedMap.timelineDuration(sourceDuration: clip.sourceRange.duration) - 0.001, 0))
+        let localSourceTime = speedMap.sourceTime(
+            at: localTimelineTime,
+            sourceDuration: clip.sourceRange.duration
+        )
+        let sourceTime = clip.sourceRange.start + localSourceTime
         let key = cacheKey(
             media: media,
             tileIndex: tileIndex,
@@ -202,17 +211,26 @@ enum TimelineThumbnailLoader {
     static func image(
         for clip: TimelineClip,
         media: ClipMediaDescriptor,
+        speedMap: SpeedMap,
         timelineTime: Double,
         targetHeight: CGFloat
     ) async -> UIImage? {
-        let localTime = min(max(timelineTime - clip.timelineStart, 0), max(clip.sourceRange.duration - 0.01, 0))
-        let sourceTime = clip.sourceRange.start + localTime
+        let localTimelineTime = min(
+            max(timelineTime - clip.timelineStart, 0),
+            max(speedMap.timelineDuration(sourceDuration: clip.sourceRange.duration) - 0.01, 0)
+        )
+        let sourceTime = clip.sourceRange.start
+            + speedMap.sourceTime(
+                at: localTimelineTime,
+                sourceDuration: clip.sourceRange.duration
+            )
         return await generateImage(for: clip, media: media, sourceTime: sourceTime, targetHeight: targetHeight)
     }
 
     static func tileImage(
         for clip: TimelineClip,
         media: ClipMediaDescriptor,
+        speedMap: SpeedMap,
         tileIndex: Int,
         tileWidth: CGFloat,
         tileHeight: CGFloat,
@@ -222,6 +240,7 @@ enum TimelineThumbnailLoader {
         await TimelineThumbnailTileCache.shared.tileImage(
             for: clip,
             media: media,
+            speedMap: speedMap,
             tileIndex: tileIndex,
             tileWidth: tileWidth,
             tileHeight: tileHeight,
