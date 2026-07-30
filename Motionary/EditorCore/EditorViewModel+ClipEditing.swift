@@ -189,12 +189,14 @@ extension EditorViewModel {
         guard let selectedClipID else { return }
         mutateProject { project in
             guard let location = project.itemLocation(id: selectedClipID) else { return }
+            let beatAnchors = project.beatSnapAnchors(excluding: selectedClipID)
             var item = project.tracks[location.track].items.remove(at: location.item)
             let placement = project.resolvedPlacement(
                 proposedStart: item.timelineStart + seconds,
                 duration: item.placementDuration,
                 destinationTrackIndex: location.track,
-                requiredKind: item.requiredTrackKind
+                requiredKind: item.requiredTrackKind,
+                snapAnchors: [currentTime] + beatAnchors
             )
             item.timelineStart = placement.start
             project.tracks[location.track].items.append(item)
@@ -342,7 +344,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: currentItem.id,
             requiredKind: currentItem.requiredTrackKind,
-            snapAnchors: [currentTime]
+            snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
             applied = min(max(snap.time - referenceStart, maxBackward), maxForward)
@@ -412,7 +414,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: item.id,
             requiredKind: item.requiredTrackKind,
-            snapAnchors: [currentTime]
+            snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
             applied = min(max(snap.time - referenceStart, maxBackward), maxForward)
@@ -462,7 +464,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: currentItem.id,
             requiredKind: currentItem.requiredTrackKind,
-            snapAnchors: [currentTime]
+            snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
             applied = min(max(snap.time - referenceEnd, maxBackward), maxForward)
@@ -520,7 +522,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: item.id,
             requiredKind: item.requiredTrackKind,
-            snapAnchors: [currentTime]
+            snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
             applied = min(max(snap.time - referenceEnd, maxBackward), maxForward)

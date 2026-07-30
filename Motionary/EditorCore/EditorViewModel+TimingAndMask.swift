@@ -167,31 +167,46 @@ extension EditorViewModel {
         return true
     }
 
-    func setSelectedMaskEnabled(_ isEnabled: Bool) {
+    func setSelectedMask(_ mask: ItemMask?) {
         updateSelectedVisuals { visuals in
-            visuals.mask = isEnabled ? (visuals.mask ?? ItemMask()) : nil
-        }
-    }
-
-    func setSelectedMaskShape(_ shape: ItemMask.Shape) {
-        updateSelectedVisuals { visuals in
-            var mask = visuals.mask ?? ItemMask()
-            mask.shape = shape
             visuals.mask = mask
         }
     }
 
-    func setSelectedMaskInsets(
-        horizontal: Double? = nil,
-        vertical: Double? = nil,
-        feather: Double? = nil,
+    func setSelectedMaskSize(
+        widthScale: Double? = nil,
+        heightScale: Double? = nil,
+        featherScale: Double? = nil,
         interactive: Bool = false
     ) {
         updateSelectedVisuals(interactive: interactive) { visuals in
             var mask = visuals.mask ?? ItemMask()
-            if let horizontal { mask.insetX = min(max(horizontal, 0), 0.48) }
-            if let vertical { mask.insetY = min(max(vertical, 0), 0.48) }
-            if let feather { mask.feather = min(max(feather, 0), 0.25) }
+            if let widthScale, widthScale.isFinite { mask.widthScale = min(max(widthScale, 0), 1) }
+            if let heightScale, heightScale.isFinite { mask.heightScale = min(max(heightScale, 0), 1) }
+            if let featherScale, featherScale.isFinite { mask.featherScale = min(max(featherScale, 0), 1) }
+            visuals.mask = mask
+        }
+    }
+
+    func setSelectedMaskGeometry(
+        roundnessScale: Double? = nil,
+        rotationDegrees: Double? = nil,
+        offsetScale: Double? = nil,
+        isInverted: Bool? = nil,
+        interactive: Bool = false
+    ) {
+        updateSelectedVisuals(interactive: interactive) { visuals in
+            var mask = visuals.mask ?? ItemMask()
+            if let roundnessScale, roundnessScale.isFinite {
+                mask.roundnessScale = min(max(roundnessScale, 0), 1)
+            }
+            if let rotationDegrees, rotationDegrees.isFinite {
+                mask.rotationDegrees = min(max(rotationDegrees, -180), 180)
+            }
+            if let offsetScale, offsetScale.isFinite {
+                mask.offsetScale = min(max(offsetScale, -1), 1)
+            }
+            if let isInverted { mask.isInverted = isInverted }
             visuals.mask = mask
         }
     }

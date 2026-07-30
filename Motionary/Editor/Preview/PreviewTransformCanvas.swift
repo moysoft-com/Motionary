@@ -1,4 +1,5 @@
-// Preview clip geometry, selection, snapping, and direct manipulation.
+// Preview hit testing, selection, snapping, and direct manipulation.
+// Rendered pixels stay exclusively in the AVPlayer-backed compositor surface.
 
 import CoreImage
 import SwiftUI
@@ -18,12 +19,6 @@ struct PreviewTextInfo: Identifiable {
     var id: UUID { item.id }
 }
 
-private struct SelectedTextBackgroundKey: Equatable {
-    let itemID: UUID
-    let previewRevision: Int
-    let frameTime: Double
-}
-
 private enum PreviewVisualInfo: Identifiable {
     case clip(PreviewClipInfo)
     case text(PreviewTextInfo)
@@ -41,6 +36,124 @@ struct PreviewClipFrame {
     let rotationDegrees: Double
 }
 
+private struct PreviewHitCandidate {
+    let order: Int
+    let area: CGFloat
+    let select: () -> Void
+}
+
+private extension PreviewClipFrame {
+    func contains(_ point: CGPoint) -> Bool {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radians = CGFloat(-rotationDegrees * .pi / 180)
+        let translated = CGPoint(x: point.x - center.x, y: point.y - center.y)
+        let cosine = cos(radians)
+        let sine = sin(radians)
+        let unrotated = CGPoint(
+            x: translated.x * cosine - translated.y * sine + center.x,
+            y: translated.x * sine + translated.y * cosine + center.y
+        )
+        return rect.contains(unrotated)
+    }
+
+    func expandedToMinimumHitSize(_ minimum: CGFloat) -> PreviewClipFrame {
+        let width = max(rect.width, minimum)
+        let height = max(rect.height, minimum)
+        return PreviewClipFrame(
+            rect: CGRect(
+                x: rect.midX - width * 0.5,
+                y: rect.midY - height * 0.5,
+                width: width,
+                height: height
+            ),
+            rotationDegrees: rotationDegrees
+        )
+    }
+}
+
+private struct PreviewGeometryMapper {
+    let canvasRect: CGRect
+    let renderSize: CGSize
+
+    func center(
+        positionX: Double,
+        positionY: Double,
+        displayOffset: CGPoint = .zero
+    ) -> CGPoint {
+        CGPoint(
+            x: canvasRect.midX
+                + CGFloat(positionX) * canvasRect.width * 0.5
+                + displayOffset.x,
+            y: canvasRect.midY
+                - CGFloat(positionY) * canvasRect.height * 0.5
+                + displayOffset.y
+        )
+    }
+
+    func normalizedPosition(
+        from center: CGPoint,
+        displayOffset: CGPoint = .zero
+    ) -> (x: Double, y: Double) {
+        (
+            Double(
+                (center.x - displayOffset.x - canvasRect.midX)
+                    / max(canvasRect.width * 0.5, 1)
+            ),
+            Double(
+                -(center.y - displayOffset.y - canvasRect.midY)
+                    / max(canvasRect.height * 0.5, 1)
+            )
+        )
+    }
+
+    func canvasSize(forRenderSize size: CGSize) -> CGSize? {
+        guard renderSize.width > 0, renderSize.height > 0,
+            canvasRect.width > 0, canvasRect.height > 0
+        else { return nil }
+        return CGSize(
+            width: size.width * canvasRect.width / renderSize.width,
+            height: size.height * canvasRect.height / renderSize.height
+        )
+    }
+
+    func fittedCanvasSize(forSourceSize sourceSize: CGSize) -> CGSize? {
+        guard let fittedRenderSize = VideoSourceGeometry.fittedSize(
+            sourceSize: sourceSize,
+            inside: renderSize
+        ) else { return nil }
+        return canvasSize(forRenderSize: fittedRenderSize)
+    }
+
+    func scaledSize(_ baseSize: CGSize, by scale: ScaleValue, minimum: CGFloat = 0.01) -> CGSize {
+        CGSize(
+            width: baseSize.width * max(CGFloat(scale.x), minimum),
+            height: baseSize.height * max(CGFloat(scale.y), minimum)
+        )
+    }
+
+    func canvasVector(forRenderVector vector: CGVector) -> CGPoint? {
+        guard let size = canvasSize(forRenderSize: CGSize(width: abs(vector.dx), height: abs(vector.dy))) else {
+            return nil
+        }
+        return CGPoint(
+            x: vector.dx < 0 ? -size.width : size.width,
+            y: vector.dy < 0 ? size.height : -size.height
+        )
+    }
+
+    func frame(center: CGPoint, size: CGSize, rotationDegrees: Double) -> PreviewClipFrame {
+        PreviewClipFrame(
+            rect: CGRect(
+                x: center.x - size.width * 0.5,
+                y: center.y - size.height * 0.5,
+                width: size.width,
+                height: size.height
+            ),
+            rotationDegrees: rotationDegrees
+        )
+    }
+}
+
 private enum PreviewTransformComponent: Hashable {
     case position
     case scale
@@ -55,8 +168,12 @@ private enum PreviewTransformGesture: Hashable {
 }
 
 struct PreviewTransformCanvas: View {
+    private static let interactionStartTextureDimension = 1_024
+    private static let minimumCombinedHandleScaleFactor = 0.08
+    private static let minimumScaleSnap = 0.05
+    private static let maximumScaleSnapRatio: CGFloat = 1.35
+
     @ObservedObject var viewModel: EditorViewModel
-    @ObservedObject private var playbackState: PlaybackState
     let canvasFrame: CGRect
 
     @State private var dragStartTransform: ClipTransform?
@@ -64,7 +181,11 @@ struct PreviewTransformCanvas: View {
     @State private var livePreviewImage: UIImage?
     @State private var liveTextPreviewImage: UIImage?
     @State private var liveBackgroundImage: UIImage?
+    @State private var livePreviewAssetKey: String?
+    @State private var isLivePreviewSourceHidden = false
     @State private var livePreviewLoadID: UUID?
+    @State private var livePreviewCommitRevision: Int?
+    @State private var liveProxyRasterKey: String?
     @State private var interactionClipID: UUID?
     @State private var activeTransformGestures: Set<PreviewTransformGesture> = []
     @State private var hasTwoFingerTransformInSession = false
@@ -75,16 +196,11 @@ struct PreviewTransformCanvas: View {
     @State private var lastPreviewSnapFeedbackKey: String?
     @State private var lastPreviewSnapFeedbackAt: Date = .distantPast
     @State private var isTransforming = false
-    @State private var isAwaitingPreviewCommit = false
-    @State private var inlineEditingTextID: UUID?
-    @State private var inlineTextDraft = ""
-    @State private var isInlineTextEditorFocused = false
     @State private var textRasterizer = PreviewTextRasterizer()
-    @State private var selectedTextBackgroundImage: UIImage?
+    @State private var shapeRasterizer = PreviewShapeRasterizer()
 
     init(viewModel: EditorViewModel, canvasFrame: CGRect) {
         self.viewModel = viewModel
-        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
         self.canvasFrame = canvasFrame
     }
 
@@ -96,118 +212,29 @@ struct PreviewTransformCanvas: View {
                 case .clip(let clipInfo):
                     if let frame = previewFrame(for: clipInfo.clip) {
                         Rectangle()
-                            .fill(Color.white.opacity(0.001))
+                            .fill(Color.clear)
                             .frame(width: frame.rect.width, height: frame.rect.height)
                             .rotationEffect(.degrees(frame.rotationDegrees))
                             .position(x: frame.rect.midX, y: frame.rect.midY)
-                            .onTapGesture {
-                                EditorHaptics.selection()
-                                viewModel.selectClip(clipInfo.clip.id, trackID: clipInfo.trackID)
-                            }
+                            .contentShape(Rectangle())
+                            .allowsHitTesting(false)
                     }
 
                 case .text(let textInfo):
                     if let frame = previewFrame(for: textInfo.item) {
                         Rectangle()
-                            .fill(Color.white.opacity(0.001))
+                            .fill(Color.clear)
                             .frame(
                                 width: max(frame.rect.width, 44),
                                 height: max(frame.rect.height, 44)
                             )
                             .rotationEffect(.degrees(frame.rotationDegrees))
                             .position(x: frame.rect.midX, y: frame.rect.midY)
+                            .contentShape(Rectangle())
                             .accessibilityLabel("Text layer \(textInfo.item.name)")
-                            .highPriorityGesture(
-                                TapGesture(count: 2)
-                                    .onEnded {
-                                        viewModel.selectTimelineItem(
-                                            textInfo.item.id,
-                                            trackID: textInfo.trackID
-                                        )
-                                        beginInlineEditing(for: textInfo.item)
-                                    }
-                            )
-                            .onTapGesture {
-                                EditorHaptics.selection()
-                                viewModel.selectTimelineItem(
-                                    textInfo.item.id,
-                                    trackID: textInfo.trackID
-                                )
-                            }
+                            .allowsHitTesting(false)
                     }
                 }
-            }
-
-            if (isTransforming || inlineEditingTextID != nil),
-                let liveBackgroundImage
-            {
-                Image(uiImage: liveBackgroundImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: canvasRect.width, height: canvasRect.height)
-                    .clipped()
-                    .allowsHitTesting(false)
-            }
-
-            if showsLiveTextPreview,
-                let selectedTextBackgroundImage
-            {
-                Image(uiImage: selectedTextBackgroundImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: canvasRect.width, height: canvasRect.height)
-                    .clipped()
-                    .allowsHitTesting(false)
-            }
-
-            if showsLiveTextPreview,
-                let text = selectedTextItem,
-                let image = renderPreviewImage(for: text),
-                let frame = previewFrame(for: text)
-            {
-                let transform = text.visuals.transform
-                LiveTransformTextProxy(
-                    image: image,
-                    frame: frame,
-                    opacity: transform.opacity.value(at: localTime(for: text))
-                        * textAnimationSample(for: text).opacity,
-                    clipReveal: textAnimationSample(for: text).clipReveal,
-                    isFlippedHorizontally: transform.isFlippedHorizontally,
-                    isFlippedVertically: transform.isFlippedVertically
-                )
-                .allowsHitTesting(false)
-            }
-
-            if isTransforming,
-                let clip = selectedVisualClip,
-                let transform = liveTransform,
-                let frame = previewFrame(for: clip, transform: transform)
-            {
-                LiveTransformClipProxy(
-                    clip: clip,
-                    frame: frame,
-                    transform: transform,
-                    image: livePreviewImage,
-                    localTime: localTime(for: clip)
-                )
-                .allowsHitTesting(false)
-            }
-
-            if isTransforming,
-                let text = selectedTextItem,
-                let transform = liveTransform,
-                let image = liveTextPreviewImage,
-                let frame = previewFrame(for: text, transform: transform)
-            {
-                LiveTransformTextProxy(
-                    image: image,
-                    frame: frame,
-                    opacity: transform.opacity.baseValue * textAnimationSample(for: text).opacity,
-                    clipReveal: textAnimationSample(for: text).clipReveal,
-                    isFlippedHorizontally: transform.isFlippedHorizontally,
-                    isFlippedVertically: transform.isFlippedVertically
-                )
-                .allowsHitTesting(false)
             }
 
             if let x = snapGuideX {
@@ -226,10 +253,58 @@ struct PreviewTransformCanvas: View {
                     .allowsHitTesting(false)
             }
 
+            if isTransforming, isLivePreviewSourceHidden, let liveBackgroundImage {
+                Image(uiImage: liveBackgroundImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: canvasRect.width, height: canvasRect.height)
+                    .clipped()
+                    .allowsHitTesting(false)
+            }
+
+            if isTransforming,
+                isLivePreviewSourceHidden,
+                let clip = selectedVisualClip,
+                let transform = liveTransform,
+                let frame = previewFrame(for: clip, transform: transform)
+            {
+                LiveTransformClipProxy(
+                    clip: clip,
+                    frame: frame,
+                    transform: transform,
+                    image: livePreviewImage,
+                    localTime: localTime(for: clip)
+                )
+                .allowsHitTesting(false)
+                .transaction { $0.animation = nil }
+            }
+
+            if isTransforming,
+                isLivePreviewSourceHidden,
+                let text = selectedTextItem,
+                let transform = liveTransform,
+                let image = liveTextPreviewImage,
+                let frame = previewFrame(for: text, transform: transform)
+            {
+                let sample = textAnimationSample(for: text)
+                LiveTransformTextProxy(
+                    image: image,
+                    frame: frame,
+                    opacity: transform.opacity.baseValue * sample.opacity,
+                    clipReveal: sample.clipReveal,
+                    isFlippedHorizontally: transform.isFlippedHorizontally,
+                    isFlippedVertically: transform.isFlippedVertically
+                )
+                .allowsHitTesting(false)
+                .transaction { $0.animation = nil }
+            }
+
             }
             .frame(width: canvasRect.width, height: canvasRect.height)
             .clipped()
             .contentShape(Rectangle())
+            .coordinateSpace(name: "PreviewTransformCanvas")
+            .gesture(previewSelectionGesture)
             .position(x: canvasFrame.midX, y: canvasFrame.midY)
 
             if let clip = selectedVisualClip,
@@ -265,74 +340,64 @@ struct PreviewTransformCanvas: View {
                     transform: liveTransform ?? text.visuals.transform
                 )
             {
-                if inlineEditingTextID == text.id {
-                    InlineTextEditingOverlay(
-                        item: text,
-                        draft: $inlineTextDraft,
-                        isFocused: $isInlineTextEditorFocused,
-                        placement: inlineTextPlacement(for: text),
-                        onTextChange: { value in
-                            updateInlineText(value, itemID: text.id)
-                        },
-                        onEditingEnd: finishInlineEditing
-                    )
-                    .id(text.id)
-                } else {
-                    PreviewSelectionBox(
-                        frame: selectionFrame(from: frame),
-                        onDelete: viewModel.deleteSelectedClip,
-                        onDuplicate: viewModel.duplicateSelectedClip,
-                        onTransformChanged: { scaleFactor, rotationDelta in
-                            updateCombinedHandle(
-                                scaleFactor: scaleFactor,
-                                rotationDelta: rotationDelta,
-                                for: text
-                            )
-                        },
-                        onTransformEnded: {
-                            finishPreviewGesture(.combinedHandle, itemID: text.id)
-                        }
-                    )
-                        .gesture(dragGesture(for: text, frame: frame))
-                        .simultaneousGesture(scaleGesture(for: text))
-                        .simultaneousGesture(rotationGesture(for: text))
-                        .highPriorityGesture(
-                            TapGesture(count: 2)
-                                .onEnded { beginInlineEditing(for: text) }
+                PreviewSelectionBox(
+                    frame: selectionFrame(from: frame),
+                    onDelete: viewModel.deleteSelectedClip,
+                    onDuplicate: viewModel.duplicateSelectedClip,
+                    onTransformChanged: { scaleFactor, rotationDelta in
+                        updateCombinedHandle(
+                            scaleFactor: scaleFactor,
+                            rotationDelta: rotationDelta,
+                            for: text
                         )
-                        .id(text.id)
+                    },
+                    onTransformEnded: {
+                        finishPreviewGesture(.combinedHandle, itemID: text.id)
+                    }
+                )
+                    .gesture(dragGesture(for: text, frame: frame))
+                    .simultaneousGesture(scaleGesture(for: text))
+                    .simultaneousGesture(rotationGesture(for: text))
+                    .id(text.id)
+            }
+        }
+        .onChange(of: viewModel.selectedClipID) { _, _ in
+            resetPreviewInteraction(finishEdit: isTransforming)
+        }
+        .onChange(of: viewModel.previewContentRevision) { _, revision in
+            guard let targetRevision = livePreviewCommitRevision,
+                revision >= targetRevision
+            else { return }
+            viewModel.finishLivePreviewCommitPresentation(for: interactionClipID)
+            Task { @MainActor in
+                do {
+                    try await Task.sleep(for: .milliseconds(380))
+                } catch {
+                    return
                 }
-            }
-        }
-        .onChange(of: viewModel.selectedClipID) { _, selectedID in
-            if let inlineEditingTextID, inlineEditingTextID != selectedID {
-                finishInlineEditing()
-            }
-            if isAwaitingPreviewCommit {
+                guard livePreviewCommitRevision == targetRevision,
+                    !isTransforming
+                else { return }
                 clearLivePreview()
-            } else {
-                resetPreviewInteraction(finishEdit: isTransforming)
             }
-        }
-        .onChange(of: viewModel.previewContentRevision) { _, _ in
-            guard isAwaitingPreviewCommit else { return }
-            clearLivePreview()
         }
         .onDisappear {
-            finishInlineEditing()
-            if isAwaitingPreviewCommit {
-                clearLivePreview()
-            } else {
-                resetPreviewInteraction(finishEdit: isTransforming)
-            }
+            resetPreviewInteraction(finishEdit: isTransforming)
         }
-        .task(id: selectedTextBackgroundKey) {
-            await loadSelectedTextBackground()
+        .task(id: livePreviewPreparationKey) {
+            await prepareSelectedLivePreviewAssets()
         }
     }
 
     private var canvasRect: CGRect {
         CGRect(origin: .zero, size: canvasFrame.size)
+    }
+
+    private var geometryMapper: PreviewGeometryMapper {
+        PreviewGeometryMapper(
+            canvasRect: canvasRect,
+            renderSize: viewModel.project.renderSettings.size
+        )
     }
 
     private func selectionFrame(from frame: PreviewClipFrame) -> PreviewClipFrame {
@@ -352,40 +417,23 @@ struct PreviewTransformCanvas: View {
         return item
     }
 
-    private var showsLiveTextPreview: Bool {
-        guard inlineEditingTextID == nil,
-            !isTransforming,
-            !playbackState.isScrubbing,
-            !playbackState.isPlaying,
-            let selectedTextItem
-        else { return false }
-        return viewModel.liveTextPreviewID == selectedTextItem.id
-    }
-
-    private var selectedTextBackgroundKey: SelectedTextBackgroundKey? {
-        guard showsLiveTextPreview, let selectedTextItem else { return nil }
+    private var livePreviewPreparationKey: String? {
+        guard !isTransforming, livePreviewCommitRevision == nil else { return nil }
         let frameRate = Double(max(viewModel.project.renderSettings.frameRate, 1))
-        let frameTime = (playbackState.currentTime * frameRate).rounded() / frameRate
-        return SelectedTextBackgroundKey(
-            itemID: selectedTextItem.id,
-            previewRevision: viewModel.previewContentRevision,
-            frameTime: frameTime
-        )
+        let frameTime = (viewModel.currentTime * frameRate).rounded() / frameRate
+        if let clip = selectedVisualClip {
+            return livePreviewAssetKey(for: clip.id, frameTime: frameTime)
+        }
+        if let text = selectedTextItem {
+            return livePreviewAssetKey(for: text.id, frameTime: frameTime)
+        }
+        return nil
     }
 
-    @MainActor
-    private func loadSelectedTextBackground() async {
-        guard let key = selectedTextBackgroundKey else {
-            selectedTextBackgroundImage = nil
-            return
-        }
-        let image = try? await viewModel.renderService.makePreviewBackgroundImage(
-            for: viewModel.project,
-            at: key.frameTime,
-            excluding: key.itemID
-        )
-        guard !Task.isCancelled, selectedTextBackgroundKey == key else { return }
-        selectedTextBackgroundImage = image
+    private func livePreviewAssetKey(for itemID: UUID, frameTime: Double? = nil) -> String {
+        let frameRate = Double(max(viewModel.project.renderSettings.frameRate, 1))
+        let time = frameTime ?? (viewModel.currentTime * frameRate).rounded() / frameRate
+        return "\(itemID.uuidString)|\(viewModel.previewContentRevision)|\(String(format: "%.4f", time))"
     }
 
     private var activeVisualInfos: [PreviewVisualInfo] {
@@ -426,6 +474,62 @@ struct PreviewTransformCanvas: View {
                 return PreviewTextInfo(trackID: track.id, item: text)
             }
         }
+    }
+
+    private var previewSelectionGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("PreviewTransformCanvas"))
+            .onEnded { value in
+                guard abs(value.translation.width) < 6,
+                    abs(value.translation.height) < 6,
+                    !isTransforming
+                else { return }
+                selectPreviewItem(at: value.location)
+            }
+    }
+
+    private func selectPreviewItem(at point: CGPoint) {
+        let candidates =
+            activeVisualInfos.enumerated()
+            .compactMap { index, info -> PreviewHitCandidate? in
+                switch info {
+                case .clip(let clipInfo):
+                    guard let frame = previewFrame(for: clipInfo.clip),
+                        frame.contains(point)
+                    else { return nil }
+                    return PreviewHitCandidate(
+                        order: index,
+                        area: max(frame.rect.width * frame.rect.height, 1),
+                        select: {
+                            viewModel.selectClip(clipInfo.clip.id, trackID: clipInfo.trackID)
+                        }
+                    )
+
+                case .text(let textInfo):
+                    guard var frame = previewFrame(for: textInfo.item) else { return nil }
+                    frame = frame.expandedToMinimumHitSize(44)
+                    guard frame.contains(point) else { return nil }
+                    return PreviewHitCandidate(
+                        order: index,
+                        area: max(frame.rect.width * frame.rect.height, 1),
+                        select: {
+                            viewModel.selectTimelineItem(
+                                textInfo.item.id,
+                                trackID: textInfo.trackID
+                            )
+                        }
+                    )
+                }
+            }
+
+        guard let best = candidates.min(by: { left, right in
+            if abs(left.area - right.area) > 0.5 {
+                return left.area < right.area
+            }
+            return left.order < right.order
+        }) else { return }
+
+        EditorHaptics.selection()
+        best.select()
     }
 
     private func dragGesture(for clip: TimelineClip, frame: PreviewClipFrame) -> some Gesture {
@@ -510,7 +614,7 @@ struct PreviewTransformCanvas: View {
                 let snapped =
                     abs(value.degrees) <= 0.05
                     ? (rotation: start.rotationDegrees.baseValue, snapped: false)
-                    : snappedRotation(start.rotationDegrees.baseValue - value.degrees)
+                    : snappedRotation(start.rotationDegrees.baseValue + value.degrees)
                 updatePreviewSnapHaptic(
                     kind: "rotation",
                     snapped: snapped.snapped,
@@ -610,7 +714,7 @@ struct PreviewTransformCanvas: View {
                 let snapped =
                     abs(value.degrees) <= 0.05
                     ? (rotation: start.rotationDegrees.baseValue, snapped: false)
-                    : snappedRotation(start.rotationDegrees.baseValue - value.degrees)
+                    : snappedRotation(start.rotationDegrees.baseValue + value.degrees)
                 updatePreviewSnapHaptic(
                     kind: "rotation",
                     snapped: snapped.snapped,
@@ -633,20 +737,26 @@ struct PreviewTransformCanvas: View {
         guard activatePreviewGesture(.combinedHandle, for: clip) else { return }
         guard let start = dragStartTransform else { return }
 
-        updateCombinedRotation(rotationDelta, from: start)
-        guard abs(scaleFactor - 1) > 0.001 || editedTransformComponents.contains(.scale)
-        else { return }
+        var transform = liveTransform ?? start
+        let rotation = combinedRotation(rotationDelta, from: start)
+        if let rotation {
+            transform.rotationDegrees.baseValue = rotation.rotation
+        }
 
-        editedTransformComponents.insert(.scale)
-        let snapped =
-            abs(scaleFactor - 1) <= 0.001
-            ? (scale: start.scale.baseValue.x, guideX: nil, guideY: nil)
-            : snappedScale(
-                scale: start.scale.baseValue.x * scaleFactor,
-                clip: clip,
-                selectedClipID: clip.id
+        let stableScaleFactor = max(scaleFactor, Self.minimumCombinedHandleScaleFactor)
+        let shouldUpdateScale = abs(stableScaleFactor - 1) > 0.001 || editedTransformComponents.contains(.scale)
+        guard rotation != nil || shouldUpdateScale else { return }
+
+        if shouldUpdateScale {
+            editedTransformComponents.insert(.scale)
+            clearScaleSnapFeedback()
+            transform.scale.baseValue = proportionalScale(
+                x: max(start.scale.baseValue.x * stableScaleFactor, Self.minimumScaleSnap),
+                from: start.scale.baseValue
             )
-        applySnappedScale(snapped, from: start.scale.baseValue)
+        }
+
+        setLiveTransform(transform)
     }
 
     private func updateCombinedHandle(
@@ -657,42 +767,60 @@ struct PreviewTransformCanvas: View {
         guard activatePreviewGesture(.combinedHandle, for: text) else { return }
         guard let start = dragStartTransform else { return }
 
-        updateCombinedRotation(rotationDelta, from: start)
-        guard abs(scaleFactor - 1) > 0.001 || editedTransformComponents.contains(.scale)
-        else { return }
+        var transform = liveTransform ?? start
+        let rotation = combinedRotation(rotationDelta, from: start)
+        if let rotation {
+            transform.rotationDegrees.baseValue = rotation.rotation
+        }
 
-        editedTransformComponents.insert(.scale)
-        let snapped =
-            abs(scaleFactor - 1) <= 0.001
-            ? (scale: start.scale.baseValue.x, guideX: nil, guideY: nil)
-            : snappedScale(
-                scale: start.scale.baseValue.x * scaleFactor,
-                text: text,
-                selectedClipID: text.id
+        let stableScaleFactor = max(scaleFactor, Self.minimumCombinedHandleScaleFactor)
+        let shouldUpdateScale = abs(stableScaleFactor - 1) > 0.001 || editedTransformComponents.contains(.scale)
+        guard rotation != nil || shouldUpdateScale else { return }
+
+        if shouldUpdateScale {
+            editedTransformComponents.insert(.scale)
+            clearScaleSnapFeedback()
+            transform.scale.baseValue = proportionalScale(
+                x: max(start.scale.baseValue.x * stableScaleFactor, Self.minimumScaleSnap),
+                from: start.scale.baseValue
             )
-        applySnappedScale(snapped, from: start.scale.baseValue)
+        }
+
+        setLiveTransform(transform)
     }
 
-    private func updateCombinedRotation(_ deltaDegrees: Double, from start: ClipTransform) {
+    private func combinedRotation(
+        _ deltaDegrees: Double,
+        from start: ClipTransform
+    ) -> (rotation: Double, snapped: Bool)? {
         guard abs(deltaDegrees) > 0.05 || editedTransformComponents.contains(.rotation) else {
-            return
+            return nil
         }
         editedTransformComponents.insert(.rotation)
         let snapped =
             abs(deltaDegrees) <= 0.05
             ? (rotation: start.rotationDegrees.baseValue, snapped: false)
-            : snappedRotation(start.rotationDegrees.baseValue - deltaDegrees)
+            : snappedRotation(start.rotationDegrees.baseValue + deltaDegrees)
         updatePreviewSnapHaptic(
             kind: "rotation",
             snapped: snapped.snapped,
             value: String(format: "%.0f", snapped.rotation)
         )
-        updateLiveTransform { $0.rotationDegrees.baseValue = snapped.rotation }
+        return snapped
     }
 
     private func applySnappedScale(
         _ snapped: (scale: Double, guideX: CGFloat?, guideY: CGFloat?),
         from start: ScaleValue
+    ) {
+        applySnappedScaleFeedback(snapped)
+        updateLiveTransform {
+            $0.scale.baseValue = proportionalScale(x: snapped.scale, from: start)
+        }
+    }
+
+    private func applySnappedScaleFeedback(
+        _ snapped: (scale: Double, guideX: CGFloat?, guideY: CGFloat?)
     ) {
         snapGuideX = snapped.guideX
         snapGuideY = snapped.guideY
@@ -701,9 +829,12 @@ struct PreviewTransformCanvas: View {
             snapped: snapped.guideX != nil || snapped.guideY != nil,
             value: "\(Int((snapped.guideX ?? -1).rounded())):\(Int((snapped.guideY ?? -1).rounded()))"
         )
-        updateLiveTransform {
-            $0.scale.baseValue = proportionalScale(x: snapped.scale, from: start)
-        }
+    }
+
+    private func clearScaleSnapFeedback() {
+        snapGuideX = nil
+        snapGuideY = nil
+        previewSnapKeys.removeValue(forKey: "scale")
     }
 
     private func proportionalScale(x proposedX: Double, from start: ScaleValue) -> ScaleValue {
@@ -723,9 +854,10 @@ struct PreviewTransformCanvas: View {
         selectedClipID: UUID,
         displayOffset: CGPoint = .zero
     ) -> (positionX: Double, positionY: Double, guideX: CGFloat?, guideY: CGFloat?) {
-        let proposedCenter = CGPoint(
-            x: canvasRect.midX + CGFloat(positionX) * canvasRect.width * 0.5 + displayOffset.x,
-            y: canvasRect.midY - CGFloat(positionY) * canvasRect.height * 0.5 + displayOffset.y
+        let proposedCenter = geometryMapper.center(
+            positionX: positionX,
+            positionY: positionY,
+            displayOffset: displayOffset
         )
         let targets = snapTargets(excluding: selectedClipID)
         let threshold: CGFloat = 10
@@ -743,31 +875,29 @@ struct PreviewTransformCanvas: View {
             threshold: threshold
         )
 
-        let normalizedX = Double(
-            (snappedX.center - displayOffset.x - canvasRect.midX)
-                / max(canvasRect.width * 0.5, 1)
+        let normalized = geometryMapper.normalizedPosition(
+            from: CGPoint(x: snappedX.center, y: snappedY.center),
+            displayOffset: displayOffset
         )
-        let normalizedY = Double(
-            -(snappedY.center - displayOffset.y - canvasRect.midY)
-                / max(canvasRect.height * 0.5, 1)
-        )
-        return (normalizedX, normalizedY, snappedX.guide, snappedY.guide)
+        return (normalized.x, normalized.y, snappedX.guide, snappedY.guide)
     }
 
     private func snappedScale(
         scale: Double,
         clip: TimelineClip,
-        selectedClipID: UUID
+        selectedClipID: UUID,
+        transform overrideTransform: ClipTransform? = nil
     ) -> (scale: Double, guideX: CGFloat?, guideY: CGFloat?) {
         guard let baseSize = previewBaseSize(for: clip) else {
-            return (min(max(scale, 0.01), 100), nil, nil)
+            return (min(max(scale, Self.minimumScaleSnap), 100), nil, nil)
         }
 
-        let proposedScale = CGFloat(min(max(scale, 0.01), 100))
-        let center = previewCenter(for: clip, transform: liveTransform ?? clip.transform)
+        let proposedScale = CGFloat(min(max(scale, Self.minimumScaleSnap), 100))
+        let transform = overrideTransform ?? liveTransform ?? clip.transform
+        let center = previewCenter(for: clip, transform: transform)
         let targets = snapTargets(excluding: selectedClipID)
         let threshold: CGFloat = 10
-        let rotation = -(liveTransform ?? clip.transform).rotationDegrees.value(at: localTime(for: clip))
+        let rotation = transform.rotationDegrees.value(at: localTime(for: clip))
 
         let xSnap = snapScaleAxis(
             center: center.x,
@@ -793,7 +923,7 @@ struct PreviewTransformCanvas: View {
         }
 
         return (
-            Double(min(max(best.scale, 0.01), 100)),
+            Double(min(max(best.scale, Self.minimumScaleSnap), 100)),
             xSnap?.guide == best.guide ? xSnap?.guide : nil,
             ySnap?.guide == best.guide ? ySnap?.guide : nil
         )
@@ -802,15 +932,16 @@ struct PreviewTransformCanvas: View {
     private func snappedScale(
         scale: Double,
         text: TextTimelineItem,
-        selectedClipID: UUID
+        selectedClipID: UUID,
+        transform overrideTransform: ClipTransform? = nil
     ) -> (scale: Double, guideX: CGFloat?, guideY: CGFloat?) {
         guard let baseSize = previewBaseSize(for: text) else {
-            return (min(max(scale, 0.01), 100), nil, nil)
+            return (min(max(scale, Self.minimumScaleSnap), 100), nil, nil)
         }
 
         let animationScale = max(textAnimationSample(for: text).scale, 0.001)
-        let proposedDisplayScale = CGFloat(min(max(scale * animationScale, 0.01), 100))
-        let transform = liveTransform ?? text.visuals.transform
+        let proposedDisplayScale = CGFloat(min(max(scale * animationScale, Self.minimumScaleSnap), 100))
+        let transform = overrideTransform ?? liveTransform ?? text.visuals.transform
         let center = previewCenter(for: text, transform: transform)
         let targets = snapTargets(excluding: selectedClipID)
         let threshold: CGFloat = 10
@@ -836,11 +967,15 @@ struct PreviewTransformCanvas: View {
             .min { $0.distance < $1.distance }
 
         guard let best else {
-            return (Double(proposedDisplayScale) / animationScale, nil, nil)
+            return (
+                min(max(Double(proposedDisplayScale) / animationScale, Self.minimumScaleSnap), 100),
+                nil,
+                nil
+            )
         }
 
         return (
-            min(max(Double(best.scale) / animationScale, 0.01), 100),
+            min(max(Double(best.scale) / animationScale, Self.minimumScaleSnap), 100),
             xSnap?.guide == best.guide ? xSnap?.guide : nil,
             ySnap?.guide == best.guide ? ySnap?.guide : nil
         )
@@ -907,7 +1042,9 @@ struct PreviewTransformCanvas: View {
         targets: [CGFloat],
         threshold: CGFloat
     ) -> (scale: CGFloat, guide: CGFloat, distance: CGFloat)? {
-        let offsets = baseOffsets.filter { abs($0) > 0.001 }
+        let maximumOffset = baseOffsets.map { abs($0) }.max() ?? 0
+        let minimumUsableOffset = max(maximumOffset * 0.12, 6)
+        let offsets = baseOffsets.filter { abs($0) >= minimumUsableOffset }
         guard !offsets.isEmpty else { return nil }
         var best: (scale: CGFloat, guide: CGFloat, distance: CGFloat)?
 
@@ -915,7 +1052,12 @@ struct PreviewTransformCanvas: View {
             let proposedAnchor = center + offset * proposedScale
             for target in targets {
                 let desiredScale = (target - center) / offset
-                guard desiredScale > 0 else { continue }
+                guard desiredScale.isFinite,
+                    desiredScale >= Self.minimumScaleSnap,
+                    desiredScale <= 100,
+                    desiredScale >= proposedScale / Self.maximumScaleSnapRatio,
+                    desiredScale <= proposedScale * Self.maximumScaleSnapRatio
+                else { continue }
                 let distance = abs(target - proposedAnchor)
                 guard distance < threshold else { continue }
                 if best == nil || distance < best!.distance {
@@ -964,52 +1106,36 @@ struct PreviewTransformCanvas: View {
     ) -> PreviewClipFrame? {
         let transform = transform ?? clip.transform
         if let shape = clip.shape {
-            let renderSize = viewModel.project.renderSettings.size
-            guard renderSize.width > 0, renderSize.height > 0,
-                canvasRect.width > 0, canvasRect.height > 0
-            else { return nil }
             let localTime = localTime(for: clip)
+            guard
+                let baseSize = geometryMapper.canvasSize(
+                    forRenderSize: CGSize(
+                        width: CGFloat(shape.width.value(at: localTime)),
+                        height: CGFloat(shape.height.value(at: localTime))
+                    )
+                )
+            else { return nil }
             let scale = transform.scale.value(at: localTime)
-            let size = CGSize(
-                width: CGFloat(shape.width.value(at: localTime)) * canvasRect.width / renderSize.width
-                    * max(scale.x, 0.01),
-                height: CGFloat(shape.height.value(at: localTime)) * canvasRect.height / renderSize.height
-                    * max(scale.y, 0.01)
-            )
+            let size = geometryMapper.scaledSize(baseSize, by: scale)
             let center = previewCenter(for: clip, transform: transform)
-            return PreviewClipFrame(
-                rect: CGRect(
-                    x: center.x - size.width * 0.5,
-                    y: center.y - size.height * 0.5,
-                    width: size.width,
-                    height: size.height
-                ),
-                rotationDegrees: -transform.rotationDegrees.value(at: localTime)
+            return geometryMapper.frame(
+                center: center,
+                size: size,
+                rotationDegrees: transform.rotationDegrees.value(at: localTime)
             )
         }
 
         let sourceSize = viewModel.project.naturalSize(for: clip)?.cgSize ?? viewModel.project.renderSettings.size
-        guard sourceSize.width > 0, sourceSize.height > 0, canvasRect.width > 0, canvasRect.height > 0 else {
-            return nil
-        }
-
-        let fitScale = min(canvasRect.width / sourceSize.width, canvasRect.height / sourceSize.height)
+        guard let baseSize = geometryMapper.fittedCanvasSize(forSourceSize: sourceSize) else { return nil }
         let localTime = localTime(for: clip)
         let scale = transform.scale.value(at: localTime)
-        let size = CGSize(
-            width: sourceSize.width * fitScale * max(scale.x, 0.01),
-            height: sourceSize.height * fitScale * max(scale.y, 0.01)
-        )
+        let size = geometryMapper.scaledSize(baseSize, by: scale)
         let center = previewCenter(for: clip, transform: transform)
 
-        return PreviewClipFrame(
-            rect: CGRect(
-                x: center.x - size.width * 0.5,
-                y: center.y - size.height * 0.5,
-                width: size.width,
-                height: size.height
-            ),
-            rotationDegrees: -transform.rotationDegrees.value(at: localTime)
+        return geometryMapper.frame(
+            center: center,
+            size: size,
+            rotationDegrees: transform.rotationDegrees.value(at: localTime)
         )
     }
 
@@ -1022,56 +1148,40 @@ struct PreviewTransformCanvas: View {
         let localTime = localTime(for: text)
         let scale = transform.scale.value(at: localTime)
         let animationScale = max(textAnimationSample(for: text).scale, 0.001)
-        let size = CGSize(
-            width: baseSize.width * max(scale.x * animationScale, 0.001),
-            height: baseSize.height * max(scale.y * animationScale, 0.001)
+        let size = geometryMapper.scaledSize(
+            baseSize,
+            by: ScaleValue(x: scale.x * animationScale, y: scale.y * animationScale),
+            minimum: 0.001
         )
         let center = previewCenter(for: text, transform: transform)
-        return PreviewClipFrame(
-            rect: CGRect(
-                x: center.x - size.width * 0.5,
-                y: center.y - size.height * 0.5,
-                width: size.width,
-                height: size.height
-            ),
+        return geometryMapper.frame(
+            center: center,
+            size: size,
             rotationDegrees: previewRotationDegrees(for: text, transform: transform)
         )
     }
 
     private func previewBaseSize(for clip: TimelineClip) -> CGSize? {
         if let shape = clip.shape {
-            let renderSize = viewModel.project.renderSettings.size
-            guard renderSize.width > 0, renderSize.height > 0,
-                canvasRect.width > 0, canvasRect.height > 0
-            else { return nil }
-            return CGSize(
-                width: CGFloat(shape.width.value(at: localTime(for: clip))) * canvasRect.width / renderSize.width,
-                height: CGFloat(shape.height.value(at: localTime(for: clip))) * canvasRect.height / renderSize.height
+            return geometryMapper.canvasSize(
+                forRenderSize: CGSize(
+                    width: CGFloat(shape.width.value(at: localTime(for: clip))),
+                    height: CGFloat(shape.height.value(at: localTime(for: clip)))
+                )
             )
         }
 
         let sourceSize = viewModel.project.naturalSize(for: clip)?.cgSize ?? viewModel.project.renderSettings.size
-        guard sourceSize.width > 0, sourceSize.height > 0, canvasRect.width > 0, canvasRect.height > 0 else {
-            return nil
-        }
-        let fitScale = min(canvasRect.width / sourceSize.width, canvasRect.height / sourceSize.height)
-        return CGSize(width: sourceSize.width * fitScale, height: sourceSize.height * fitScale)
+        return geometryMapper.fittedCanvasSize(forSourceSize: sourceSize)
     }
 
     private func previewBaseSize(for text: TextTimelineItem) -> CGSize? {
-        let renderSize = viewModel.project.renderSettings.size
-        guard renderSize.width > 0, renderSize.height > 0,
-            canvasRect.width > 0, canvasRect.height > 0
-        else { return nil }
         let geometry = TextLayerRenderer.geometry(
             for: text,
-            renderSize: renderSize,
+            renderSize: viewModel.project.renderSettings.size,
             renderScale: 1
         )
-        return CGSize(
-            width: geometry.layerSize.width * canvasRect.width / renderSize.width,
-            height: geometry.layerSize.height * canvasRect.height / renderSize.height
-        )
+        return geometryMapper.canvasSize(forRenderSize: geometry.layerSize)
     }
 
     private func previewCenter(
@@ -1080,9 +1190,9 @@ struct PreviewTransformCanvas: View {
     ) -> CGPoint {
         let transform = transform ?? clip.transform
         let localTime = localTime(for: clip)
-        return CGPoint(
-            x: canvasRect.midX + CGFloat(transform.positionX.value(at: localTime)) * canvasRect.width * 0.5,
-            y: canvasRect.midY - CGFloat(transform.positionY.value(at: localTime)) * canvasRect.height * 0.5
+        return geometryMapper.center(
+            positionX: transform.positionX.value(at: localTime),
+            positionY: transform.positionY.value(at: localTime)
         )
     }
 
@@ -1093,13 +1203,10 @@ struct PreviewTransformCanvas: View {
         let transform = transform ?? text.visuals.transform
         let localTime = localTime(for: text)
         let animationOffset = textAnimationOffset(for: text)
-        return CGPoint(
-            x: canvasRect.midX
-                + CGFloat(transform.positionX.value(at: localTime)) * canvasRect.width * 0.5
-                + animationOffset.x,
-            y: canvasRect.midY
-                - CGFloat(transform.positionY.value(at: localTime)) * canvasRect.height * 0.5
-                + animationOffset.y
+        return geometryMapper.center(
+            positionX: transform.positionX.value(at: localTime),
+            positionY: transform.positionY.value(at: localTime),
+            displayOffset: animationOffset
         )
     }
 
@@ -1136,12 +1243,13 @@ struct PreviewTransformCanvas: View {
             renderScale: 1
         )
         let sample = textAnimationSample(for: text)
-        return CGPoint(
-            x: CGFloat(sample.translationX) * geometry.layerSize.width
-                * canvasRect.width / renderSize.width,
-            y: CGFloat(sample.translationY) * geometry.layerSize.height
-                * canvasRect.height / renderSize.height
+        return geometryMapper.canvasVector(
+            forRenderVector: CGVector(
+                dx: CGFloat(sample.translationX) * geometry.layerSize.width,
+                dy: CGFloat(sample.translationY) * geometry.layerSize.height
+            )
         )
+            ?? .zero
     }
 
     private func previewRotationDegrees(
@@ -1150,7 +1258,7 @@ struct PreviewTransformCanvas: View {
     ) -> Double {
         let baseRotation = transform.rotationDegrees.value(at: localTime(for: text))
         let animationRotation = textAnimationSample(for: text).rotationRadians * 180 / .pi
-        return -(baseRotation + animationRotation)
+        return baseRotation + animationRotation
     }
 
     private func activatePreviewGesture(
@@ -1190,6 +1298,36 @@ struct PreviewTransformCanvas: View {
         hasTwoFingerTransformInSession = true
     }
 
+    private func prepareSelectedLivePreviewAssets() async {
+        guard let assetKey = livePreviewPreparationKey,
+            livePreviewAssetKey != assetKey
+        else { return }
+
+        if let clip = selectedVisualClip {
+            let resolved = clip.transform.resolved(at: localTime(for: clip))
+            loadLivePreviewAssets(
+                for: clip,
+                transform: resolved,
+                assetKey: assetKey,
+                allowSynchronousProxyRender: true
+            )
+            return
+        }
+
+        if let text = selectedTextItem {
+            let resolved = text.visuals.transform.resolved(at: localTime(for: text))
+            livePreviewImage = nil
+            liveTextPreviewImage = renderPreviewImage(
+                for: text,
+                transform: resolved,
+                maximumTextureDimension: Self.interactionStartTextureDimension
+            )
+            liveBackgroundImage = nil
+            livePreviewAssetKey = assetKey
+            loadLivePreviewBackground(excluding: text.id, assetKey: assetKey)
+        }
+    }
+
     private func finishPreviewGesture(
         _ gesture: PreviewTransformGesture,
         itemID: UUID
@@ -1200,26 +1338,139 @@ struct PreviewTransformCanvas: View {
         resetPreviewInteraction(finishEdit: true)
     }
 
+    private func baselineTransform(for clip: TimelineClip) -> ClipTransform {
+        if interactionClipID == clip.id,
+            livePreviewCommitRevision != nil,
+            let liveTransform
+        {
+            return liveTransform
+        }
+        return clip.transform.resolved(at: localTime(for: clip))
+    }
+
+    private func baselineTransform(for text: TextTimelineItem) -> ClipTransform {
+        if interactionClipID == text.id,
+            livePreviewCommitRevision != nil,
+            let liveTransform
+        {
+            return liveTransform
+        }
+        return text.visuals.transform.resolved(at: localTime(for: text))
+    }
+
+    private func hasUsableLiveProxy(
+        for itemID: UUID,
+        assetKey: String,
+        isText: Bool
+    ) -> Bool {
+        guard liveBackgroundImage != nil else { return false }
+        let hasMatchingPreparedProxy = livePreviewAssetKey == assetKey
+            && (isText ? liveTextPreviewImage != nil : livePreviewImage != nil)
+        let hasCommitHandoffProxy = interactionClipID == itemID
+            && livePreviewCommitRevision != nil
+            && (isText ? liveTextPreviewImage != nil : livePreviewImage != nil)
+        return hasMatchingPreparedProxy || hasCommitHandoffProxy
+    }
+
     private func beginPreviewInteraction(for clip: TimelineClip) {
-        let resolved = clip.transform.resolved(at: localTime(for: clip))
+        let resolved = baselineTransform(for: clip)
+        let assetKey = livePreviewAssetKey(for: clip.id)
+        let hasPreparedProxy = hasUsableLiveProxy(for: clip.id, assetKey: assetKey, isText: false)
+        livePreviewCommitRevision = nil
+        livePreviewLoadID = UUID()
+        isLivePreviewSourceHidden = hasPreparedProxy
+        viewModel.beginLivePreviewInteraction()
         dragStartTransform = resolved
         liveTransform = resolved
-        livePreviewImage = nil
-        liveBackgroundImage = nil
+        if !hasPreparedProxy, livePreviewAssetKey != assetKey {
+            livePreviewImage = nil
+            liveTextPreviewImage = nil
+            liveBackgroundImage = nil
+        }
         interactionClipID = clip.id
         activeTransformGestures = []
         hasTwoFingerTransformInSession = false
         editedTransformComponents = []
         isTransforming = true
-        isAwaitingPreviewCommit = false
         EditorHaptics.dragStart()
         viewModel.beginInteractiveEdit()
+        viewModel.updateLivePreviewTransform(
+            resolved,
+            for: clip.id,
+            hidden: hasPreparedProxy,
+            immediate: true
+        )
+        if hasPreparedProxy {
+            isLivePreviewSourceHidden = true
+        }
+        loadLivePreviewAssets(
+            for: clip,
+            transform: resolved,
+            assetKey: assetKey,
+            allowSynchronousProxyRender: false
+        )
+    }
+
+    private func beginPreviewInteraction(for text: TextTimelineItem) {
+        let resolved = baselineTransform(for: text)
+        let assetKey = livePreviewAssetKey(for: text.id)
+        let hasPreparedProxy = hasUsableLiveProxy(for: text.id, assetKey: assetKey, isText: true)
+        livePreviewCommitRevision = nil
+        livePreviewLoadID = UUID()
+        isLivePreviewSourceHidden = hasPreparedProxy
+        viewModel.beginLivePreviewInteraction()
+        dragStartTransform = resolved
+        liveTransform = resolved
+        if !hasPreparedProxy, livePreviewAssetKey != assetKey {
+            livePreviewImage = nil
+            liveTextPreviewImage = nil
+            liveBackgroundImage = nil
+        }
+        interactionClipID = text.id
+        activeTransformGestures = []
+        hasTwoFingerTransformInSession = false
+        editedTransformComponents = []
+        isTransforming = true
+        EditorHaptics.dragStart()
+        viewModel.beginInteractiveEdit()
+        viewModel.updateLivePreviewTransform(
+            resolved,
+            for: text.id,
+            hidden: hasPreparedProxy,
+            immediate: true
+        )
+        if hasPreparedProxy {
+            isLivePreviewSourceHidden = true
+        }
+        loadLivePreviewBackground(excluding: text.id, assetKey: assetKey)
+    }
+
+    private func loadLivePreviewAssets(
+        for clip: TimelineClip,
+        transform: ClipTransform,
+        assetKey: String,
+        allowSynchronousProxyRender: Bool
+    ) {
+        guard clip.shape == nil,
+            let media = viewModel.project.mediaDescriptor(for: clip)
+        else {
+            if allowSynchronousProxyRender, let shape = clip.shape {
+                livePreviewImage = renderPreviewImage(
+                    for: shape,
+                    localTime: localTime(for: clip),
+                    transform: transform,
+                    maximumTextureDimension: Self.interactionStartTextureDimension
+                )
+                livePreviewAssetKey = assetKey
+            }
+            loadLivePreviewBackground(excluding: clip.id, assetKey: assetKey)
+            return
+        }
 
         let loadID = UUID()
         livePreviewLoadID = loadID
         let timelineTime = viewModel.currentTime
-        let targetHeight = max(previewFrame(for: clip, transform: resolved)?.rect.height ?? 80, 80)
-        let media = viewModel.project.mediaDescriptor(for: clip)
+        let targetHeight = max(previewFrame(for: clip, transform: transform)?.rect.height ?? 120, 120)
         let speedMap: SpeedMap
         if case .media(let item) = viewModel.project.item(id: clip.id) {
             speedMap = item.speedMap
@@ -1227,197 +1478,206 @@ struct PreviewTransformCanvas: View {
             speedMap = .constant
         }
         Task {
-            async let backgroundImage = viewModel.renderService.makePreviewBackgroundImage(
+            async let background = viewModel.renderService.makePreviewBackgroundImage(
                 for: viewModel.project,
                 at: timelineTime,
                 excluding: clip.id
             )
-            async let clipImage: UIImage? =
-                clip.shape == nil && media != nil
-                ? TimelineThumbnailLoader.image(
-                    for: clip,
-                    media: media!,
-                    speedMap: speedMap,
-                    timelineTime: timelineTime,
-                    targetHeight: targetHeight
-                )
-                : nil
-            let (background, image) = await (try? backgroundImage, clipImage)
-            guard livePreviewLoadID == loadID else { return }
-            liveBackgroundImage = background
+            async let proxyImage = TimelineThumbnailLoader.image(
+                for: clip,
+                media: media,
+                speedMap: speedMap,
+                timelineTime: timelineTime,
+                targetHeight: targetHeight
+            )
+            let (backgroundImage, image) = await (try? background, proxyImage)
+            guard !Task.isCancelled,
+                livePreviewLoadID == loadID,
+                livePreviewPreparationKey == assetKey || interactionClipID == clip.id
+            else { return }
+            guard interactionClipID != clip.id || isLivePreviewSourceHidden else { return }
+            liveBackgroundImage = backgroundImage
             livePreviewImage = image
+            livePreviewAssetKey = assetKey
         }
     }
 
-    private func beginPreviewInteraction(for text: TextTimelineItem) {
-        let resolved = text.visuals.transform.resolved(at: localTime(for: text))
-        dragStartTransform = resolved
-        liveTransform = resolved
-        livePreviewImage = nil
-        liveTextPreviewImage = renderPreviewImage(for: text)
-        liveBackgroundImage = nil
-        interactionClipID = text.id
-        activeTransformGestures = []
-        hasTwoFingerTransformInSession = false
-        editedTransformComponents = []
-        isTransforming = true
-        isAwaitingPreviewCommit = false
-        EditorHaptics.dragStart()
-        viewModel.beginInteractiveEdit()
-
+    private func loadLivePreviewBackground(excluding itemID: UUID, assetKey: String) {
         let loadID = UUID()
         livePreviewLoadID = loadID
         let timelineTime = viewModel.currentTime
         Task {
-            let background = try? await viewModel.renderService.makePreviewBackgroundImage(
+            let image = try? await viewModel.renderService.makePreviewBackgroundImage(
                 for: viewModel.project,
                 at: timelineTime,
-                excluding: text.id
+                excluding: itemID
             )
-            guard livePreviewLoadID == loadID else { return }
-            liveBackgroundImage = background
+            guard !Task.isCancelled,
+                livePreviewLoadID == loadID,
+                livePreviewPreparationKey == assetKey || interactionClipID == itemID
+            else { return }
+            guard interactionClipID != itemID || isLivePreviewSourceHidden else { return }
+            liveBackgroundImage = image
+            livePreviewAssetKey = assetKey
         }
     }
 
-    private func renderPreviewImage(for text: TextTimelineItem) -> UIImage? {
-        textRasterizer.image(
+    private func renderPreviewImage(
+        for text: TextTimelineItem,
+        transform: ClipTransform,
+        maximumTextureDimension: Int = GeneratedRasterPolicy.maximumTextureDimension
+    ) -> UIImage? {
+        let geometry = TextLayerRenderer.geometry(
             for: text,
             renderSize: viewModel.project.renderSettings.size,
+            renderScale: 1,
+            at: localTime(for: text)
+        )
+        return textRasterizer.image(
+            for: text,
+            renderSize: viewModel.project.renderSettings.size,
+            rasterScale: liveRasterScale(
+                for: transform,
+                logicalSize: geometry.layerSize,
+                maximumTextureDimension: maximumTextureDimension
+            ),
+            localTime: localTime(for: text),
             glyphReveal: textAnimationSample(for: text).glyphReveal
         )
     }
 
-    private func beginInlineEditing(for text: TextTimelineItem) {
-        if inlineEditingTextID == text.id {
-            isInlineTextEditorFocused = true
+    private func renderPreviewImage(
+        for shape: ClipShape,
+        localTime: Double,
+        transform: ClipTransform,
+        maximumTextureDimension: Int = GeneratedRasterPolicy.maximumTextureDimension
+    ) -> UIImage? {
+        let logicalSize = CGSize(
+            width: max(CGFloat(shape.width.value(at: localTime)), 1),
+            height: max(CGFloat(shape.height.value(at: localTime)), 1)
+        )
+        return shapeRasterizer.image(
+            for: shape,
+            at: localTime,
+            rasterScale: liveRasterScale(
+                for: transform,
+                logicalSize: logicalSize,
+                maximumTextureDimension: maximumTextureDimension
+            )
+        )
+    }
+
+    private func liveRasterScale(
+        for transform: ClipTransform,
+        logicalSize: CGSize,
+        maximumTextureDimension: Int = GeneratedRasterPolicy.maximumTextureDimension
+    ) -> CGSize {
+        let scale = transform.scale.baseValue
+        let requested = CGSize(
+            width: max(abs(CGFloat(scale.x)), 1),
+            height: max(abs(CGFloat(scale.y)), 1)
+        )
+        return GeneratedRasterPolicy.generatedLayerRasterScale(
+            transformScale: requested,
+            qualityScale: 1,
+            logicalSize: logicalSize,
+            renderSize: viewModel.project.renderSettings.size,
+            maximumTextureDimension: maximumTextureDimension
+        )
+    }
+
+    private func liveProxyRasterScale(for transform: ClipTransform) -> CGSize {
+        if let clip = selectedVisualClip,
+            let shape = clip.shape
+        {
+            let localTime = localTime(for: clip)
+            return liveRasterScale(
+                for: transform,
+                logicalSize: CGSize(
+                    width: max(CGFloat(shape.width.value(at: localTime)), 1),
+                    height: max(CGFloat(shape.height.value(at: localTime)), 1)
+                ),
+                maximumTextureDimension: GeneratedRasterPolicy.maximumTextureDimension
+            )
+        }
+        if let text = selectedTextItem {
+            let geometry = TextLayerRenderer.geometry(
+                for: text,
+                renderSize: viewModel.project.renderSettings.size,
+                renderScale: 1,
+                at: localTime(for: text)
+            )
+            return liveRasterScale(
+                for: transform,
+                logicalSize: geometry.layerSize,
+                maximumTextureDimension: GeneratedRasterPolicy.maximumTextureDimension
+            )
+        }
+        return CGSize(width: 1, height: 1)
+    }
+
+    private func updateLiveProxyRasterIfNeeded(for transform: ClipTransform) {
+        guard !isTransforming else { return }
+
+        let rasterScale = liveProxyRasterScale(for: transform)
+        if let clip = selectedVisualClip, clip.shape != nil {
+            let key = "\(clip.id.uuidString)|\(String(format: "%.3f", rasterScale.width))|\(String(format: "%.3f", rasterScale.height))"
+            guard liveProxyRasterKey != key else { return }
+            liveProxyRasterKey = key
+            if let shape = clip.shape {
+                livePreviewImage = renderPreviewImage(
+                    for: shape,
+                    localTime: localTime(for: clip),
+                    transform: transform
+                )
+            }
             return
         }
-        if inlineEditingTextID != nil {
-            finishInlineEditing()
-        }
-        if isTransforming || isAwaitingPreviewCommit {
-            resetPreviewInteraction(finishEdit: isTransforming)
-            clearLivePreview()
-        }
 
-        inlineTextDraft = text.text
-        inlineEditingTextID = text.id
-        isInlineTextEditorFocused = false
-        liveBackgroundImage = nil
-        viewModel.beginInteractiveEdit()
-        EditorHaptics.selection()
-
-        let loadID = UUID()
-        livePreviewLoadID = loadID
-        let timelineTime = viewModel.currentTime
-        Task {
-            async let background = viewModel.renderService.makePreviewBackgroundImage(
-                for: viewModel.project,
-                at: timelineTime,
-                excluding: text.id
-            )
-            await Task.yield()
-            guard inlineEditingTextID == text.id else { return }
-            isInlineTextEditorFocused = true
-            let image = try? await background
-            guard inlineEditingTextID == text.id, livePreviewLoadID == loadID else { return }
-            liveBackgroundImage = image
+        if let text = selectedTextItem {
+            let key = "\(text.id.uuidString)|\(String(format: "%.3f", rasterScale.width))|\(String(format: "%.3f", rasterScale.height))"
+            guard liveProxyRasterKey != key else { return }
+            liveProxyRasterKey = key
+            liveTextPreviewImage = renderPreviewImage(for: text, transform: transform)
         }
-    }
-
-    private func updateInlineText(_ value: String, itemID: UUID) {
-        guard inlineEditingTextID == itemID, value != inlineTextDraft else { return }
-        inlineTextDraft = value
-        viewModel.updateTextItem(itemID, interactive: true) { item in
-            item.text = value
-            let firstLine = value
-                .split(whereSeparator: { $0.isNewline })
-                .first
-                .map(String.init)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            item.name = firstLine.map { String($0.prefix(32)) }.flatMap { $0.isEmpty ? nil : $0 }
-                ?? "Text"
-        }
-    }
-
-    private func finishInlineEditing() {
-        guard inlineEditingTextID != nil else { return }
-        inlineEditingTextID = nil
-        isInlineTextEditorFocused = false
-        inlineTextDraft = ""
-        livePreviewLoadID = nil
-        liveBackgroundImage = nil
-        viewModel.finishTextEditing()
-        EditorHaptics.editCommit()
-    }
-
-    private func inlineTextPlacement(for text: TextTimelineItem) -> InlineTextPlacement {
-        let renderSize = viewModel.project.renderSettings.size
-        let renderWidth = max(renderSize.width, 1)
-        let renderHeight = max(renderSize.height, 1)
-        let horizontalScale = canvasRect.width / renderWidth
-        let verticalScale = canvasRect.height / renderHeight
-        let geometry = TextLayerRenderer.geometry(
-            for: text,
-            renderSize: renderSize,
-            renderScale: 1
-        )
-        let transform = text.visuals.transform
-        let localTime = localTime(for: text)
-        let transformScale = transform.scale.value(at: localTime)
-        let animationScale = max(textAnimationSample(for: text).scale, 0.001)
-        let textRect = geometry.textRect
-        let layerSize = CGSize(
-            width: geometry.layerSize.width * horizontalScale,
-            height: geometry.layerSize.height * verticalScale
-        )
-        let backgroundRect = geometry.backgroundRect.map {
-            CGRect(
-                x: $0.minX * horizontalScale,
-                y: $0.minY * verticalScale,
-                width: $0.width * horizontalScale,
-                height: $0.height * verticalScale
-            )
-        }
-        let localCenter = previewCenter(for: text, transform: transform)
-        return InlineTextPlacement(
-            layerSize: layerSize,
-            center: CGPoint(
-                x: localCenter.x + canvasFrame.minX,
-                y: localCenter.y + canvasFrame.minY
-            ),
-            scaleX: CGFloat(transformScale.x * animationScale)
-                * (transform.isFlippedHorizontally ? -1 : 1),
-            scaleY: CGFloat(transformScale.y * animationScale)
-                * (transform.isFlippedVertically ? -1 : 1),
-            rotationDegrees: previewRotationDegrees(for: text, transform: transform),
-            opacity: min(max(transform.opacity.value(at: localTime), 0), 1),
-            textInsets: UIEdgeInsets(
-                top: textRect.minY * verticalScale,
-                left: textRect.minX * horizontalScale,
-                bottom: max(geometry.layerSize.height - textRect.maxY, 0) * verticalScale,
-                right: max(geometry.layerSize.width - textRect.maxX, 0) * horizontalScale
-            ),
-            backgroundRect: backgroundRect,
-            backgroundCornerRadius: CGFloat(text.style.background?.cornerRadius ?? 0)
-                * min(horizontalScale, verticalScale),
-            fontScale: horizontalScale
-        )
     }
 
     private func updateLiveTransform(_ update: (inout ClipTransform) -> Void) {
         guard var transform = liveTransform else { return }
         update(&transform)
+        setLiveTransform(transform)
+    }
+
+    private func setLiveTransform(_ transform: ClipTransform) {
         liveTransform = transform
+        updateLiveProxyRasterIfNeeded(for: transform)
+        if let interactionClipID {
+            viewModel.updateLivePreviewTransform(transform, for: interactionClipID)
+        }
+    }
+
+    private func applyLiveTransformToProject(_ transform: ClipTransform) {
+        viewModel.setSelectedTransform(
+            positionX: editedTransformComponents.contains(.position)
+                ? transform.positionX.baseValue : nil,
+            positionY: editedTransformComponents.contains(.position)
+                ? transform.positionY.baseValue : nil,
+            scale: editedTransformComponents.contains(.scale)
+                ? transform.scale.baseValue.x : nil,
+            rotationDegrees: editedTransformComponents.contains(.rotation)
+                ? transform.rotationDegrees.baseValue : nil,
+            interactive: true
+        )
     }
 
     private func resetPreviewInteraction(finishEdit: Bool) {
-        let committedTransform =
-            finishEdit && interactionClipID == viewModel.selectedTimelineItemID
-            ? liveTransform
-            : nil
         let committedItemID = interactionClipID
-        let committedComponents = editedTransformComponents
+        let committedTransform = liveTransform
+        let hasCommittedTransform =
+            finishEdit
+            && interactionClipID == viewModel.selectedTimelineItemID
+            && liveTransform != nil
+            && !editedTransformComponents.isEmpty
         snapGuideX = nil
         snapGuideY = nil
         previewSnapKeys.removeAll()
@@ -1425,7 +1685,8 @@ struct PreviewTransformCanvas: View {
         hasTwoFingerTransformInSession = false
         dragStartTransform = nil
 
-        guard finishEdit, let committedTransform, !committedComponents.isEmpty else {
+        guard hasCommittedTransform, let committedTransform else {
+            viewModel.showLivePreviewSource(for: committedItemID)
             clearLivePreview()
             if finishEdit {
                 viewModel.finishInteractiveEdit()
@@ -1433,79 +1694,21 @@ struct PreviewTransformCanvas: View {
             return
         }
 
-        isAwaitingPreviewCommit = true
-        if let committedItemID,
-            let selectedItem = viewModel.project.item(id: committedItemID),
-            case .text(let selectedText) = selectedItem
-        {
-            let keyframeTime = min(
-                viewModel.snappedKeyframeTime(viewModel.currentTime - selectedText.timelineStart),
-                selectedText.duration
-            )
-            let keyframeTolerance = viewModel.keyframeTimeTolerance
-            viewModel.updateTextItem(committedItemID, interactive: true) { item in
-                if committedComponents.contains(.position) {
-                    Self.setTransformValue(
-                        committedTransform.positionX.baseValue,
-                        on: &item.visuals.transform.positionX,
-                        at: keyframeTime,
-                        tolerance: keyframeTolerance
-                    )
-                    Self.setTransformValue(
-                        committedTransform.positionY.baseValue,
-                        on: &item.visuals.transform.positionY,
-                        at: keyframeTime,
-                        tolerance: keyframeTolerance
-                    )
-                }
-                if committedComponents.contains(.scale) {
-                    if item.visuals.transform.scale.keyframes.isEmpty {
-                        item.visuals.transform.scale.baseValue = committedTransform.scale.baseValue
-                    } else {
-                        _ = item.visuals.transform.scale.setKeyframe(
-                            at: keyframeTime,
-                            value: committedTransform.scale.baseValue,
-                            tolerance: keyframeTolerance
-                        )
-                    }
-                }
-                if committedComponents.contains(.rotation) {
-                    Self.setTransformValue(
-                        committedTransform.rotationDegrees.baseValue,
-                        on: &item.visuals.transform.rotationDegrees,
-                        at: keyframeTime,
-                        tolerance: keyframeTolerance
-                    )
-                }
-            }
-        } else {
-            viewModel.setSelectedTransform(
-                positionX: committedComponents.contains(.position)
-                    ? committedTransform.positionX.baseValue : nil,
-                positionY: committedComponents.contains(.position)
-                    ? committedTransform.positionY.baseValue : nil,
-                scale: committedComponents.contains(.scale)
-                    ? committedTransform.scale.baseValue.x : nil,
-                rotationDegrees: committedComponents.contains(.rotation)
-                    ? committedTransform.rotationDegrees.baseValue : nil,
-                interactive: true
+        if let committedItemID {
+            viewModel.updateLivePreviewTransform(
+                committedTransform,
+                for: committedItemID,
+                hidden: isLivePreviewSourceHidden,
+                immediate: true
             )
         }
-        viewModel.finishInteractiveEdit()
+        applyLiveTransformToProject(committedTransform)
+        livePreviewCommitRevision = viewModel.previewContentRevision + 1
+        viewModel.finishInteractiveEdit(
+            delayRebuild: false,
+            preserveLivePreviewRefresh: true
+        )
         EditorHaptics.editCommit()
-    }
-
-    private static func setTransformValue(
-        _ value: Double,
-        on property: inout AnimatableProperty<Double>,
-        at time: Double,
-        tolerance: Double
-    ) {
-        if property.keyframes.isEmpty {
-            property.baseValue = value
-        } else {
-            _ = property.setKeyframe(at: time, value: value, tolerance: tolerance)
-        }
     }
 
     private func clearLivePreview() {
@@ -1514,7 +1717,11 @@ struct PreviewTransformCanvas: View {
         livePreviewImage = nil
         liveTextPreviewImage = nil
         liveBackgroundImage = nil
+        livePreviewAssetKey = nil
+        isLivePreviewSourceHidden = false
         livePreviewLoadID = nil
+        livePreviewCommitRevision = nil
+        liveProxyRasterKey = nil
         interactionClipID = nil
         activeTransformGestures = []
         hasTwoFingerTransformInSession = false
@@ -1523,7 +1730,6 @@ struct PreviewTransformCanvas: View {
         snapGuideY = nil
         previewSnapKeys = [:]
         isTransforming = false
-        isAwaitingPreviewCommit = false
     }
 
     private func updatePreviewSnapHaptic(kind: String, snapped: Bool, value: String) {
@@ -1546,329 +1752,6 @@ struct PreviewTransformCanvas: View {
         lastPreviewSnapFeedbackKey = key
         lastPreviewSnapFeedbackAt = now
         EditorHaptics.snap()
-    }
-}
-
-struct LiveTransformClipProxy: View {
-    let clip: TimelineClip
-    let frame: PreviewClipFrame
-    let transform: ClipTransform
-    let image: UIImage?
-    let localTime: Double
-
-    var body: some View {
-        Group {
-            if let shape = clip.shape {
-                PreviewShapeProxy(
-                    shape: shape,
-                    frameSize: frame.rect.size,
-                    localTime: localTime
-                )
-            } else if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                LinearGradient(
-                    colors: [Color.white.opacity(0.28), Color.white.opacity(0.08)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            }
-        }
-        .frame(width: frame.rect.width, height: frame.rect.height)
-        .clipped()
-        .scaleEffect(
-            x: transform.isFlippedHorizontally ? -1 : 1,
-            y: transform.isFlippedVertically ? -1 : 1
-        )
-        .rotationEffect(.degrees(frame.rotationDegrees))
-        .position(x: frame.rect.midX, y: frame.rect.midY)
-        .opacity(transform.opacity.baseValue)
-    }
-}
-
-private struct LiveTransformTextProxy: View {
-    let image: UIImage
-    let frame: PreviewClipFrame
-    let opacity: Double
-    let clipReveal: Double
-    let isFlippedHorizontally: Bool
-    let isFlippedVertically: Bool
-
-    var body: some View {
-        Image(uiImage: image)
-            .resizable()
-            .frame(width: frame.rect.width, height: frame.rect.height)
-            .mask(alignment: .leading) {
-                Rectangle()
-                    .frame(
-                        width: frame.rect.width * CGFloat(min(max(clipReveal, 0), 1)),
-                        height: frame.rect.height
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .scaleEffect(
-                x: isFlippedHorizontally ? -1 : 1,
-                y: isFlippedVertically ? -1 : 1
-            )
-            .rotationEffect(.degrees(frame.rotationDegrees))
-            .position(x: frame.rect.midX, y: frame.rect.midY)
-            .opacity(min(max(opacity, 0), 1))
-    }
-}
-
-@MainActor
-private final class PreviewTextRasterizer {
-    private let renderer = TextLayerRenderer()
-    private let context = CIContext(options: [.cacheIntermediates: false])
-
-    func image(
-        for item: TextTimelineItem,
-        renderSize: CGSize,
-        glyphReveal: Double
-    ) -> UIImage? {
-        let result = renderer.render(
-            item: item,
-            renderSize: renderSize,
-            renderScale: 1,
-            glyphReveal: glyphReveal
-        )
-        let extent = result.image.extent.integral
-        guard extent.width > 0, extent.height > 0,
-            let image = context.createCGImage(result.image, from: extent)
-        else { return nil }
-        return UIImage(cgImage: image)
-    }
-}
-
-private struct InlineTextPlacement {
-    let layerSize: CGSize
-    let center: CGPoint
-    let scaleX: CGFloat
-    let scaleY: CGFloat
-    let rotationDegrees: Double
-    let opacity: Double
-    let textInsets: UIEdgeInsets
-    let backgroundRect: CGRect?
-    let backgroundCornerRadius: CGFloat
-    let fontScale: CGFloat
-}
-
-private struct InlineTextEditingOverlay: View {
-    let item: TextTimelineItem
-    @Binding var draft: String
-    @Binding var isFocused: Bool
-    let placement: InlineTextPlacement
-    let onTextChange: (String) -> Void
-    let onEditingEnd: () -> Void
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            if let background = item.style.background,
-                let backgroundRect = placement.backgroundRect
-            {
-                RoundedRectangle(
-                    cornerRadius: placement.backgroundCornerRadius,
-                    style: .continuous
-                )
-                .fill(background.color.swiftUIColor)
-                .frame(width: backgroundRect.width, height: backgroundRect.height)
-                .position(x: backgroundRect.midX, y: backgroundRect.midY)
-                .allowsHitTesting(false)
-            }
-
-            InlineMultilineTextView(
-                text: $draft,
-                isFocused: $isFocused,
-                style: item.style,
-                renderScale: placement.fontScale,
-                textInsets: placement.textInsets,
-                onTextChange: onTextChange,
-                onEditingEnd: onEditingEnd
-            )
-            .frame(width: placement.layerSize.width, height: placement.layerSize.height)
-
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .stroke(MotionaryTheme.accent, lineWidth: 1.5)
-                .allowsHitTesting(false)
-        }
-        .frame(width: placement.layerSize.width, height: placement.layerSize.height)
-        .scaleEffect(x: placement.scaleX, y: placement.scaleY)
-        .rotationEffect(.degrees(placement.rotationDegrees))
-        .position(x: placement.center.x, y: placement.center.y)
-        .opacity(placement.opacity)
-        .accessibilityLabel("Editing text")
-    }
-}
-
-private struct InlineMultilineTextView: UIViewRepresentable {
-    @Binding var text: String
-    @Binding var isFocused: Bool
-    let style: TextStyle
-    let renderScale: CGFloat
-    let textInsets: UIEdgeInsets
-    let onTextChange: (String) -> Void
-    let onEditingEnd: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeUIView(context: Context) -> UITextView {
-        let textView = UITextView()
-        textView.delegate = context.coordinator
-        textView.backgroundColor = .clear
-        textView.isOpaque = false
-        textView.isScrollEnabled = false
-        textView.clipsToBounds = false
-        textView.textContainer.lineFragmentPadding = 0
-        textView.contentInset = .zero
-        textView.autocorrectionType = .yes
-        textView.autocapitalizationType = .sentences
-        textView.smartDashesType = .yes
-        textView.smartQuotesType = .yes
-        textView.tintColor = UIColor(MotionaryTheme.accent)
-        textView.accessibilityLabel = "Text content"
-
-        let toolbar = UIToolbar()
-        toolbar.sizeToFit()
-        toolbar.items = [
-            UIBarButtonItem(systemItem: .flexibleSpace),
-            UIBarButtonItem(
-                barButtonSystemItem: .done,
-                target: context.coordinator,
-                action: #selector(Coordinator.finishEditing)
-            )
-        ]
-        textView.inputAccessoryView = toolbar
-        context.coordinator.textView = textView
-        return textView
-    }
-
-    func updateUIView(_ textView: UITextView, context: Context) {
-        context.coordinator.parent = self
-        textView.textContainerInset = textInsets
-        let attributes = textAttributes
-        textView.typingAttributes = attributes
-        if textView.text != text {
-            let selectedRange = textView.selectedRange
-            textView.attributedText = NSAttributedString(string: text, attributes: attributes)
-            let caret = min(selectedRange.location, textView.text.utf16.count)
-            textView.selectedRange = NSRange(location: caret, length: 0)
-        }
-
-        if isFocused, !textView.isFirstResponder {
-            DispatchQueue.main.async { [weak textView] in
-                guard let textView, !textView.isFirstResponder else { return }
-                textView.becomeFirstResponder()
-            }
-        } else if !isFocused, textView.isFirstResponder {
-            textView.resignFirstResponder()
-        }
-    }
-
-    private var textAttributes: [NSAttributedString.Key: Any] {
-        let font = TextLayerRenderer.resolvedFont(for: style, renderScale: renderScale)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
-        paragraph.lineSpacing = CGFloat(style.lineSpacing) * renderScale
-        switch style.alignment {
-        case .leading: paragraph.alignment = .left
-        case .center: paragraph.alignment = .center
-        case .trailing: paragraph.alignment = .right
-        }
-
-        var attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: Self.uiColor(style.color),
-            .paragraphStyle: paragraph,
-            .kern: CGFloat(style.letterSpacing) * renderScale
-        ]
-        if let stroke = style.stroke, stroke.width > 0 {
-            let width = CGFloat(stroke.width) * renderScale
-            attributes[.strokeColor] = Self.uiColor(stroke.color)
-            attributes[.strokeWidth] = -(width / max(font.pointSize, 1)) * 100
-        }
-        if let shadow = style.shadow {
-            let value = NSShadow()
-            value.shadowColor = Self.uiColor(shadow.color)
-            value.shadowOffset = CGSize(
-                width: CGFloat(shadow.offsetX) * renderScale,
-                height: CGFloat(shadow.offsetY) * renderScale
-            )
-            value.shadowBlurRadius = CGFloat(shadow.blur) * renderScale
-            attributes[.shadow] = value
-        }
-        return attributes
-    }
-
-    private static func uiColor(_ color: RGBAColor) -> UIColor {
-        UIColor(
-            red: CGFloat(color.red),
-            green: CGFloat(color.green),
-            blue: CGFloat(color.blue),
-            alpha: CGFloat(color.alpha)
-        )
-    }
-
-    final class Coordinator: NSObject, UITextViewDelegate {
-        var parent: InlineMultilineTextView
-        weak var textView: UITextView?
-
-        init(parent: InlineMultilineTextView) {
-            self.parent = parent
-        }
-
-        func textViewDidBeginEditing(_ textView: UITextView) {
-            parent.isFocused = true
-        }
-
-        func textViewDidChange(_ textView: UITextView) {
-            parent.onTextChange(textView.text)
-        }
-
-        func textViewDidEndEditing(_ textView: UITextView) {
-            parent.isFocused = false
-            parent.onEditingEnd()
-        }
-
-        @objc func finishEditing() {
-            textView?.resignFirstResponder()
-        }
-    }
-}
-
-private struct PreviewShapeProxy: View {
-    let shape: ClipShape
-    let frameSize: CGSize
-    let localTime: Double
-
-    var body: some View {
-        switch shape.kind {
-        case .rectangle:
-            Rectangle()
-                .fill(shape.color.swiftUIColor)
-        case .roundedRectangle:
-            RoundedRectangle(
-                cornerRadius: cornerRadius,
-                style: .continuous
-            )
-            .fill(shape.color.swiftUIColor)
-        case .circle:
-            Ellipse()
-                .fill(shape.color.swiftUIColor)
-        }
-    }
-
-    private var cornerRadius: CGFloat {
-        let sourceWidth = max(CGFloat(shape.width.value(at: localTime)), 1)
-        let sourceHeight = max(CGFloat(shape.height.value(at: localTime)), 1)
-        let scale = min(frameSize.width / sourceWidth, frameSize.height / sourceHeight)
-        return min(
-            CGFloat(shape.cornerRadius.value(at: localTime)) * scale,
-            min(frameSize.width, frameSize.height) * 0.5
-        )
     }
 }
 
@@ -2009,6 +1892,174 @@ struct PreviewSelectionBox: View {
         while normalized > 180 { normalized -= 360 }
         while normalized <= -180 { normalized += 360 }
         return normalized
+    }
+}
+
+private struct LiveTransformClipProxy: View {
+    let clip: TimelineClip
+    let frame: PreviewClipFrame
+    let transform: ClipTransform
+    let image: UIImage?
+    let localTime: Double
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Rectangle()
+                    .fill(Color.clear)
+            }
+        }
+        .frame(width: frame.rect.width, height: frame.rect.height)
+        .clipped()
+        .scaleEffect(
+            x: transform.isFlippedHorizontally ? -1 : 1,
+            y: transform.isFlippedVertically ? -1 : 1
+        )
+        .rotationEffect(.degrees(frame.rotationDegrees))
+        .position(x: frame.rect.midX, y: frame.rect.midY)
+        .opacity(min(max(transform.opacity.baseValue, 0), 1))
+    }
+}
+
+private struct LiveTransformTextProxy: View {
+    let image: UIImage
+    let frame: PreviewClipFrame
+    let opacity: Double
+    let clipReveal: Double
+    let isFlippedHorizontally: Bool
+    let isFlippedVertically: Bool
+
+    var body: some View {
+        Image(uiImage: image)
+            .resizable()
+            .frame(width: frame.rect.width, height: frame.rect.height)
+            .mask(alignment: .leading) {
+                Rectangle()
+                    .frame(
+                        width: frame.rect.width * CGFloat(min(max(clipReveal, 0), 1)),
+                        height: frame.rect.height
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .scaleEffect(
+                x: isFlippedHorizontally ? -1 : 1,
+                y: isFlippedVertically ? -1 : 1
+            )
+            .rotationEffect(.degrees(frame.rotationDegrees))
+            .position(x: frame.rect.midX, y: frame.rect.midY)
+            .opacity(min(max(opacity, 0), 1))
+    }
+}
+
+@MainActor
+private final class PreviewTextRasterizer {
+    private let renderer = TextLayerRenderer()
+    private let context = CIContext(options: [.cacheIntermediates: false])
+
+    func image(
+        for item: TextTimelineItem,
+        renderSize: CGSize,
+        rasterScale: CGSize,
+        localTime: Double,
+        glyphReveal: Double
+    ) -> UIImage? {
+        let result = renderer.render(
+            item: item,
+            renderSize: renderSize,
+            renderScale: 1,
+            rasterScale: rasterScale,
+            at: localTime,
+            glyphReveal: glyphReveal
+        )
+        let extent = result.image.extent.integral
+        guard extent.width > 0, extent.height > 0,
+            let image = context.createCGImage(result.image, from: extent)
+        else { return nil }
+        return UIImage(cgImage: image)
+    }
+}
+
+@MainActor
+private final class PreviewShapeRasterizer {
+    private final class CachedImage: NSObject {
+        let image: UIImage
+
+        init(image: UIImage) {
+            self.image = image
+        }
+    }
+
+    private let cache: NSCache<NSString, CachedImage> = {
+        let cache = NSCache<NSString, CachedImage>()
+        cache.countLimit = 96
+        cache.totalCostLimit = GeneratedRasterPolicy.livePreviewShapeCacheBytes
+        return cache
+    }()
+
+    private let renderer = try? MetalFrameRenderer()
+    private let context = CIContext(options: [.cacheIntermediates: false])
+
+    func image(
+        for shape: ClipShape,
+        at localTime: Double,
+        rasterScale: CGSize
+    ) -> UIImage? {
+        let layout = ShapeRasterLayout(
+            shape: shape,
+            at: localTime,
+            logicalRenderScale: 1,
+            rasterScale: rasterScale
+        )
+        let key = cacheKey(shape: shape, layout: layout, localTime: localTime)
+        if let cached = cache.object(forKey: key) {
+            return cached.image
+        }
+
+        guard let renderer,
+            let raster = try? renderer.renderShapeLayer(
+                shape,
+                at: localTime,
+                logicalRenderScale: 1,
+                rasterScale: layout.rasterScale
+            )
+        else { return nil }
+        let extent = raster.extent.integral
+        guard extent.width > 0, extent.height > 0,
+            let cgImage = context.createCGImage(raster, from: extent)
+        else { return nil }
+        let image = UIImage(cgImage: cgImage)
+        cache.setObject(
+            CachedImage(image: image),
+            forKey: key,
+            cost: max(Int(layout.rasterSize.width * layout.rasterSize.height * 4), 1)
+        )
+        return image
+    }
+
+    private func cacheKey(
+        shape: ClipShape,
+        layout: ShapeRasterLayout,
+        localTime: Double
+    ) -> NSString {
+        [
+            shape.kind.rawValue,
+            String(format: "%.4f", shape.width.value(at: localTime)),
+            String(format: "%.4f", shape.height.value(at: localTime)),
+            String(format: "%.4f", shape.cornerRadius.value(at: localTime)),
+            String(format: "%.5f", shape.color.red),
+            String(format: "%.5f", shape.color.green),
+            String(format: "%.5f", shape.color.blue),
+            String(format: "%.5f", shape.color.alpha),
+            String(format: "%.5f", layout.rasterScale.width),
+            String(format: "%.5f", layout.rasterScale.height),
+            "\(Int(layout.rasterSize.width.rounded()))",
+            "\(Int(layout.rasterSize.height.rounded()))",
+            String(format: "%.4f", layout.rasterCornerRadius)
+        ].joined(separator: "|") as NSString
     }
 }
 

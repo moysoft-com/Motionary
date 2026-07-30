@@ -18,6 +18,7 @@ struct MediaAsset: Identifiable, Codable, Equatable {
     var mediaType: ClipMediaType
     var originalDuration: Double
     var naturalSize: CGSizeValue?
+    var backgroundRemovalArtifact: BackgroundRemovalArtifact?
 
     init(id: MediaID, source: ClipSource) {
         self.id = id
@@ -26,6 +27,7 @@ struct MediaAsset: Identifiable, Codable, Equatable {
         self.mediaType = source.mediaType
         self.originalDuration = source.originalDuration
         self.naturalSize = source.naturalSize
+        self.backgroundRemovalArtifact = nil
     }
 
     var source: ClipSource {
@@ -45,6 +47,7 @@ struct MediaAsset: Identifiable, Codable, Equatable {
         case mediaType
         case originalDuration
         case naturalSize
+        case backgroundRemovalArtifact
     }
 
     init(from decoder: Decoder) throws {
@@ -56,6 +59,10 @@ struct MediaAsset: Identifiable, Codable, Equatable {
         mediaType = try container.decode(ClipMediaType.self, forKey: .mediaType)
         originalDuration = try container.decode(Double.self, forKey: .originalDuration)
         naturalSize = try container.decodeIfPresent(CGSizeValue.self, forKey: .naturalSize)
+        backgroundRemovalArtifact = try container.decodeIfPresent(
+            BackgroundRemovalArtifact.self,
+            forKey: .backgroundRemovalArtifact
+        )
     }
 }
 

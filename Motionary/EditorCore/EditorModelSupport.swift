@@ -142,17 +142,20 @@ extension TimelineClip {
                 step: 0.01,
                 fractionDigits: 2
             )
-        case .effectIntensity(let effectID):
-            let title =
-                effectStack.effects.first(where: { $0.id == effectID })?.kind.rawValue
-                ?? "Effect"
+        case .effectMix:
             return KeyframePropertyMetadata(
-                title: "\(title) Intensity",
-                systemImage: "wand.and.stars",
+                title: "Amount",
+                systemImage: "dial.medium",
                 group: .effects,
                 range: 0...1,
                 step: 0.01,
                 fractionDigits: 2
+            )
+        case .effectParameter(let effectID, let parameterID, let component):
+            return effectParameterMetadata(
+                effectID: effectID,
+                parameterID: parameterID,
+                component: component
             )
         case .volume:
             return KeyframePropertyMetadata(
@@ -178,11 +181,41 @@ extension TimelineClip {
         }
     }
 
+    private func effectParameterMetadata(
+        effectID: UUID,
+        parameterID: EffectParameterID,
+        component: EffectValueComponent
+    ) -> KeyframePropertyMetadata {
+        guard let effect = effectStack.effects.first(where: { $0.id == effectID }),
+            let descriptor = EffectRegistry.shared.descriptor(for: effect.moduleID)?
+                .descriptor(for: parameterID)
+        else {
+            return KeyframePropertyMetadata(
+                title: "Effect",
+                systemImage: "wand.and.stars",
+                group: .effects,
+                range: 0...1,
+                step: 0.01,
+                fractionDigits: 2
+            )
+        }
+
+        return KeyframePropertyMetadata(
+            title: descriptor.componentTitle(component),
+            systemImage: descriptor.systemImage,
+            group: .effects,
+            range: descriptor.scalarRange ?? component.defaultRange,
+            step: descriptor.step,
+            fractionDigits: descriptor.fractionDigits
+        )
+    }
+
     var availableKeyframeTargets: [KeyframeTarget] {
         if let shape {
             return [.shapeWidth, .shapeHeight]
                 + (shape.kind.supportsCornerRadius ? [.shapeCornerRadius] : [])
                 + [.positionX, .positionY, .scale, .rotation, .opacity]
+                + effectStack.effects.flatMap(\.parameterTargets)
         }
         if mediaType == .audio {
             return [.volume]
@@ -198,11 +231,15 @@ extension TimelineClip {
             .contrast,
             .saturation,
             .exposure
-        ].compactMap { $0 } + effectStack.effects.map { .effectIntensity($0.id) }
+        ].compactMap { $0 } + effectStack.effects.flatMap(\.parameterTargets)
             + (mediaType == .video ? [.volume] : [])
     }
 
     func keyframeTargets(in section: KeyframeSection) -> [KeyframeTarget] {
+        keyframeTargets(in: section, effectID: nil)
+    }
+
+    func keyframeTargets(in section: KeyframeSection, effectID: UUID?) -> [KeyframeTarget] {
         switch section {
         case .shape:
             guard let shape else { return [] }
@@ -222,7 +259,10 @@ extension TimelineClip {
             return [.opacity, .brightness, .contrast, .saturation, .exposure]
         case .effects:
             guard mediaType != .audio else { return [] }
-            return effectStack.effects.map { .effectIntensity($0.id) }
+            if let effectID {
+                return effectStack.effects.first(where: { $0.id == effectID })?.parameterTargets ?? []
+            }
+            return effectStack.effects.flatMap(\.parameterTargets)
         case .audio:
             guard mediaType == .audio || mediaType == .video else { return [] }
             return [.volume]
@@ -232,7 +272,22 @@ extension TimelineClip {
     }
 
     func keyframeTimes(in section: KeyframeSection) -> [Double] {
-        Array(
+        keyframeTimes(in: section, effectID: nil)
+    }
+
+    func keyframeTimes(in section: KeyframeSection, effectID: UUID?) -> [Double] {
+        if section == .effects {
+            if let effectID,
+                let effect = effectStack.effects.first(where: { $0.id == effectID })
+            {
+                return KeyframeMergeSupport.mergedTimes([
+                    effect.mix.keyframes.map(\.time),
+                    effect.parameters.values.flatMap { $0.keyframes.map(\.time) },
+                ])
+            }
+            return effectStack.allKeyframeTimes
+        }
+        return Array(
             Set(
                 keyframeTargets(in: section).flatMap {
                     animatableProperty(for: $0)?.keyframes.map(\.time) ?? []
@@ -250,7 +305,7 @@ extension TimelineClip {
             .transform
         case .opacity, .brightness, .contrast, .saturation, .exposure:
             .adjust
-        case .effectIntensity:
+        case .effectMix, .effectParameter:
             .effects
         case .volume:
             .audio
@@ -278,8 +333,11 @@ extension TimelineClip {
         case .contrast: adjustments.contrast
         case .saturation: adjustments.saturation
         case .exposure: adjustments.exposure
-        case .effectIntensity(let effectID):
-            effectStack.effects.first(where: { $0.id == effectID })?.intensity
+        case .effectMix(let effectID):
+            effectStack.effects.first(where: { $0.id == effectID })?.mix
+        case .effectParameter(let effectID, let parameterID, let component):
+            effectStack.effects.first(where: { $0.id == effectID })?
+                .property(for: parameterID, component: component)
         case .volume: volume
         case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
             .textWidthFraction, .textStroke, .textStrokeWidth, .textShadow,
@@ -320,9 +378,16 @@ extension TimelineClip {
             adjustments.saturation = property
         case .exposure:
             adjustments.exposure = property
-        case .effectIntensity(let effectID):
+        case .effectMix(let effectID):
             guard let index = effectStack.effects.firstIndex(where: { $0.id == effectID }) else { return }
-            effectStack.effects[index].intensity = property
+            effectStack.effects[index].mix = property
+        case .effectParameter(let effectID, let parameterID, let component):
+            guard let index = effectStack.effects.firstIndex(where: { $0.id == effectID }) else { return }
+            effectStack.effects[index].setProperty(
+                property,
+                for: parameterID,
+                component: component
+            )
         case .volume:
             volume = property
         case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
@@ -339,24 +404,28 @@ extension TimelineClip {
         let splitScale = transform.scale.split(at: time)
         left.transform.scale = splitScale.left
         right.transform.scale = splitScale.right
-        for target in availableKeyframeTargets where !target.isScaleTarget {
+        for target in availableKeyframeTargets where !target.isScaleTarget && target.effectID == nil {
             guard let property = animatableProperty(for: target) else { continue }
             let split = property.split(at: time)
             left.setAnimatableProperty(split.left, for: target)
             right.setAnimatableProperty(split.right, for: target)
         }
+        let splitEffects = effectStack.splittingAnimations(at: time)
+        left.effectStack = splitEffects.left
+        right.effectStack = splitEffects.right
         return (left, right)
     }
 
     mutating func trimAnimationsAtStart(by delta: Double, oldDuration: Double) {
         transform.scale = transform.scale.trimmedStart(by: delta, oldDuration: oldDuration)
-        for target in availableKeyframeTargets where !target.isScaleTarget {
+        for target in availableKeyframeTargets where !target.isScaleTarget && target.effectID == nil {
             guard let property = animatableProperty(for: target) else { continue }
             setAnimatableProperty(
                 property.trimmedStart(by: delta, oldDuration: oldDuration),
                 for: target
             )
         }
+        effectStack.trimAnimationsAtStart(by: delta, oldDuration: oldDuration)
     }
 
     mutating func trimAnimationsAtEnd(newDuration: Double, oldDuration: Double) {
@@ -364,21 +433,22 @@ extension TimelineClip {
             newDuration: newDuration,
             oldDuration: oldDuration
         )
-        for target in availableKeyframeTargets where !target.isScaleTarget {
+        for target in availableKeyframeTargets where !target.isScaleTarget && target.effectID == nil {
             guard let property = animatableProperty(for: target) else { continue }
             setAnimatableProperty(
                 property.trimmedEnd(newDuration: newDuration, oldDuration: oldDuration),
                 for: target
             )
         }
+        effectStack.trimAnimationsAtEnd(newDuration: newDuration, oldDuration: oldDuration)
     }
 
     var allKeyframeTimes: [Double] {
         Array(
             Set(
-                availableKeyframeTargets.flatMap {
+                availableKeyframeTargets.filter { $0.effectID == nil }.flatMap {
                     animatableProperty(for: $0)?.keyframes.map(\.time) ?? []
-                }
+                } + effectStack.allKeyframeTimes
             )
         )
         .sorted()
@@ -392,6 +462,61 @@ extension KeyframeTarget {
             true
         default:
             false
+        }
+    }
+
+    var effectID: UUID? {
+        switch self {
+        case .effectMix(let id), .effectParameter(let id, _, _):
+            id
+        default:
+            nil
+        }
+    }
+}
+
+extension EffectInstance {
+    var parameterTargets: [KeyframeTarget] {
+        guard EffectRegistry.shared.availability(of: self) == .available,
+            let module = EffectRegistry.shared.descriptor(for: moduleID)
+        else {
+            return []
+        }
+        return [.effectMix(id)] + module.parameters.flatMap { descriptor -> [KeyframeTarget] in
+            guard descriptor.isAnimatable else { return [] }
+            return descriptor.editableComponents.map {
+                .effectParameter(id, descriptor.id, $0)
+            }
+        }
+    }
+}
+
+private extension EffectParameterDescriptor {
+    var editableComponents: [EffectValueComponent] {
+        switch valueType {
+        case .scalar: [.scalar]
+        case .color: [.red, .green, .blue, .alpha]
+        case .point: [.x, .y]
+        case .boolean, .option: []
+        }
+    }
+
+    func componentTitle(_ component: EffectValueComponent) -> String {
+        switch component {
+        case .scalar: title
+        case .red, .green, .blue, .alpha, .x, .y:
+            "\(title) \(component.rawValue.capitalized)"
+        }
+    }
+}
+
+private extension EffectValueComponent {
+    var defaultRange: ClosedRange<Double> {
+        switch self {
+        case .red, .green, .blue, .alpha:
+            0...1
+        case .scalar, .x, .y:
+            -1...1
         }
     }
 }

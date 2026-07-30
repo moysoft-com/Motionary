@@ -12,11 +12,12 @@ struct CoreToolBar: View {
     @Binding var activePanel: CoreEditorPanel
     @Binding var propertyContextClipID: UUID?
     @Binding var graphReturnPanel: CoreEditorPanel
+    @Binding var activeEffectWorkspaceID: UUID?
     @State private var extractableMediaID: MediaID?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: MotionaryDesign.Spacing.sm) {
                 if let selectedItem = viewModel.selectedTimelineItem {
                     selectedLayerTool(for: selectedItem)
                 } else {
@@ -24,7 +25,7 @@ struct CoreToolBar: View {
                         CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
                     }
                     .buttonStyle(.plain)
-                    .disabled(viewModel.isImporting)
+                    .disabled(viewModel.isPerformingLongTask)
                     .accessibilityLabel("Import media")
 
                     ShapeToolMenu(viewModel: viewModel)
@@ -45,7 +46,7 @@ struct CoreToolBar: View {
 
                 if viewModel.selectedTimelineItem != nil {
                     Divider()
-                        .frame(height: 38)
+                        .frame(height: MotionaryDesign.Control.compactHeight)
                         .overlay(MotionaryTheme.surfaceStrong)
 
                     if isTextSelected {
@@ -122,11 +123,41 @@ struct CoreToolBar: View {
 
                     if supportsMask {
                         CoreToolButton(
-                            systemName: "circle.lefthalf.filled",
+                            systemName: "circle.dashed",
                             title: "Mask",
                             isSelected: isPropertyToolSelected(.mask)
                         ) {
                             openPropertyPanel(.mask)
+                        }
+                    }
+
+                    if supportsBackgroundRemoval {
+                        CoreToolButton(
+                            systemName: "person.crop.square",
+                            title: "BG",
+                            isSelected: isPropertyToolSelected(.removeBackground)
+                        ) {
+                            openPropertyPanel(.removeBackground)
+                        }
+                    }
+
+                    if supportsBlend {
+                        CoreToolButton(
+                            systemName: "square.stack.3d.up.fill",
+                            title: "Blend",
+                            isSelected: isPropertyToolSelected(.blend)
+                        ) {
+                            openPropertyPanel(.blend)
+                        }
+                    }
+
+                    if supportsAutoBeats {
+                        CoreToolButton(
+                            systemName: "metronome",
+                            title: "Beats",
+                            isSelected: isPropertyToolSelected(.autoBeats)
+                        ) {
+                            openPropertyPanel(.autoBeats)
                         }
                     }
 
@@ -144,7 +175,7 @@ struct CoreToolBar: View {
                             title: propertyToolTitle(for: .effects, fallback: "Effects"),
                             isSelected: isPropertyToolSelected(.effects)
                         ) {
-                            openPropertyPanel(.effects)
+                            openEffectsPanel()
                         }
                     }
 
@@ -164,7 +195,7 @@ struct CoreToolBar: View {
                 }
 
                 Divider()
-                    .frame(height: 38)
+                    .frame(height: MotionaryDesign.Control.compactHeight)
                     .overlay(MotionaryTheme.surfaceStrong)
 
                 CoreToolButton(
@@ -177,10 +208,10 @@ struct CoreToolBar: View {
                 }
                 .accessibilityLabel("Canvas settings")
             }
-            .padding(8)
+            .padding(MotionaryDesign.Spacing.sm)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .motionaryGlass(cornerRadius: 20)
+        .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
+        .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
         .task(id: audioExtractionTaskID) {
             await refreshAudioExtractionAvailability()
         }
@@ -213,7 +244,7 @@ struct CoreToolBar: View {
                 )
             }
             .buttonStyle(.plain)
-            .disabled(viewModel.isImporting)
+            .disabled(viewModel.isPerformingLongTask)
             .accessibilityLabel("Replace selected media")
         case .shape:
             CoreToolButton(
@@ -325,6 +356,27 @@ struct CoreToolBar: View {
         }
     }
 
+    private var supportsBackgroundRemoval: Bool {
+        guard case .media(let item) = viewModel.selectedTimelineItem else { return false }
+        return item.mediaType == .image || item.mediaType == .video
+    }
+
+    private var supportsBlend: Bool {
+        switch viewModel.selectedTimelineItem {
+        case .media(let item):
+            item.mediaType != .audio
+        case .shape, .text:
+            true
+        default:
+            false
+        }
+    }
+
+    private var supportsAutoBeats: Bool {
+        guard case .media(let item) = viewModel.selectedTimelineItem else { return false }
+        return item.mediaType == .audio
+    }
+
     private func openTextPanel(_ panel: CoreEditorPanel) {
         propertyContextClipID = viewModel.selectedTimelineItemID
         if panel == .textMotion, activePanel == .textMotionGraph {
@@ -342,6 +394,15 @@ struct CoreToolBar: View {
         }
         propertyContextClipID = viewModel.selectedTimelineItemID
         activePanel = activePanel == panel ? .timeline : panel
+    }
+
+    private func openEffectsPanel() {
+        if activePanel == .effects, activeEffectWorkspaceID != nil {
+            activeEffectWorkspaceID = nil
+            viewModel.activeKeyframeTarget = nil
+            return
+        }
+        openPropertyPanel(.effects)
     }
 
     private func propertyToolSystemName(
@@ -377,7 +438,7 @@ private struct ShapeToolMenu: View {
             CoreToolButtonContent(systemName: "square.on.circle", title: "Shape")
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isImporting)
+        .disabled(viewModel.isPerformingLongTask)
         .accessibilityLabel("Add shape")
     }
 }
@@ -404,7 +465,7 @@ private struct AudioImportMenu: View {
             CoreToolButtonContent(systemName: "waveform.badge.plus", title: "Audio")
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isImporting)
+        .disabled(viewModel.isPerformingLongTask)
         .accessibilityLabel("Import audio")
     }
 }

@@ -118,8 +118,7 @@ struct LayerManagementTests {
 
         viewModel.seek(to: viewModel.duration)
 
-        let frameDuration = 1 / Double(viewModel.project.renderSettings.frameRate)
-        #expect(abs(viewModel.currentTime - (viewModel.duration - frameDuration)) < 0.000_001)
+        #expect(abs(viewModel.currentTime - viewModel.duration) < 0.000_001)
 
         viewModel.deleteSelectedClip()
 
@@ -153,6 +152,72 @@ struct LayerManagementTests {
         #expect(viewModel.project.tracks[0].kind == .visual)
         #expect(viewModel.project.tracks[0].clips.map(\.id) == [clipID])
         #expect(viewModel.project.mediaAsset(for: viewModel.project.tracks[0].clips[0])?.url == sourceURL)
+    }
+
+    @MainActor
+    @Test func newOverlayLayersStartOnCurrentVisibleFrame() async throws {
+        let existingClip = TimelineClip(
+            name: "Existing",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/existing.mov"),
+                mediaType: .video,
+                originalDuration: 4
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 4)
+        )
+        var project = EditorProject(
+            title: "Visible frame insertion",
+            tracks: [TimelineTrack(name: "Layer 1", kind: .visual, clips: [existingClip])]
+        )
+        project.renderSettings.frameRate = 30
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.currentTime = 1.049
+
+        viewModel.addShape(.rectangle)
+        let shape = try #require(viewModel.selectedTimelineItem?.legacyClip())
+        #expect(abs(shape.timelineStart - (31.0 / 30.0)) < 0.000_001)
+        #expect(abs(viewModel.currentTime - (31.0 / 30.0)) < 0.000_001)
+
+        let source = ClipSource(
+            url: URL(fileURLWithPath: "/tmp/imported.mov"),
+            mediaType: .video,
+            originalDuration: 2
+        )
+        viewModel.currentTime = 2.049
+        viewModel.addImportedMedia(
+            ImportedMedia(source: source, storedURL: source.url)
+        )
+        let imported = try #require(viewModel.selectedClip)
+        #expect(abs(imported.timelineStart - (61.0 / 30.0)) < 0.000_001)
+        #expect(abs(viewModel.currentTime - (61.0 / 30.0)) < 0.000_001)
+    }
+
+    @MainActor
+    @Test func newTextLayersUseVisibleFrameAndLargerDefaultSize() async throws {
+        var project = EditorProject(title: "Text defaults")
+        project.renderSettings.frameRate = 30
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.currentTime = 1.049
+
+        let textID = try #require(viewModel.addText())
+        guard case .text(let text) = try #require(viewModel.project.item(id: textID)) else {
+            Issue.record("Expected inserted text item")
+            return
+        }
+
+        #expect(abs(text.timelineStart - (31.0 / 30.0)) < 0.000_001)
+        #expect(abs(viewModel.currentTime - (31.0 / 30.0)) < 0.000_001)
+        #expect(text.style.fontSize == 72)
+        #expect(text.propertyAnimations.fontSize.baseValue == 72)
     }
 
     @MainActor

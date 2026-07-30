@@ -18,35 +18,6 @@ enum TrackKind: String, Codable, CaseIterable {
     case audio
 }
 
-/// Legacy effect representation retained for persisted-project migration.
-enum VideoEffect: String, CaseIterable, Identifiable, Codable {
-    case none = "None"
-    case sepia = "Sepia"
-    case noir = "Noir"
-    case chrome = "Chrome"
-    case blur = "Blur"
-    case vignette = "Vignette"
-
-    var id: String { rawValue }
-
-    var effectKind: ClipEffectKind? {
-        switch self {
-        case .none:
-            nil
-        case .sepia:
-            .sepia
-        case .noir:
-            .noir
-        case .chrome:
-            .chrome
-        case .blur:
-            .blur
-        case .vignette:
-            .vignette
-        }
-    }
-}
-
 /// Codable time range expressed in seconds.
 struct TimeRangeValue: Codable, Equatable {
     var start: Double
@@ -274,6 +245,41 @@ struct AnimatableProperty<Value: Codable & Equatable>: Codable, Equatable {
     }
 }
 
+extension Keyframe: Sendable where Value: Sendable {}
+extension AnimatableProperty: Sendable where Value: Sendable {}
+
+enum KeyframeMergeSupport {
+    static let timeTolerance = 0.000_001
+    static let minimumInterpolationSpan = timeTolerance
+
+    static func mergedTimes(
+        _ timeGroups: [[Double]],
+        tolerance: Double = timeTolerance
+    ) -> [Double] {
+        timeGroups
+            .flatMap { $0 }
+            .map { max($0, 0) }
+            .sorted()
+            .reduce(into: [Double]()) { result, time in
+                guard let previous = result.last else {
+                    result.append(time)
+                    return
+                }
+                if abs(previous - time) > tolerance {
+                    result.append(time)
+                }
+            }
+    }
+
+    static func frame<Value: Codable & Equatable>(
+        in frames: [Keyframe<Value>],
+        at time: Double,
+        tolerance: Double = timeTolerance
+    ) -> Keyframe<Value>? {
+        frames.first { abs($0.time - time) <= tolerance }
+    }
+}
+
 extension AnimatableProperty where Value == Double {
     func value(at time: Double) -> Double {
         guard !keyframes.isEmpty else { return baseValue }
@@ -293,7 +299,7 @@ extension AnimatableProperty where Value == Double {
         }
         let left = keyframes[lower]
         let right = keyframes[upper]
-        let span = max(right.time - left.time, 0.001)
+        let span = max(right.time - left.time, KeyframeMergeSupport.minimumInterpolationSpan)
         let progress = (time - left.time) / span
         let curvedProgress = left.interpolation.progress(at: progress)
         return left.value + ((right.value - left.value) * curvedProgress)
@@ -341,7 +347,7 @@ extension AnimatableProperty where Value == Double {
         guard !keyframes.isEmpty else { return (self, self) }
         let splitTime = max(time, 0)
         let splitValue = value(at: splitTime)
-        let tolerance = 0.000_001
+        let tolerance = KeyframeMergeSupport.timeTolerance
 
         if let exactIndex = keyframes.firstIndex(where: { abs($0.time - splitTime) <= tolerance }) {
             var leftFrames = Array(keyframes[...exactIndex])
@@ -366,7 +372,7 @@ extension AnimatableProperty where Value == Double {
         {
             let left = keyframes[leftIndex]
             let right = keyframes[leftIndex + 1]
-            let span = max(right.time - left.time, 0.000_001)
+            let span = max(right.time - left.time, KeyframeMergeSupport.minimumInterpolationSpan)
             let progress = min(max((splitTime - left.time) / span, 0), 1)
             let split = left.interpolation.split(at: progress)
             leftInterpolation = split.left
@@ -419,7 +425,7 @@ extension AnimatableProperty where Value == Double {
 
         var frames = keyframes
         let edgeValue = value(at: oldDuration)
-        if frames.last?.time ?? 0 < oldDuration - 0.000_001 {
+        if frames.last?.time ?? 0 < oldDuration - KeyframeMergeSupport.timeTolerance {
             frames.append(Keyframe(time: oldDuration, value: edgeValue, interpolation: .hold))
         } else if let lastIndex = frames.indices.last {
             frames[lastIndex].interpolation = .hold
@@ -475,8 +481,10 @@ private extension KeyframeInterpolation {
             let e = interpolate(b, c, parameter)
             let point = interpolate(d, e, parameter)
 
-            guard point.x > 0.000_001, 1 - point.x > 0.000_001,
-                abs(point.y) > 0.000_001, abs(1 - point.y) > 0.000_001
+            guard point.x > KeyframeMergeSupport.timeTolerance,
+                1 - point.x > KeyframeMergeSupport.timeTolerance,
+                abs(point.y) > KeyframeMergeSupport.timeTolerance,
+                abs(1 - point.y) > KeyframeMergeSupport.timeTolerance
             else {
                 return (.linear, .linear)
             }
@@ -522,7 +530,7 @@ private func solveBezierParameter(
             control1: control1X,
             control2: control2X
         )
-        if abs(current - x) < 0.000_001 {
+        if abs(current - x) < KeyframeMergeSupport.timeTolerance {
             break
         }
         if current < x {
@@ -552,9 +560,9 @@ private func normalizedPoint(
     end: KeyframeControlPoint
 ) -> KeyframeControlPoint {
     KeyframeControlPoint(
-        x: (point.x - origin.x) / max(end.x - origin.x, 0.000_001),
+        x: (point.x - origin.x) / max(end.x - origin.x, KeyframeMergeSupport.timeTolerance),
         y: (point.y - origin.y)
-            / (abs(end.y - origin.y) > 0.000_001
+            / (abs(end.y - origin.y) > KeyframeMergeSupport.timeTolerance
                 ? end.y - origin.y
                 : 1)
     )

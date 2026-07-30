@@ -2,6 +2,7 @@
 
 @preconcurrency import AVFoundation
 import CoreGraphics
+import ImageIO
 import UIKit
 
 enum VideoSourceGeometry {
@@ -23,6 +24,31 @@ enum VideoSourceGeometry {
             )
         )
     }
+
+    static func fitScale(sourceSize: CGSize, inside containerSize: CGSize) -> CGFloat? {
+        guard sourceSize.width > 0, sourceSize.height > 0,
+            containerSize.width > 0, containerSize.height > 0
+        else { return nil }
+        return min(
+            containerSize.width / sourceSize.width,
+            containerSize.height / sourceSize.height
+        )
+    }
+
+    static func fittedSize(sourceSize: CGSize, inside containerSize: CGSize) -> CGSize? {
+        guard let scale = fitScale(sourceSize: sourceSize, inside: containerSize) else {
+            return nil
+        }
+        return CGSize(width: sourceSize.width * scale, height: sourceSize.height * scale)
+    }
+}
+
+enum CompositionAudioPolicy {
+    /// Source audio remains in the topology even when its current envelope is
+    /// zero, so later keyframes and edits do not require rebuilding tracks.
+    static func includesSourceAudio(for mediaType: ClipMediaType) -> Bool {
+        mediaType == .video
+    }
 }
 
 /// Composition output and associated custom video-composition metadata.
@@ -36,22 +62,72 @@ struct RenderedComposition {
     var visualTrackIDs: [UUID: CMPersistentTrackID] = [:]
     var audioTrackIDs: [UUID: CMPersistentTrackID] = [:]
     var sourceTransforms: [UUID: CGAffineTransform] = [:]
+    var backgroundMaskTrackIDs: [UUID: CMPersistentTrackID] = [:]
+    var backgroundMaskTransforms: [UUID: CGAffineTransform] = [:]
 }
 
 /// Per-clip information consumed by the custom video compositor.
 struct RenderClipDescriptor: @unchecked Sendable {
     let trackID: CMPersistentTrackID
+    let backgroundMaskTrackID: CMPersistentTrackID?
+    /// Non-video visual sources are decoded once by the frame engine and use
+    /// the shared composition clock instead of a synthetic per-item movie.
+    let stillImageURL: URL?
     let clipID: UUID
     let timelineStart: Double
     let duration: Double
     let sourceTransform: CGAffineTransform
+    let backgroundMaskSourceTransform: CGAffineTransform
     let transform: ClipTransform
     let adjustments: AdjustmentSettings
     let effectStack: EffectStack
     let mask: ItemMask?
+    let backgroundRemoval: BackgroundRemovalSettings?
+    let blendMode: BlendMode
+    let blendIntensity: Double
     let shape: ClipShape?
     let text: TextTimelineItem?
     let renderOrder: Int
+
+    init(
+        trackID: CMPersistentTrackID,
+        backgroundMaskTrackID: CMPersistentTrackID?,
+        stillImageURL: URL? = nil,
+        clipID: UUID,
+        timelineStart: Double,
+        duration: Double,
+        sourceTransform: CGAffineTransform,
+        backgroundMaskSourceTransform: CGAffineTransform,
+        transform: ClipTransform,
+        adjustments: AdjustmentSettings,
+        effectStack: EffectStack,
+        mask: ItemMask?,
+        backgroundRemoval: BackgroundRemovalSettings?,
+        blendMode: BlendMode,
+        blendIntensity: Double,
+        shape: ClipShape?,
+        text: TextTimelineItem?,
+        renderOrder: Int
+    ) {
+        self.trackID = trackID
+        self.backgroundMaskTrackID = backgroundMaskTrackID
+        self.stillImageURL = stillImageURL
+        self.clipID = clipID
+        self.timelineStart = timelineStart
+        self.duration = duration
+        self.sourceTransform = sourceTransform
+        self.backgroundMaskSourceTransform = backgroundMaskSourceTransform
+        self.transform = transform
+        self.adjustments = adjustments
+        self.effectStack = effectStack
+        self.mask = mask
+        self.backgroundRemoval = backgroundRemoval
+        self.blendMode = blendMode
+        self.blendIntensity = blendIntensity
+        self.shape = shape
+        self.text = text
+        self.renderOrder = renderOrder
+    }
 }
 
 struct RenderClipInterval: @unchecked Sendable {
@@ -71,8 +147,13 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
     let clipIntervals: [RenderClipInterval]
     let renderSize: CGSize
     let renderScale: CGFloat
+    let vectorRenderScale: CGFloat
+    let viewport: RenderViewport
     let backgroundColor: RGBAColor
     let frameDuration: Double
+    let qualityProfile: RenderQualityProfile
+    let failurePolicy: RenderFailurePolicy
+    let livePreviewState: LivePreviewRenderState?
 
     init(
         timeRange: CMTimeRange,
@@ -80,16 +161,26 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         sourceTrackIDs: [CMPersistentTrackID],
         renderSize: CGSize,
         renderScale: CGFloat,
+        vectorRenderScale: CGFloat? = nil,
+        viewport: RenderViewport? = nil,
         backgroundColor: RGBAColor,
-        frameDuration: Double
+        frameDuration: Double,
+        qualityProfile: RenderQualityProfile = .balanced,
+        failurePolicy: RenderFailurePolicy = .skipUnavailableEffects,
+        livePreviewState: LivePreviewRenderState? = nil
     ) {
         self.timeRange = timeRange
         self.clips = clips.sorted { $0.renderOrder < $1.renderOrder }
         self.clipIntervals = Self.makeIntervals(clips: self.clips, duration: CMTimeGetSeconds(timeRange.duration))
         self.renderSize = renderSize
         self.renderScale = renderScale
+        self.vectorRenderScale = max(vectorRenderScale ?? renderScale, renderScale, 0.000_001)
+        self.viewport = viewport ?? RenderViewport(renderSize: renderSize)
         self.backgroundColor = backgroundColor
         self.frameDuration = frameDuration
+        self.qualityProfile = qualityProfile
+        self.failurePolicy = failurePolicy
+        self.livePreviewState = livePreviewState
         self.requiredSourceTrackIDs = sourceTrackIDs
             .filter { $0 != kCMPersistentTrackID_Invalid }
             .map { NSNumber(value: $0) }
@@ -157,9 +248,17 @@ enum PreviewQuality: Equatable {
 
     var maximumDimension: Double? {
         switch self {
-        case .interactive: 640
+        case .interactive: nil
         case .balanced: 1280
         case .full: nil
+        }
+    }
+
+    var renderQualityProfile: RenderQualityProfile {
+        switch self {
+        case .interactive: .interactive
+        case .balanced: .balanced
+        case .full: .export
         }
     }
 }
@@ -179,44 +278,95 @@ private struct PreviewRenderGraph {
 }
 
 private struct PreviewTopology: Equatable {
-    let width: Int
-    let height: Int
-    let frameRate: Int32
-    let quality: PreviewQuality
+    let canvas: PreviewCanvasTopology
     let tracks: [PreviewTrackTopology]
 
-    init(project: EditorProject, quality: PreviewQuality) {
-        width = project.renderSettings.width
-        height = project.renderSettings.height
-        frameRate = project.renderSettings.frameRate
-        self.quality = quality
+    init(project: EditorProject) {
+        canvas = PreviewCanvasTopology(
+            width: project.renderSettings.width,
+            height: project.renderSettings.height,
+            frameRate: project.renderSettings.frameRate
+        )
         tracks = project.tracks.map {
             PreviewTrackTopology(
                 id: $0.id,
                 kind: $0.kind,
                 isMuted: $0.isMuted,
                 items: $0.items.map { item in
-                    PreviewItemTopology(
+                    let mediaID: MediaID?
+                    let mediaType: ClipMediaType?
+                    switch item {
+                    case .media(let media):
+                        mediaID = media.mediaID
+                        mediaType = media.mediaType
+                    case .shape(let shape):
+                        mediaID = shape.mediaID
+                        mediaType = .image
+                    case .text, .caption, .adjustment, .compound:
+                        mediaID = nil
+                        mediaType = nil
+                    }
+                    return PreviewItemTopology(
                         id: item.id,
                         kind: item.kind,
-                        mediaID: item.legacyClip()?.mediaID,
-                        mediaType: item.legacyClip()?.mediaType,
+                        mediaID: mediaID,
+                        mediaType: mediaType,
+                        mediaURL: mediaID.flatMap { project.mediaLibrary[$0]?.url },
                         timelineStart: item.timelineStart,
                         placementDuration: item.placementDuration,
-                        sourceRange: item.legacyClip()?.sourceRange,
+                        sourceRange: item.sourceRange,
                         hasShape: {
                             if case .shape = item { return true }
-                            return item.legacyClip()?.shape != nil
+                            return false
                         }(),
                         speedSignature: {
                             if case .media(let media) = item { return media.speedMap.topologySignature }
                             return 0
+                        }(),
+                        usesBackgroundRemoval: item.editableVisuals?.backgroundRemoval != nil,
+                        backgroundRemovalArtifact: {
+                            guard case .media(let media) = item,
+                                media.visuals.backgroundRemoval != nil
+                            else { return nil }
+                            return project.mediaLibrary[media.mediaID]?.backgroundRemovalArtifact
                         }()
                     )
                 }
             )
         }
     }
+}
+
+private extension EditorProject {
+    var requiresFullResolutionPreviewRender: Bool {
+        containsGeneratedCanvasLayer(in: tracks)
+    }
+
+    func containsGeneratedCanvasLayer(in tracks: [TimelineTrack]) -> Bool {
+        for track in tracks {
+            for item in track.items {
+                switch item {
+                case .shape, .text:
+                    return true
+                case .compound(let compound):
+                    if let sequence = sequences[compound.sequenceID],
+                        containsGeneratedCanvasLayer(in: sequence.tracks)
+                    {
+                        return true
+                    }
+                case .media, .caption, .adjustment:
+                    continue
+                }
+            }
+        }
+        return false
+    }
+}
+
+private struct PreviewCanvasTopology: Equatable {
+    let width: Int
+    let height: Int
+    let frameRate: Int32
 }
 
 private struct PreviewTrackTopology: Equatable {
@@ -231,11 +381,93 @@ private struct PreviewItemTopology: Equatable {
     let kind: TimelineItemKind
     let mediaID: MediaID?
     let mediaType: ClipMediaType?
+    let mediaURL: URL?
     let timelineStart: Double
     let placementDuration: Double
     let sourceRange: TimeRangeValue?
     let hasShape: Bool
     let speedSignature: UInt64
+    let usesBackgroundRemoval: Bool
+    let backgroundRemovalArtifact: BackgroundRemovalArtifact?
+}
+
+/// The render-facing projection of a typed timeline item. Keeping this value
+/// local to the composition layer prevents the renderer from round-tripping
+/// through the legacy `TimelineClip` compatibility model.
+private struct TimelineVisualSource {
+    let id: UUID
+    let name: String
+    let mediaID: MediaID
+    let mediaType: ClipMediaType
+    let timelineStart: Double
+    let sourceRange: TimeRangeValue
+    let timelineDuration: Double
+    let speedMap: SpeedMap
+    let pitchFollowsSpeed: Bool
+    let visuals: TimelineItemVisuals
+    let shape: ClipShape?
+
+    init(_ item: MediaTimelineItem) {
+        id = item.id
+        name = item.name
+        mediaID = item.mediaID
+        mediaType = item.mediaType
+        timelineStart = item.timelineStart
+        sourceRange = item.sourceRange
+        timelineDuration = item.timelineDuration
+        speedMap = item.speedMap
+        pitchFollowsSpeed = item.pitchFollowsSpeed
+        visuals = item.visuals
+        shape = nil
+    }
+
+    init(_ item: ShapeTimelineItem) {
+        id = item.id
+        name = item.name
+        mediaID = item.mediaID
+        mediaType = .image
+        timelineStart = item.timelineStart
+        sourceRange = item.sourceRange
+        timelineDuration = item.sourceRange.duration
+        speedMap = .constant
+        pitchFollowsSpeed = false
+        visuals = item.visuals
+        shape = item.shape
+    }
+}
+
+enum CompositionRenderError: LocalizedError {
+    case backgroundRemovalUnavailable(String)
+    case sourceUnavailable(clipName: String, url: URL?)
+    case sourceUnreadable(clipName: String, reason: String)
+    case visualTrackUnavailable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .backgroundRemovalUnavailable(let clipName):
+            "Background removal for \"\(clipName)\" is incomplete. Retry it or disable Remove BG before exporting."
+        case .sourceUnavailable(let clipName, let url):
+            if let url {
+                "The source for \"\(clipName)\" is missing at \(url.lastPathComponent). Relink it before exporting."
+            } else {
+                "The source for \"\(clipName)\" is missing. Relink it before exporting."
+            }
+        case .sourceUnreadable(let clipName, let reason):
+            "The source for \"\(clipName)\" cannot be read: \(reason)"
+        case .visualTrackUnavailable(let clipName):
+            "The source for \"\(clipName)\" contains no renderable video track."
+        }
+    }
+}
+
+private enum BackgroundRemovalAvailabilityPolicy: Equatable {
+    case required
+    case omitUnavailable
+}
+
+private enum RenderSourceAvailabilityPolicy: Equatable {
+    case required
+    case omitUnavailable
 }
 
 /// Converts an editor project into AVFoundation preview/export assets.
@@ -243,6 +475,7 @@ final class CompositionRenderService {
     private let timescale: CMTimeScale = 600
     private let retimingTimescale: CMTimeScale = 60_000
     private let assetCache: MediaAssetCache
+    let livePreviewState = LivePreviewRenderState()
     @MainActor private var previewGraph: PreviewRenderGraph?
 
     init(assetCache: MediaAssetCache = .shared) {
@@ -255,8 +488,12 @@ final class CompositionRenderService {
         quality: PreviewQuality,
         invalidation: EditorInvalidation
     ) async throws -> PreparedPreview? {
-        let topology = PreviewTopology(project: project, quality: quality)
-        let renderSettings = previewRenderSettings(for: project.renderSettings, quality: quality)
+        let topology = PreviewTopology(project: project)
+        let renderSettings = previewRenderSettings(
+            for: project,
+            quality: quality,
+            livePreviewState: livePreviewState
+        )
         let requiresTopologyBuild =
             invalidation.contains(.compositionTopology)
             || previewGraph?.topology != topology
@@ -264,7 +501,11 @@ final class CompositionRenderService {
         if requiresTopologyBuild {
             let rendered = try await makeComposition(
                 for: project,
-                renderSettings: renderSettings
+                renderSettings: renderSettings,
+                backgroundRemovalPolicy: .omitUnavailable,
+                qualityProfile: quality.renderQualityProfile,
+                failurePolicy: .skipUnavailableEffects,
+                livePreviewState: livePreviewState
             )
             try Task.checkCancellation()
             guard rendered.duration > 0 else {
@@ -278,7 +519,9 @@ final class CompositionRenderService {
                     ? compileRenderDescriptors(
                         project: project,
                         visualTrackIDs: rendered.visualTrackIDs,
-                        sourceTransforms: rendered.sourceTransforms
+                        sourceTransforms: rendered.sourceTransforms,
+                        backgroundMaskTrackIDs: rendered.backgroundMaskTrackIDs,
+                        backgroundMaskTransforms: rendered.backgroundMaskTransforms
                     )
                     : []
             )
@@ -297,7 +540,9 @@ final class CompositionRenderService {
             ? compileRenderDescriptors(
                 project: project,
                 visualTrackIDs: graph.rendered.visualTrackIDs,
-                sourceTransforms: graph.rendered.sourceTransforms
+                sourceTransforms: graph.rendered.sourceTransforms,
+                backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
+                backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
             )
             : graph.renderDescriptors
         let videoComposition =
@@ -306,12 +551,20 @@ final class CompositionRenderService {
                 renderSettings: renderSettings,
                 renderScale: CGFloat(renderSettings.width)
                     / CGFloat(max(project.renderSettings.width, 1)),
+                vectorRenderScale: vectorRenderScale(
+                    renderSettings: renderSettings,
+                    projectSettings: project.renderSettings,
+                    qualityProfile: quality.renderQualityProfile
+                ),
                 clips: descriptors,
                 sourceTrackIDs: sourceTrackIDs(
                     for: descriptors,
                     videoClockTrackID: graph.rendered.videoClockTrackID
                 ),
-                duration: project.duration
+                duration: project.duration,
+                qualityProfile: quality.renderQualityProfile,
+                failurePolicy: .skipUnavailableEffects,
+                livePreviewState: livePreviewState
             )
             : graph.rendered.videoComposition
         let audioMix =
@@ -334,7 +587,9 @@ final class CompositionRenderService {
                 videoClockTrackID: graph.rendered.videoClockTrackID,
                 visualTrackIDs: graph.rendered.visualTrackIDs,
                 audioTrackIDs: graph.rendered.audioTrackIDs,
-                sourceTransforms: graph.rendered.sourceTransforms
+                sourceTransforms: graph.rendered.sourceTransforms,
+                backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
+                backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
             ),
             renderDescriptors: descriptors
         )
@@ -347,13 +602,26 @@ final class CompositionRenderService {
         )
     }
 
+    func makeComposition(
+        for project: EditorProject,
+        renderSettings: RenderSettings? = nil
+    ) async throws -> RenderedComposition {
+        try await makeComposition(
+            for: project,
+            renderSettings: renderSettings ?? project.renderSettings,
+            backgroundRemovalPolicy: .required,
+            qualityProfile: .export,
+            failurePolicy: .failOnUnavailableEffects
+        )
+    }
+
     func makePreviewBackgroundImage(
         for project: EditorProject,
         at time: Double,
-        excluding clipID: UUID
+        excluding itemID: UUID
     ) async throws -> UIImage? {
+        guard let item = project.item(id: itemID) else { return nil }
         var backgroundProject = project
-        guard let item = backgroundProject.item(id: clipID) else { return nil }
         let hiddenItem: TimelineItem
         switch item {
         case .media(var media):
@@ -374,12 +642,15 @@ final class CompositionRenderService {
         case .caption:
             return nil
         }
-        backgroundProject.replaceItem(id: clipID, with: hiddenItem)
+        backgroundProject.replaceItem(id: itemID, with: hiddenItem)
 
-        let renderSettings = previewRenderSettings(for: project.renderSettings, quality: .balanced)
+        let renderSettings = previewRenderSettings(for: project, quality: .balanced)
         let rendered = try await makeComposition(
             for: backgroundProject,
-            renderSettings: renderSettings
+            renderSettings: renderSettings,
+            backgroundRemovalPolicy: .omitUnavailable,
+            qualityProfile: .balanced,
+            failurePolicy: .skipUnavailableEffects
         )
         guard rendered.hasVideo, let videoComposition = rendered.videoComposition else {
             return nil
@@ -398,13 +669,26 @@ final class CompositionRenderService {
         return UIImage(cgImage: image)
     }
 
-    func makeComposition(for project: EditorProject) async throws -> RenderedComposition {
-        try await makeComposition(for: project, renderSettings: project.renderSettings)
+    func makePosterComposition(
+        for project: EditorProject,
+        renderSettings: RenderSettings
+    ) async throws -> RenderedComposition {
+        try await makeComposition(
+            for: project,
+            renderSettings: renderSettings,
+            backgroundRemovalPolicy: .omitUnavailable,
+            qualityProfile: .balanced,
+            failurePolicy: .skipUnavailableEffects
+        )
     }
 
     private func makeComposition(
         for project: EditorProject,
-        renderSettings: RenderSettings
+        renderSettings: RenderSettings,
+        backgroundRemovalPolicy: BackgroundRemovalAvailabilityPolicy,
+        qualityProfile: RenderQualityProfile,
+        failurePolicy: RenderFailurePolicy,
+        livePreviewState: LivePreviewRenderState? = nil
     ) async throws -> RenderedComposition {
         let composition = AVMutableComposition()
         var renderClips: [RenderClipDescriptor] = []
@@ -412,6 +696,8 @@ final class CompositionRenderService {
         var visualTrackIDs: [UUID: CMPersistentTrackID] = [:]
         var audioTrackIDs: [UUID: CMPersistentTrackID] = [:]
         var sourceTransforms: [UUID: CGAffineTransform] = [:]
+        var backgroundMaskTrackIDs: [UUID: CMPersistentTrackID] = [:]
+        var backgroundMaskTransforms: [UUID: CGAffineTransform] = [:]
         var renderOrder = 0
         var videoClockTrackID: CMPersistentTrackID?
 
@@ -424,35 +710,40 @@ final class CompositionRenderService {
                 try Task.checkCancellation()
                 switch item {
                 case .media(let mediaItem):
-                    guard let clip = item.legacyClip(), mediaItem.sourceRange.duration > 0 else { continue }
-                    let timelineDuration = mediaItem.timelineDuration
-                    try await insertVisualClip(
-                        clip: clip,
-                        timelineDuration: timelineDuration,
-                        speedMap: mediaItem.speedMap,
-                        pitchFollowsSpeed: mediaItem.pitchFollowsSpeed,
+                    guard mediaItem.sourceRange.duration > 0 else { continue }
+                    try await insertVisualItem(
+                        source: TimelineVisualSource(mediaItem),
                         project: project,
+                        frameRate: renderSettings.frameRate,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
                         audioTrackIDs: &audioTrackIDs,
                         audioParameters: &audioParameters,
                         sourceTransforms: &sourceTransforms,
+                        backgroundMaskTrackIDs: &backgroundMaskTrackIDs,
+                        backgroundMaskTransforms: &backgroundMaskTransforms,
+                        backgroundRemovalPolicy: backgroundRemovalPolicy,
+                        sourceAvailabilityPolicy: failurePolicy == .failOnUnavailableEffects
+                            ? .required : .omitUnavailable,
                         renderClips: &renderClips,
                         renderOrder: &renderOrder
                     )
-                case .shape:
-                    guard let clip = item.legacyClip(), clip.sourceRange.duration > 0 else { continue }
-                    try await insertVisualClip(
-                        clip: clip,
-                        timelineDuration: clip.sourceRange.duration,
-                        speedMap: .constant,
-                        pitchFollowsSpeed: false,
+                case .shape(let shapeItem):
+                    guard shapeItem.sourceRange.duration > 0 else { continue }
+                    try await insertVisualItem(
+                        source: TimelineVisualSource(shapeItem),
                         project: project,
+                        frameRate: renderSettings.frameRate,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
                         audioTrackIDs: &audioTrackIDs,
                         audioParameters: &audioParameters,
                         sourceTransforms: &sourceTransforms,
+                        backgroundMaskTrackIDs: &backgroundMaskTrackIDs,
+                        backgroundMaskTransforms: &backgroundMaskTransforms,
+                        backgroundRemovalPolicy: backgroundRemovalPolicy,
+                        sourceAvailabilityPolicy: failurePolicy == .failOnUnavailableEffects
+                            ? .required : .omitUnavailable,
                         renderClips: &renderClips,
                         renderOrder: &renderOrder
                     )
@@ -460,14 +751,19 @@ final class CompositionRenderService {
                     renderClips.append(
                         RenderClipDescriptor(
                             trackID: kCMPersistentTrackID_Invalid,
+                            backgroundMaskTrackID: nil,
                             clipID: textItem.id,
                             timelineStart: textItem.timelineStart,
                             duration: textItem.duration,
                             sourceTransform: .identity,
+                            backgroundMaskSourceTransform: .identity,
                             transform: textItem.visuals.transform,
                             adjustments: textItem.visuals.adjustments,
                             effectStack: textItem.visuals.effectStack,
                             mask: textItem.visuals.mask,
+                            backgroundRemoval: nil,
+                            blendMode: textItem.visuals.blendMode,
+                            blendIntensity: textItem.visuals.blendIntensity,
                             shape: nil,
                             text: textItem,
                             renderOrder: renderOrder
@@ -486,33 +782,82 @@ final class CompositionRenderService {
                 try Task.checkCancellation()
                 guard case .media(let mediaItem) = item,
                     mediaItem.mediaType == .audio,
-                    let clip = item.legacyClip(),
-                    clip.sourceRange.duration > 0
+                    mediaItem.sourceRange.duration > 0
                 else { continue }
-                let metadata = try await assetCache.metadata(for: project.mediaURL(for: clip))
+                guard let asset = project.mediaLibrary[mediaItem.mediaID] else {
+                    if failurePolicy == .failOnUnavailableEffects {
+                        throw CompositionRenderError.sourceUnavailable(
+                            clipName: mediaItem.name,
+                            url: nil
+                        )
+                    }
+                    continue
+                }
+                if asset.url.isFileURL,
+                    !FileManager.default.fileExists(atPath: asset.url.path)
+                {
+                    if failurePolicy == .failOnUnavailableEffects {
+                        throw CompositionRenderError.sourceUnavailable(
+                            clipName: mediaItem.name,
+                            url: asset.url
+                        )
+                    }
+                    continue
+                }
+                let metadata: CachedMediaAsset
+                do {
+                    metadata = try await assetCache.metadata(for: asset.url)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    if failurePolicy == .failOnUnavailableEffects {
+                        throw CompositionRenderError.sourceUnreadable(
+                            clipName: mediaItem.name,
+                            reason: error.localizedDescription
+                        )
+                    }
+                    continue
+                }
                 try Task.checkCancellation()
-                guard let sourceAudioTrack = metadata.audioTrack,
-                    let compositionAudioTrack = composition.addMutableTrack(
+                guard let sourceAudioTrack = metadata.audioTrack else {
+                    if failurePolicy == .failOnUnavailableEffects {
+                        throw CompositionRenderError.sourceUnreadable(
+                            clipName: mediaItem.name,
+                            reason: "No audio track was found."
+                        )
+                    }
+                    continue
+                }
+                guard let compositionAudioTrack = composition.addMutableTrack(
                         withMediaType: .audio,
                         preferredTrackID: kCMPersistentTrackID_Invalid
                     )
-                else { continue }
-                audioTrackIDs[clip.id] = compositionAudioTrack.trackID
+                else {
+                    if failurePolicy == .failOnUnavailableEffects {
+                        throw CompositionRenderError.sourceUnreadable(
+                            clipName: mediaItem.name,
+                            reason: "AVFoundation could not create an audio composition track."
+                        )
+                    }
+                    continue
+                }
+                audioTrackIDs[mediaItem.id] = compositionAudioTrack.trackID
 
                 try insertRetimedTrack(
                     sourceTrack: sourceAudioTrack,
                     compositionTrack: compositionAudioTrack,
-                    sourceRange: clip.sourceRange,
-                    timelineStart: clip.timelineStart,
+                    sourceRange: mediaItem.sourceRange,
+                    timelineStart: mediaItem.timelineStart,
                     speedMap: mediaItem.speedMap
                 )
                 audioParameters.append(
                     makeAudioParameters(
                         track: compositionAudioTrack,
-                        clip: clip,
+                        volume: mediaItem.visuals.volume,
+                        timelineStart: mediaItem.timelineStart,
                         timelineDuration: mediaItem.timelineDuration,
                         pitchFollowsSpeed: mediaItem.pitchFollowsSpeed,
-                        frameRate: project.renderSettings.frameRate
+                        frameRate: renderSettings.frameRate
                     )
                 )
             }
@@ -520,7 +865,9 @@ final class CompositionRenderService {
 
         let duration = max(project.duration, 0)
         if duration > 0,
-            renderClips.contains(where: { $0.text != nil })
+            renderClips.contains(where: {
+                $0.text != nil || $0.shape != nil || $0.stillImageURL != nil
+            })
         {
             videoClockTrackID = try await insertGeneratedVideoClock(
                 duration: duration,
@@ -532,12 +879,20 @@ final class CompositionRenderService {
             renderSettings: renderSettings,
             renderScale: CGFloat(renderSettings.width)
                 / CGFloat(max(project.renderSettings.width, 1)),
+            vectorRenderScale: vectorRenderScale(
+                renderSettings: renderSettings,
+                projectSettings: project.renderSettings,
+                qualityProfile: qualityProfile
+            ),
             clips: renderClips,
             sourceTrackIDs: sourceTrackIDs(
                 for: renderClips,
                 videoClockTrackID: videoClockTrackID
             ),
-            duration: duration
+            duration: duration,
+            qualityProfile: qualityProfile,
+            failurePolicy: failurePolicy,
+            livePreviewState: livePreviewState
         )
 
         return RenderedComposition(
@@ -549,16 +904,22 @@ final class CompositionRenderService {
             videoClockTrackID: videoClockTrackID,
             visualTrackIDs: visualTrackIDs,
             audioTrackIDs: audioTrackIDs,
-            sourceTransforms: sourceTransforms
+            sourceTransforms: sourceTransforms,
+            backgroundMaskTrackIDs: backgroundMaskTrackIDs,
+            backgroundMaskTransforms: backgroundMaskTransforms
         )
     }
 
     private func makeVideoComposition(
         renderSettings: RenderSettings,
         renderScale: CGFloat,
+        vectorRenderScale: CGFloat? = nil,
         clips: [RenderClipDescriptor],
         sourceTrackIDs: [CMPersistentTrackID],
-        duration: Double
+        duration: Double,
+        qualityProfile: RenderQualityProfile,
+        failurePolicy: RenderFailurePolicy,
+        livePreviewState: LivePreviewRenderState? = nil
     ) -> AVVideoComposition? {
         guard !clips.isEmpty, duration > 0 else { return nil }
 
@@ -573,8 +934,12 @@ final class CompositionRenderService {
                 sourceTrackIDs: sourceTrackIDs,
                 renderSize: renderSettings.size,
                 renderScale: renderScale,
+                vectorRenderScale: vectorRenderScale,
                 backgroundColor: renderSettings.backgroundColor,
-                frameDuration: 1 / Double(max(renderSettings.frameRate, 1))
+                frameDuration: 1 / Double(max(renderSettings.frameRate, 1)),
+                qualityProfile: qualityProfile,
+                failurePolicy: failurePolicy,
+                livePreviewState: livePreviewState
             )
         ]
         return AVVideoComposition(configuration: configuration)
@@ -585,7 +950,9 @@ final class CompositionRenderService {
         videoClockTrackID: CMPersistentTrackID?
     ) -> [CMPersistentTrackID] {
         var result = clips
-            .map(\.trackID)
+            .flatMap { clip in
+                [clip.trackID, clip.backgroundMaskTrackID ?? kCMPersistentTrackID_Invalid]
+            }
             .filter { $0 != kCMPersistentTrackID_Invalid }
         if let videoClockTrackID {
             result.append(videoClockTrackID)
@@ -620,9 +987,14 @@ final class CompositionRenderService {
     }
 
     private func previewRenderSettings(
-        for settings: RenderSettings,
-        quality: PreviewQuality
+        for project: EditorProject,
+        quality: PreviewQuality,
+        livePreviewState: LivePreviewRenderState? = nil
     ) -> RenderSettings {
+        let settings = project.renderSettings
+        guard quality == .interactive || !project.requiresFullResolutionPreviewRender else {
+            return settings
+        }
         guard let maximumDimension = quality.maximumDimension else { return settings }
         let width = Double(max(settings.width, 1))
         let height = Double(max(settings.height, 1))
@@ -641,48 +1013,164 @@ final class CompositionRenderService {
         )
     }
 
-    private func insertVisualClip(
-        clip: TimelineClip,
-        timelineDuration: Double,
-        speedMap: SpeedMap,
-        pitchFollowsSpeed: Bool,
+    private func vectorRenderScale(
+        renderSettings: RenderSettings,
+        projectSettings: RenderSettings,
+        qualityProfile: RenderQualityProfile
+    ) -> CGFloat {
+        let logicalScale = CGFloat(renderSettings.width)
+            / CGFloat(max(projectSettings.width, 1))
+        switch qualityProfile {
+        case .interactive, .export:
+            return logicalScale
+        case .balanced:
+            return max(logicalScale, 1)
+        }
+    }
+
+    private func insertVisualItem(
+        source: TimelineVisualSource,
         project: EditorProject,
+        frameRate: Int32,
         composition: AVMutableComposition,
         visualTrackIDs: inout [UUID: CMPersistentTrackID],
         audioTrackIDs: inout [UUID: CMPersistentTrackID],
         audioParameters: inout [AVAudioMixInputParameters],
         sourceTransforms: inout [UUID: CGAffineTransform],
+        backgroundMaskTrackIDs: inout [UUID: CMPersistentTrackID],
+        backgroundMaskTransforms: inout [UUID: CGAffineTransform],
+        backgroundRemovalPolicy: BackgroundRemovalAvailabilityPolicy,
+        sourceAvailabilityPolicy: RenderSourceAvailabilityPolicy,
         renderClips: inout [RenderClipDescriptor],
         renderOrder: inout Int
     ) async throws {
-        let metadata = try await assetCache.metadata(for: project.mediaURL(for: clip))
+        if let shape = source.shape {
+            visualTrackIDs[source.id] = kCMPersistentTrackID_Invalid
+            renderClips.append(
+                RenderClipDescriptor(
+                    trackID: kCMPersistentTrackID_Invalid,
+                    backgroundMaskTrackID: nil,
+                    clipID: source.id,
+                    timelineStart: source.timelineStart,
+                    duration: source.timelineDuration,
+                    sourceTransform: .identity,
+                    backgroundMaskSourceTransform: .identity,
+                    transform: source.visuals.transform,
+                    adjustments: source.visuals.adjustments,
+                    effectStack: source.visuals.effectStack,
+                    mask: source.visuals.mask,
+                    backgroundRemoval: nil,
+                    blendMode: source.visuals.blendMode,
+                    blendIntensity: source.visuals.blendIntensity,
+                    shape: shape,
+                    text: nil,
+                    renderOrder: renderOrder
+                )
+            )
+            renderOrder += 1
+            return
+        }
+
+        guard let mediaAsset = project.mediaLibrary[source.mediaID] else {
+            if sourceAvailabilityPolicy == .required {
+                throw CompositionRenderError.sourceUnavailable(
+                    clipName: source.name,
+                    url: nil
+                )
+            }
+            return
+        }
+        if mediaAsset.url.isFileURL,
+            !FileManager.default.fileExists(atPath: mediaAsset.url.path)
+        {
+            if sourceAvailabilityPolicy == .required {
+                throw CompositionRenderError.sourceUnavailable(
+                    clipName: source.name,
+                    url: mediaAsset.url
+                )
+            }
+            return
+        }
+        if source.mediaType == .image, Self.isStillImageFile(mediaAsset.url) {
+            visualTrackIDs[source.id] = kCMPersistentTrackID_Invalid
+            renderClips.append(
+                RenderClipDescriptor(
+                    trackID: kCMPersistentTrackID_Invalid,
+                    backgroundMaskTrackID: nil,
+                    stillImageURL: mediaAsset.url,
+                    clipID: source.id,
+                    timelineStart: source.timelineStart,
+                    duration: source.timelineDuration,
+                    sourceTransform: .identity,
+                    backgroundMaskSourceTransform: .identity,
+                    transform: source.visuals.transform,
+                    adjustments: source.visuals.adjustments,
+                    effectStack: source.visuals.effectStack,
+                    mask: source.visuals.mask,
+                    backgroundRemoval: nil,
+                    blendMode: source.visuals.blendMode,
+                    blendIntensity: source.visuals.blendIntensity,
+                    shape: nil,
+                    text: nil,
+                    renderOrder: renderOrder
+                )
+            )
+            renderOrder += 1
+            return
+        }
+
+        let metadata: CachedMediaAsset
+        do {
+            metadata = try await assetCache.metadata(for: mediaAsset.url)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if sourceAvailabilityPolicy == .required {
+                throw CompositionRenderError.sourceUnreadable(
+                    clipName: source.name,
+                    reason: error.localizedDescription
+                )
+            }
+            return
+        }
         try Task.checkCancellation()
-        guard let sourceVideoTrack = metadata.videoTrack else { return }
+        guard let sourceVideoTrack = metadata.videoTrack else {
+            if sourceAvailabilityPolicy == .required {
+                throw CompositionRenderError.visualTrackUnavailable(source.name)
+            }
+            return
+        }
 
         guard
             let compositionVideoTrack = composition.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
             )
-        else { return }
-        visualTrackIDs[clip.id] = compositionVideoTrack.trackID
+        else {
+            if sourceAvailabilityPolicy == .required {
+                throw CompositionRenderError.visualTrackUnavailable(source.name)
+            }
+            return
+        }
+        visualTrackIDs[source.id] = compositionVideoTrack.trackID
 
-        if clip.mediaType == .image {
-            try insertLoopedStillImageVideo(
-                clip: clip,
-                originalDuration: project.originalDuration(for: clip),
+        if source.mediaType == .image {
+            try insertLoopedLegacyStillVideo(
+                sourceRange: source.sourceRange,
+                timelineStart: source.timelineStart,
+                originalDuration: mediaAsset.originalDuration,
                 assetDuration: metadata.duration,
                 sourceVideoTrack: sourceVideoTrack,
                 compositionVideoTrack: compositionVideoTrack,
-                frameRate: project.renderSettings.frameRate
+                frameRate: frameRate
             )
         } else {
             try insertRetimedTrack(
                 sourceTrack: sourceVideoTrack,
                 compositionTrack: compositionVideoTrack,
-                sourceRange: clip.sourceRange,
-                timelineStart: clip.timelineStart,
-                speedMap: speedMap
+                sourceRange: source.sourceRange,
+                timelineStart: source.timelineStart,
+                speedMap: source.speedMap
             )
         }
 
@@ -690,52 +1178,109 @@ final class CompositionRenderService {
             naturalSize: metadata.naturalSize ?? .zero,
             transform: metadata.preferredTransform
         )
-        sourceTransforms[clip.id] = sourceTransform
+        sourceTransforms[source.id] = sourceTransform
+        let visuals = source.visuals
+        var backgroundMaskTrackID: CMPersistentTrackID?
+        var backgroundMaskSourceTransform = CGAffineTransform.identity
+        if source.shape == nil, visuals.backgroundRemoval != nil {
+            let artifact = mediaAsset.backgroundRemovalArtifact
+            let artifactIsAvailable = artifact.map { artifact in
+                artifact.algorithmVersion == BackgroundRemovalArtifact.currentAlgorithmVersion
+                    && artifact.covers(source.sourceRange)
+                    && FileManager.default.fileExists(atPath: artifact.url.path)
+            } ?? false
+
+            if !artifactIsAvailable, backgroundRemovalPolicy == .required {
+                throw CompositionRenderError.backgroundRemovalUnavailable(source.name)
+            }
+
+            if artifactIsAvailable, let artifact {
+                do {
+                    let maskMetadata = try await assetCache.metadata(for: artifact.url)
+                    try Task.checkCancellation()
+                    guard let maskSourceTrack = maskMetadata.videoTrack,
+                        let maskCompositionTrack = composition.addMutableTrack(
+                            withMediaType: .video,
+                            preferredTrackID: kCMPersistentTrackID_Invalid
+                        )
+                    else {
+                        throw CompositionRenderError.backgroundRemovalUnavailable(source.name)
+                    }
+                    let maskSourceRange = TimeRangeValue(
+                        start: max(source.sourceRange.start - artifact.sourceRange.start, 0),
+                        duration: source.sourceRange.duration
+                    )
+                    try insertRetimedTrack(
+                        sourceTrack: maskSourceTrack,
+                        compositionTrack: maskCompositionTrack,
+                        sourceRange: maskSourceRange,
+                        timelineStart: source.timelineStart,
+                        speedMap: source.speedMap
+                    )
+                    backgroundMaskTrackID = maskCompositionTrack.trackID
+                    backgroundMaskTrackIDs[source.id] = maskCompositionTrack.trackID
+                    backgroundMaskSourceTransform = VideoSourceGeometry.normalizedTransform(
+                        naturalSize: maskMetadata.naturalSize ?? .zero,
+                        transform: maskMetadata.preferredTransform
+                    )
+                    backgroundMaskTransforms[source.id] = backgroundMaskSourceTransform
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    if backgroundRemovalPolicy == .required {
+                        throw CompositionRenderError.backgroundRemovalUnavailable(source.name)
+                    }
+                }
+            }
+        }
         renderClips.append(
             RenderClipDescriptor(
                 trackID: compositionVideoTrack.trackID,
-                clipID: clip.id,
-                timelineStart: clip.timelineStart,
-                duration: timelineDuration,
+                backgroundMaskTrackID: backgroundMaskTrackID,
+                clipID: source.id,
+                timelineStart: source.timelineStart,
+                duration: source.timelineDuration,
                 sourceTransform: sourceTransform,
-                transform: clip.transform,
-                adjustments: clip.adjustments,
-                effectStack: clip.effectStack,
-                mask: project.item(id: clip.id)?.editableVisuals?.mask,
-                shape: clip.shape,
+                backgroundMaskSourceTransform: backgroundMaskSourceTransform,
+                transform: visuals.transform,
+                adjustments: visuals.adjustments,
+                effectStack: visuals.effectStack,
+                mask: visuals.mask,
+                backgroundRemoval: backgroundMaskTrackID == nil ? nil : visuals.backgroundRemoval,
+                blendMode: visuals.blendMode,
+                blendIntensity: visuals.blendIntensity,
+                shape: source.shape,
                 text: nil,
                 renderOrder: renderOrder
             )
         )
         renderOrder += 1
 
-        let audioTracks: [AVAssetTrack]
-        if !Self.shouldIncludeSourceAudio(for: clip) {
-            audioTracks = []
-        } else {
-            audioTracks = metadata.audioTrack.map { [$0] } ?? []
-        }
+        let audioTracks = CompositionAudioPolicy.includesSourceAudio(for: source.mediaType)
+            ? metadata.audioTrack.map { [$0] } ?? []
+            : []
         if let sourceAudioTrack = audioTracks.first,
             let compositionAudioTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid
             )
         {
-            audioTrackIDs[clip.id] = compositionAudioTrack.trackID
+            audioTrackIDs[source.id] = compositionAudioTrack.trackID
             try insertRetimedTrack(
                 sourceTrack: sourceAudioTrack,
                 compositionTrack: compositionAudioTrack,
-                sourceRange: clip.sourceRange,
-                timelineStart: clip.timelineStart,
-                speedMap: speedMap
+                sourceRange: source.sourceRange,
+                timelineStart: source.timelineStart,
+                speedMap: source.speedMap
             )
             audioParameters.append(
                 makeAudioParameters(
                     track: compositionAudioTrack,
-                    clip: clip,
-                    timelineDuration: timelineDuration,
-                    pitchFollowsSpeed: pitchFollowsSpeed,
-                    frameRate: project.renderSettings.frameRate
+                    volume: visuals.volume,
+                    timelineStart: source.timelineStart,
+                    timelineDuration: source.timelineDuration,
+                    pitchFollowsSpeed: source.pitchFollowsSpeed,
+                    frameRate: frameRate
                 )
             )
         }
@@ -799,8 +1344,11 @@ final class CompositionRenderService {
         }
     }
 
-    private func insertLoopedStillImageVideo(
-        clip: TimelineClip,
+    /// Schema-10 image assets were stored as one-frame JPEG movies. Keep that
+    /// source format readable while all newly imported stills stay as images.
+    private func insertLoopedLegacyStillVideo(
+        sourceRange: TimeRangeValue,
+        timelineStart: Double,
         originalDuration: Double,
         assetDuration: Double,
         sourceVideoTrack: AVAssetTrack,
@@ -815,19 +1363,41 @@ final class CompositionRenderService {
             ),
             minimumSegmentDuration
         )
-        var remainingDuration = max(clip.sourceRange.duration, 0)
-        var timelineCursor = clip.timelineStart
+        var remainingDuration = max(sourceRange.duration, 0)
+        var timelineCursor = timelineStart
 
         while remainingDuration > 0.0005 {
             let segmentDuration = min(loopDuration, remainingDuration)
-            let sourceRange = CMTimeRange(
-                start: .zero,
-                duration: cmTime(segmentDuration)
+            let segment = CMTimeRange(start: .zero, duration: cmTime(segmentDuration))
+            try compositionVideoTrack.insertTimeRange(
+                segment,
+                of: sourceVideoTrack,
+                at: cmTime(timelineCursor)
             )
-            try compositionVideoTrack.insertTimeRange(sourceRange, of: sourceVideoTrack, at: cmTime(timelineCursor))
             timelineCursor += segmentDuration
             remainingDuration -= segmentDuration
         }
+    }
+
+    private static func isStillImageFile(_ url: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            CGImageSourceGetCount(source) > 0,
+            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) != nil
+        else { return false }
+
+        // Creating an image source only validates the container header. Force a
+        // tiny decode so corrupt payloads fail during composition preflight
+        // instead of disappearing silently inside the frame renderer.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 8,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options as CFDictionary
+        ) != nil
     }
 
     private func cmTime(_ seconds: Double) -> CMTime {
@@ -840,25 +1410,25 @@ final class CompositionRenderService {
 
     private func makeAudioParameters(
         track: AVCompositionTrack,
-        clip: TimelineClip,
-        timelineDuration: Double? = nil,
+        volume: AnimatableProperty<Double>,
+        timelineStart: Double,
+        timelineDuration: Double,
         pitchFollowsSpeed: Bool = false,
         frameRate: Int32
     ) -> AVAudioMixInputParameters {
-        let envelopeDuration = timelineDuration ?? clip.sourceRange.duration
         let parameters = AVMutableAudioMixInputParameters(track: track)
         parameters.audioTimePitchAlgorithm = pitchFollowsSpeed ? .varispeed : .timeDomain
         let points = AudioEnvelopeSampler.points(
-            for: clip.volume,
-            duration: envelopeDuration,
+            for: volume,
+            duration: timelineDuration,
             frameRate: frameRate
         )
         guard let first = points.first else {
-            parameters.setVolume(Float(clip.volume.baseValue), at: cmTime(clip.timelineStart))
+            parameters.setVolume(Float(volume.baseValue), at: cmTime(timelineStart))
             return parameters
         }
 
-        parameters.setVolume(Float(first.value), at: cmTime(clip.timelineStart + first.time))
+        parameters.setVolume(Float(first.value), at: cmTime(timelineStart + first.time))
         for pair in zip(points, points.dropFirst()) {
             let start = pair.0
             let end = pair.1
@@ -866,7 +1436,7 @@ final class CompositionRenderService {
             guard segmentDuration > 0.000_001 else {
                 parameters.setVolume(
                     Float(end.value),
-                    at: cmTime(clip.timelineStart + end.time)
+                    at: cmTime(timelineStart + end.time)
                 )
                 continue
             }
@@ -874,7 +1444,7 @@ final class CompositionRenderService {
                 fromStartVolume: Float(start.value),
                 toEndVolume: Float(end.value),
                 timeRange: CMTimeRange(
-                    start: cmTime(clip.timelineStart + start.time),
+                    start: cmTime(timelineStart + start.time),
                     duration: cmTime(segmentDuration)
                 )
             )
@@ -889,15 +1459,13 @@ final class CompositionRenderService {
         return mix
     }
 
-    static func shouldIncludeSourceAudio(for clip: TimelineClip) -> Bool {
-        clip.mediaType != .image
-    }
-
     @MainActor
     private func compileRenderDescriptors(
         project: EditorProject,
         visualTrackIDs: [UUID: CMPersistentTrackID],
-        sourceTransforms: [UUID: CGAffineTransform]
+        sourceTransforms: [UUID: CGAffineTransform],
+        backgroundMaskTrackIDs: [UUID: CMPersistentTrackID],
+        backgroundMaskTransforms: [UUID: CGAffineTransform]
     ) -> [RenderClipDescriptor] {
         var descriptors: [RenderClipDescriptor] = []
         var renderOrder = 0
@@ -908,42 +1476,59 @@ final class CompositionRenderService {
             for item in track.items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
                 switch item {
                 case .media(let mediaItem):
-                    guard let clip = item.legacyClip(),
-                        let trackID = visualTrackIDs[clip.id]
+                    guard let trackID = visualTrackIDs[mediaItem.id]
                     else { continue }
+                    let visuals = mediaItem.visuals
                     descriptors.append(
                         RenderClipDescriptor(
                             trackID: trackID,
-                            clipID: clip.id,
-                            timelineStart: clip.timelineStart,
+                            backgroundMaskTrackID: backgroundMaskTrackIDs[mediaItem.id],
+                            stillImageURL: project.mediaLibrary[mediaItem.mediaID].flatMap {
+                                mediaItem.mediaType == .image && Self.isStillImageFile($0.url)
+                                    ? $0.url
+                                    : nil
+                            },
+                            clipID: mediaItem.id,
+                            timelineStart: mediaItem.timelineStart,
                             duration: mediaItem.timelineDuration,
-                            sourceTransform: sourceTransforms[clip.id] ?? .identity,
-                            transform: clip.transform,
-                            adjustments: clip.adjustments,
-                            effectStack: clip.effectStack,
-                            mask: mediaItem.visuals.mask,
-                            shape: clip.shape,
+                            sourceTransform: sourceTransforms[mediaItem.id] ?? .identity,
+                            backgroundMaskSourceTransform: backgroundMaskTransforms[mediaItem.id] ?? .identity,
+                            transform: visuals.transform,
+                            adjustments: visuals.adjustments,
+                            effectStack: visuals.effectStack,
+                            mask: visuals.mask,
+                            backgroundRemoval: backgroundMaskTrackIDs[mediaItem.id] == nil
+                                ? nil
+                                : visuals.backgroundRemoval,
+                            blendMode: visuals.blendMode,
+                            blendIntensity: visuals.blendIntensity,
+                            shape: nil,
                             text: nil,
                             renderOrder: renderOrder
                         )
                     )
                     renderOrder += 1
-                case .shape:
-                    guard let clip = item.legacyClip(),
-                        let trackID = visualTrackIDs[clip.id]
+                case .shape(let shapeItem):
+                    guard let trackID = visualTrackIDs[shapeItem.id]
                     else { continue }
+                    let visuals = shapeItem.visuals
                     descriptors.append(
                         RenderClipDescriptor(
                             trackID: trackID,
-                            clipID: clip.id,
-                            timelineStart: clip.timelineStart,
-                            duration: clip.sourceRange.duration,
-                            sourceTransform: sourceTransforms[clip.id] ?? .identity,
-                            transform: clip.transform,
-                            adjustments: clip.adjustments,
-                            effectStack: clip.effectStack,
-                            mask: item.editableVisuals?.mask,
-                            shape: clip.shape,
+                            backgroundMaskTrackID: nil,
+                            clipID: shapeItem.id,
+                            timelineStart: shapeItem.timelineStart,
+                            duration: shapeItem.sourceRange.duration,
+                            sourceTransform: sourceTransforms[shapeItem.id] ?? .identity,
+                            backgroundMaskSourceTransform: .identity,
+                            transform: visuals.transform,
+                            adjustments: visuals.adjustments,
+                            effectStack: visuals.effectStack,
+                            mask: visuals.mask,
+                            backgroundRemoval: nil,
+                            blendMode: visuals.blendMode,
+                            blendIntensity: visuals.blendIntensity,
+                            shape: shapeItem.shape,
                             text: nil,
                             renderOrder: renderOrder
                         )
@@ -953,14 +1538,19 @@ final class CompositionRenderService {
                     descriptors.append(
                         RenderClipDescriptor(
                             trackID: kCMPersistentTrackID_Invalid,
+                            backgroundMaskTrackID: nil,
                             clipID: textItem.id,
                             timelineStart: textItem.timelineStart,
                             duration: textItem.duration,
                             sourceTransform: .identity,
+                            backgroundMaskSourceTransform: .identity,
                             transform: textItem.visuals.transform,
                             adjustments: textItem.visuals.adjustments,
                             effectStack: textItem.visuals.effectStack,
                             mask: textItem.visuals.mask,
+                            backgroundRemoval: nil,
+                            blendMode: textItem.visuals.blendMode,
+                            blendIntensity: textItem.visuals.blendIntensity,
                             shape: nil,
                             text: textItem,
                             renderOrder: renderOrder
@@ -982,19 +1572,18 @@ final class CompositionRenderService {
     ) -> AVAudioMix? {
         let parameters = project.tracks
             .filter { !$0.isMuted }
-            .flatMap(\.clips)
-            .compactMap { clip -> AVAudioMixInputParameters? in
-                guard let trackID = audioTrackIDs[clip.id],
+            .flatMap(\.items)
+            .compactMap { item -> AVAudioMixInputParameters? in
+                guard case .media(let mediaItem) = item,
+                    let trackID = audioTrackIDs[mediaItem.id],
                     let track = composition.track(withTrackID: trackID)
                 else { return nil }
                 return makeAudioParameters(
                     track: track,
-                    clip: clip,
-                    timelineDuration: project.item(id: clip.id)?.placementDuration,
-                    pitchFollowsSpeed: {
-                        guard case .media(let item) = project.item(id: clip.id) else { return false }
-                        return item.pitchFollowsSpeed
-                    }(),
+                    volume: mediaItem.visuals.volume,
+                    timelineStart: mediaItem.timelineStart,
+                    timelineDuration: mediaItem.timelineDuration,
+                    pitchFollowsSpeed: mediaItem.pitchFollowsSpeed,
                     frameRate: project.renderSettings.frameRate
                 )
             }

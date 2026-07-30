@@ -31,15 +31,18 @@ struct CoreToolButtonContent: View {
     var body: some View {
         VStack(spacing: 4) {
             Image(systemName: systemName)
-                .font(.system(size: 17, weight: .semibold))
+                .font(MotionaryDesign.Typography.tileIcon)
             Text(title)
-                .font(.caption2.weight(.semibold))
+                .font(MotionaryDesign.Typography.tileTitle)
                 .lineLimit(1)
         }
         .foregroundStyle(isProminent ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
-        .frame(width: 62, height: 54)
+        .frame(
+            width: MotionaryDesign.Control.toolButtonSize.width,
+            height: MotionaryDesign.Control.toolButtonSize.height
+        )
         .background {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: MotionaryDesign.Radius.button, style: .continuous)
                 .fill(isProminent ? MotionaryTheme.accent : MotionaryTheme.surface)
         }
     }
@@ -70,7 +73,10 @@ struct CompactIconButton: View {
                     )
                     .background {
                         if isBordered {
-                            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            RoundedRectangle(
+                                cornerRadius: MotionaryDesign.Radius.button + 1,
+                                style: .continuous
+                            )
                                 .fill(isProminent ? MotionaryTheme.accent : MotionaryTheme.surface)
                         }
                     }
@@ -80,7 +86,7 @@ struct CompactIconButton: View {
             .accessibilityLabel(title)
             if isBordered {
                 Image(systemName: systemName)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(MotionaryDesign.Typography.borderedIcon)
                     .frame(width: 40, height: 36)
                     .foregroundStyle(isProminent ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
             }

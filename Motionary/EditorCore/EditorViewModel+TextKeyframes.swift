@@ -126,7 +126,7 @@ extension EditorViewModel {
             }
             item.setAnimatableProperty(property, for: target)
         }
-        if interactive { schedulePreviewRebuild(seekTo: currentTime) }
+        if interactive { scheduleInteractivePreviewRebuild(invalidation: [.previewFrame]) }
         refreshGraphSegment()
     }
 
@@ -163,7 +163,7 @@ extension EditorViewModel {
             }
             item.setColorAnimation(animation, for: colorProperty)
         }
-        if interactive { schedulePreviewRebuild(seekTo: currentTime) }
+        if interactive { scheduleInteractivePreviewRebuild(invalidation: [.previewFrame]) }
         refreshGraphSegment()
     }
 
@@ -271,7 +271,7 @@ extension EditorViewModel {
             property.keyframes.sort { $0.time < $1.time }
             item.setAnimatableProperty(property, for: target)
         }
-        if interactive { schedulePreviewRebuild(seekTo: currentTime) }
+        if interactive { scheduleInteractivePreviewRebuild(invalidation: [.previewFrame]) }
         refreshGraphSegment()
     }
 
@@ -315,7 +315,7 @@ extension EditorViewModel {
                 item.setAnimatableProperty(property, for: target)
             }
         }
-        if interactive { schedulePreviewRebuild(seekTo: currentTime) }
+        if interactive { scheduleInteractivePreviewRebuild(invalidation: [.previewFrame]) }
         refreshGraphSegment()
     }
 
@@ -427,7 +427,7 @@ extension EditorViewModel {
             }
             item.visuals.transform.scale = scale
         }
-        if interactive { schedulePreviewRebuild(seekTo: currentTime) }
+        if interactive { scheduleInteractivePreviewRebuild(invalidation: [.previewFrame]) }
     }
 
     private func colorTargets(for property: TextColorProperty) -> [KeyframeTarget] {

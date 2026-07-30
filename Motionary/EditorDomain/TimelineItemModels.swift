@@ -13,10 +13,21 @@ enum TimelineItemKind: String, Codable, CaseIterable, Sendable {
 
 enum BlendMode: String, Codable, CaseIterable, Sendable {
     case normal
+    case darken
     case multiply
+    case colorBurn
+    case lighten
     case screen
+    case colorDodge
     case overlay
     case softLight
+    case hardLight
+    case difference
+    case exclusion
+    case hue
+    case saturation
+    case color
+    case luminosity
 }
 
 struct SpeedKeyframe: Codable, Equatable, Sendable {
@@ -270,14 +281,26 @@ struct SpeedMap: Codable, Equatable, Sendable {
 struct ItemMask: Codable, Equatable, Sendable {
     enum Shape: String, Codable, Sendable {
         case rectangle
+        case roundedRectangle
         case ellipse
+        case diamond
+        case triangle
+        case star
+        case heart
+        case bar
+        case split
     }
 
     var shape: Shape
-    var insetX: Double
-    var insetY: Double
-    var feather: Double
+    var widthScale: Double
+    var heightScale: Double
+    var featherScale: Double
+    var roundnessScale: Double
+    var rotationDegrees: Double
+    var offsetScale: Double
+    var isInverted: Bool
 
+    /// Legacy initializer retained for existing call sites and decoded projects.
     init(
         shape: Shape = .rectangle,
         insetX: Double = 0,
@@ -285,13 +308,59 @@ struct ItemMask: Codable, Equatable, Sendable {
         feather: Double = 0
     ) {
         self.shape = shape
-        self.insetX = Self.bounded(insetX, to: 0...0.48)
-        self.insetY = Self.bounded(insetY, to: 0...0.48)
-        self.feather = Self.bounded(feather, to: 0...0.25)
+        widthScale = 1 - Self.bounded(insetX, to: 0...0.48) * 2
+        heightScale = 1 - Self.bounded(insetY, to: 0...0.48) * 2
+        featherScale = Self.bounded(feather, to: 0...0.25)
+        roundnessScale = shape == .roundedRectangle ? 0.36 : 0
+        rotationDegrees = 0
+        offsetScale = 0
+        isInverted = false
+    }
+
+    init(
+        shape: Shape,
+        widthScale: Double,
+        heightScale: Double,
+        featherScale: Double = 0,
+        roundnessScale: Double? = nil,
+        rotationDegrees: Double = 0,
+        offsetScale: Double = 0,
+        isInverted: Bool = false
+    ) {
+        self.shape = shape
+        self.widthScale = Self.bounded(widthScale, to: 0...1)
+        self.heightScale = Self.bounded(heightScale, to: 0...1)
+        self.featherScale = Self.bounded(featherScale, to: 0...1)
+        self.roundnessScale = Self.bounded(
+            roundnessScale ?? (shape == .roundedRectangle ? 0.36 : 0),
+            to: 0...1
+        )
+        self.rotationDegrees = Self.bounded(rotationDegrees, to: -180...180)
+        self.offsetScale = Self.bounded(offsetScale, to: -1...1)
+        self.isInverted = isInverted
+    }
+
+    var insetX: Double {
+        (1 - widthScale) * 0.5
+    }
+
+    var insetY: Double {
+        (1 - heightScale) * 0.5
+    }
+
+    var feather: Double {
+        featherScale
     }
 
     private enum CodingKeys: String, CodingKey {
         case shape
+        case widthScale
+        case heightScale
+        case featherScale
+        case roundnessScale
+        case rotationDegrees
+        case offsetScale
+        case isInverted
         case insetX
         case insetY
         case feather
@@ -299,12 +368,38 @@ struct ItemMask: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.init(
-            shape: try container.decodeIfPresent(Shape.self, forKey: .shape) ?? .rectangle,
-            insetX: try container.decodeIfPresent(Double.self, forKey: .insetX) ?? 0,
-            insetY: try container.decodeIfPresent(Double.self, forKey: .insetY) ?? 0,
-            feather: try container.decodeIfPresent(Double.self, forKey: .feather) ?? 0
-        )
+        let shape = try container.decodeIfPresent(Shape.self, forKey: .shape) ?? .rectangle
+        if container.contains(.widthScale) || container.contains(.heightScale) {
+            self.init(
+                shape: shape,
+                widthScale: try container.decodeIfPresent(Double.self, forKey: .widthScale) ?? 1,
+                heightScale: try container.decodeIfPresent(Double.self, forKey: .heightScale) ?? 1,
+                featherScale: try container.decodeIfPresent(Double.self, forKey: .featherScale) ?? 0,
+                roundnessScale: try container.decodeIfPresent(Double.self, forKey: .roundnessScale),
+                rotationDegrees: try container.decodeIfPresent(Double.self, forKey: .rotationDegrees) ?? 0,
+                offsetScale: try container.decodeIfPresent(Double.self, forKey: .offsetScale) ?? 0,
+                isInverted: try container.decodeIfPresent(Bool.self, forKey: .isInverted) ?? false
+            )
+        } else {
+            self.init(
+                shape: shape,
+                insetX: try container.decodeIfPresent(Double.self, forKey: .insetX) ?? 0,
+                insetY: try container.decodeIfPresent(Double.self, forKey: .insetY) ?? 0,
+                feather: try container.decodeIfPresent(Double.self, forKey: .feather) ?? 0
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(shape, forKey: .shape)
+        try container.encode(widthScale, forKey: .widthScale)
+        try container.encode(heightScale, forKey: .heightScale)
+        try container.encode(featherScale, forKey: .featherScale)
+        try container.encode(roundnessScale, forKey: .roundnessScale)
+        try container.encode(rotationDegrees, forKey: .rotationDegrees)
+        try container.encode(offsetScale, forKey: .offsetScale)
+        try container.encode(isInverted, forKey: .isInverted)
     }
 
     private static func bounded(
@@ -502,7 +597,9 @@ struct TimelineItemVisuals: Codable, Equatable, Sendable {
     var effectStack: EffectStack
     var volume: AnimatableProperty<Double>
     var blendMode: BlendMode
+    var blendIntensity: Double
     var mask: ItemMask?
+    var backgroundRemoval: BackgroundRemovalSettings?
 
     init(
         transform: ClipTransform = ClipTransform(),
@@ -510,14 +607,50 @@ struct TimelineItemVisuals: Codable, Equatable, Sendable {
         effectStack: EffectStack = EffectStack(),
         volume: AnimatableProperty<Double> = AnimatableProperty(baseValue: 1),
         blendMode: BlendMode = .normal,
-        mask: ItemMask? = nil
+        blendIntensity: Double = 1,
+        mask: ItemMask? = nil,
+        backgroundRemoval: BackgroundRemovalSettings? = nil
     ) {
         self.transform = transform
         self.adjustments = adjustments
         self.effectStack = effectStack
         self.volume = volume.clamped(to: 0...2)
         self.blendMode = blendMode
+        self.blendIntensity = min(max(blendIntensity.isFinite ? blendIntensity : 1, 0), 1)
         self.mask = mask
+        self.backgroundRemoval = backgroundRemoval
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case transform
+        case adjustments
+        case effectStack
+        case volume
+        case blendMode
+        case blendIntensity
+        case mask
+        case backgroundRemoval
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let decodedVolume: AnimatableProperty<Double>
+        if let property = try? container.decode(AnimatableProperty<Double>.self, forKey: .volume) {
+            decodedVolume = property
+        } else {
+            let legacyVolume = try container.decodeIfPresent(Double.self, forKey: .volume) ?? 1
+            decodedVolume = AnimatableProperty(baseValue: min(max(legacyVolume, 0), 2))
+        }
+        self.init(
+            transform: try container.decodeIfPresent(ClipTransform.self, forKey: .transform) ?? ClipTransform(),
+            adjustments: try container.decodeIfPresent(AdjustmentSettings.self, forKey: .adjustments) ?? AdjustmentSettings(),
+            effectStack: try container.decodeIfPresent(EffectStack.self, forKey: .effectStack) ?? EffectStack(),
+            volume: decodedVolume,
+            blendMode: try container.decodeIfPresent(BlendMode.self, forKey: .blendMode) ?? .normal,
+            blendIntensity: try container.decodeIfPresent(Double.self, forKey: .blendIntensity) ?? 1,
+            mask: try container.decodeIfPresent(ItemMask.self, forKey: .mask),
+            backgroundRemoval: try container.decodeIfPresent(BackgroundRemovalSettings.self, forKey: .backgroundRemoval)
+        )
     }
 }
 

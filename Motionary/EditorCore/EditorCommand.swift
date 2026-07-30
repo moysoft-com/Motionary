@@ -145,6 +145,9 @@ extension EditorProject {
         if renderVisualSignature != previous.renderVisualSignature {
             invalidation.insert(.previewFrame)
         }
+        if renderSettings.frameRate != previous.renderSettings.frameRate {
+            invalidation.insert(.audioMix)
+        }
         if renderAudioSignature != previous.renderAudioSignature {
             invalidation.insert(.audioMix)
         }
@@ -239,9 +242,6 @@ extension EditorProject {
 
     private var renderTopologySignature: RenderTopologySignature {
         RenderTopologySignature(
-            canvasWidth: renderSettings.width,
-            canvasHeight: renderSettings.height,
-            frameRate: renderSettings.frameRate,
             tracks: tracks.map { track in
                 RenderTrackTopology(
                     id: track.id,
@@ -277,7 +277,11 @@ extension EditorProject {
                                 if case .shape = item { return true }
                                 return false
                             }(),
-                            speedSignature: speedSignature
+                            speedSignature: speedSignature,
+                            usesBackgroundRemoval: item.editableVisuals?.backgroundRemoval != nil,
+                            backgroundRemovalArtifact: item.editableVisuals?.backgroundRemoval == nil
+                                ? nil
+                                : mediaID.flatMap { mediaLibrary[$0]?.backgroundRemovalArtifact }
                         )
                     }
                 )
@@ -287,6 +291,9 @@ extension EditorProject {
 
     private var renderVisualSignature: RenderVisualSignature {
         RenderVisualSignature(
+            canvasWidth: renderSettings.width,
+            canvasHeight: renderSettings.height,
+            frameRate: renderSettings.frameRate,
             backgroundColor: renderSettings.backgroundColor,
             items: tracks.flatMap(\.items).compactMap { item in
                 switch item {
@@ -297,6 +304,9 @@ extension EditorProject {
                         adjustments: media.visuals.adjustments,
                         effects: media.visuals.effectStack,
                         mask: media.visuals.mask,
+                        backgroundRemoval: media.visuals.backgroundRemoval,
+                        blendMode: media.visuals.blendMode,
+                        blendIntensity: media.visuals.blendIntensity,
                         shape: nil,
                         text: nil
                     )
@@ -307,6 +317,9 @@ extension EditorProject {
                         adjustments: shape.visuals.adjustments,
                         effects: shape.visuals.effectStack,
                         mask: shape.visuals.mask,
+                        backgroundRemoval: nil,
+                        blendMode: shape.visuals.blendMode,
+                        blendIntensity: shape.visuals.blendIntensity,
                         shape: shape.shape,
                         text: nil
                     )
@@ -317,6 +330,9 @@ extension EditorProject {
                         adjustments: text.visuals.adjustments,
                         effects: text.visuals.effectStack,
                         mask: text.visuals.mask,
+                        backgroundRemoval: nil,
+                        blendMode: text.visuals.blendMode,
+                        blendIntensity: text.visuals.blendIntensity,
                         shape: nil,
                         text: text
                     )
@@ -346,9 +362,6 @@ extension EditorProject {
 }
 
 private struct RenderTopologySignature: Equatable {
-    let canvasWidth: Int
-    let canvasHeight: Int
-    let frameRate: Int32
     let tracks: [RenderTrackTopology]
 }
 
@@ -369,9 +382,14 @@ private struct RenderItemTopology: Equatable {
     let sourceRange: TimeRangeValue
     let hasShape: Bool
     let speedSignature: UInt64
+    let usesBackgroundRemoval: Bool
+    let backgroundRemovalArtifact: BackgroundRemovalArtifact?
 }
 
 private struct RenderVisualSignature: Equatable {
+    let canvasWidth: Int
+    let canvasHeight: Int
+    let frameRate: Int32
     let backgroundColor: RGBAColor
     let items: [RenderItemVisual]
 }
@@ -382,6 +400,9 @@ private struct RenderItemVisual: Equatable {
     let adjustments: AdjustmentSettings
     let effects: EffectStack
     let mask: ItemMask?
+    let backgroundRemoval: BackgroundRemovalSettings?
+    let blendMode: BlendMode
+    let blendIntensity: Double
     let shape: ClipShape?
     let text: TextTimelineItem?
 }

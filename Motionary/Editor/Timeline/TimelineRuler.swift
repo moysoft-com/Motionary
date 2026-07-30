@@ -17,6 +17,7 @@ struct EmbeddedTimelineRuler: View {
     let duration: Double
     let pixelsPerSecond: CGFloat
     let centerPadding: CGFloat
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         let safePixelsPerSecond = max(pixelsPerSecond, 1)
@@ -42,13 +43,16 @@ struct EmbeddedTimelineRuler: View {
                         let time = firstMinor + Double(index) * minorInterval
                         guard time >= chunkStart, time <= chunkEnd else { continue }
                         let isMajor = isMultiple(time, of: majorInterval)
-                        let x = CGFloat(time - chunkStart) * safePixelsPerSecond
+                        let x = pixelAligned(CGFloat(time - chunkStart) * safePixelsPerSecond)
                         
                         var path = Path()
                         path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
                         path.addLine(to: CGPoint(x: x, y: 29))
                         context.stroke(
-                            path, with: .color(.primary.opacity(isMajor ? 0.48 : 0.16)), lineWidth: isMajor ? 1.1 : 0.8)
+                            path,
+                            with: .color(.primary.opacity(isMajor ? 0.48 : 0.16)),
+                            lineWidth: isMajor ? 1.1 : 0.8
+                        )
 
                         if isMajor {
                             context.draw(
@@ -107,12 +111,19 @@ struct EmbeddedTimelineRuler: View {
         }
         return String(format: "%d:%02d", minutes, seconds)
     }
+
+    private func pixelAligned(_ value: CGFloat) -> CGFloat {
+        let scale = max(displayScale, 1)
+        return (value * scale).rounded() / scale
+    }
+
 }
 
 struct FixedTimelineRuler: View {
     let duration: Double
     let currentTime: Double
     let pixelsPerSecond: CGFloat
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         GeometryReader { geometry in
@@ -131,12 +142,15 @@ struct FixedTimelineRuler: View {
                     let time = firstMinor + Double(index) * minorInterval
                     guard time >= 0, time <= max(duration, 4) else { continue }
                     let isMajor = isMultiple(time, of: majorInterval)
-                    let x = centerX + CGFloat(time - currentTime) * safePixelsPerSecond
+                    let x = pixelAligned(centerX + CGFloat(time - currentTime) * safePixelsPerSecond)
                     var path = Path()
                     path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
                     path.addLine(to: CGPoint(x: x, y: 29))
                     context.stroke(
-                        path, with: .color(.primary.opacity(isMajor ? 0.48 : 0.16)), lineWidth: isMajor ? 1.1 : 0.8)
+                        path,
+                        with: .color(.primary.opacity(isMajor ? 0.48 : 0.16)),
+                        lineWidth: isMajor ? 1.1 : 0.8
+                    )
 
                     if isMajor {
                         context.draw(
@@ -191,4 +205,10 @@ struct FixedTimelineRuler: View {
         }
         return String(format: "%d:%02d", minutes, seconds)
     }
+
+    private func pixelAligned(_ value: CGFloat) -> CGFloat {
+        let scale = max(displayScale, 1)
+        return (value * scale).rounded() / scale
+    }
+
 }

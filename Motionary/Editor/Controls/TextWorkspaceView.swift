@@ -41,6 +41,7 @@ struct TextWorkspaceView: View {
     let item: TextTimelineItem?
     let mode: TextWorkspaceMode
     @Binding var activeMotionPhase: TextAnimationPhase
+    @Binding var isKeyboardVisible: Bool
 
     @State private var fontPickerRequest: TextFontPickerRequest?
     @State private var hasActiveEditingSession = false
@@ -91,6 +92,7 @@ struct TextWorkspaceView: View {
             }
         }
         .onChange(of: isTextFocused) { wasFocused, focused in
+            isKeyboardVisible = focused && mode == .content
             if focused, !wasFocused {
                 beginEditingSession()
             } else if wasFocused, !focused {
@@ -115,6 +117,7 @@ struct TextWorkspaceView: View {
             }
         }
         .onDisappear {
+            isKeyboardVisible = false
             dismissKeyboardAndCommit()
         }
     }
@@ -145,9 +148,12 @@ struct TextWorkspaceView: View {
         .font(.body)
         .focused($isTextFocused)
         .frame(minHeight: 118)
-        .padding(8)
+        .padding(MotionaryDesign.Spacing.sm)
         .scrollContentBackground(.hidden)
-        .background(MotionaryTheme.surfaceSubtle, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(
+            MotionaryTheme.surfaceSubtle,
+            in: RoundedRectangle(cornerRadius: MotionaryDesign.Radius.button, style: .continuous)
+        )
         .accessibilityLabel("Text content")
         .accessibilityHint("Edits the selected text layer")
         .onAppear { focusEditorIfNeeded(itemID: item.id) }
@@ -155,50 +161,30 @@ struct TextWorkspaceView: View {
 
     private func typographyControls(_ item: TextTimelineItem) -> some View {
         VStack(spacing: 10) {
-            EditorWorkspaceCard {
-                Button {
-                    fontPickerRequest = TextFontPickerRequest(selectedFontName: item.style.fontName)
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "textformat")
-                            .foregroundStyle(MotionaryTheme.accent)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Font")
-                                .font(.caption)
-                                .foregroundStyle(MotionaryTheme.textSecondary)
-                            Text(TextFontCatalog.displayName(for: item.style.fontName))
-                                .font(.callout.weight(.semibold))
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(MotionaryTheme.textSecondary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Font")
-                .accessibilityValue(TextFontCatalog.displayName(for: item.style.fontName))
-                .accessibilityHint("Opens the font picker")
-
-                Divider().overlay(MotionaryTheme.separator)
-
-                animatedTextScrubber(
-                    "Size",
-                    systemImage: "textformat.size",
-                    item: item,
-                    target: .textFontSize,
-                    range: 8...512,
-                    step: 1,
-                    format: { "\(Int($0.rounded())) pt" }
-                )
+            EditorWorkspaceValueButton(
+                title: "Font",
+                value: TextFontCatalog.displayName(for: item.style.fontName),
+                systemImage: "textformat",
+                accessibilityHint: "Opens the font picker"
+            ) {
+                fontPickerRequest = TextFontPickerRequest(selectedFontName: item.style.fontName)
             }
 
-            EditorWorkspaceCard {
+            animatedTextScrubber(
+                "Size",
+                systemImage: "textformat.size",
+                item: item,
+                target: .textFontSize,
+                range: 8...512,
+                step: 1,
+                unit: .canvasPixels,
+                format: { "\(Int($0.rounded()))" }
+            )
+
+            VStack {
                 HStack {
-                    Label("Alignment", systemImage: "text.alignleft")
-                        .font(.callout.weight(.medium))
+                    Text("Alignment")
+                        .font(MotionaryDesign.Typography.sectionTitle)
                     Spacer()
                 }
 
@@ -218,38 +204,36 @@ struct TextWorkspaceView: View {
                 .pickerStyle(.segmented)
             }
 
-            EditorWorkspaceCard {
-                animatedTextScrubber(
-                    "Tracking",
-                    systemImage: "character.cursor.ibeam",
-                    item: item,
-                    target: .textLetterSpacing,
-                    range: -20...80,
-                    step: 0.5,
-                    format: { $0.formatted(.number.precision(.fractionLength(1))) }
-                )
-
-                animatedTextScrubber(
-                    "Line spacing",
-                    systemImage: "line.3.horizontal",
-                    item: item,
-                    target: .textLineSpacing,
-                    range: -30...200,
-                    step: 1,
-                    format: { "\(Int($0.rounded()))" }
-                )
-            }
+            animatedTextScrubber(
+                "Tracking",
+                systemImage: "character.cursor.ibeam",
+                item: item,
+                target: .textLetterSpacing,
+                range: -20...80,
+                step: 0.5,
+                unit: .canvasPixels,
+                format: { $0.formatted(.number.precision(.fractionLength(1))) }
+            )
+            animatedTextScrubber(
+                "Line spacing",
+                systemImage: "line.3.horizontal",
+                item: item,
+                target: .textLineSpacing,
+                range: -30...200,
+                step: 1,
+                unit: .canvasPixels,
+                format: { "\(Int($0.rounded()))" }
+            )
         }
     }
 
     private func styleControls(_ item: TextTimelineItem) -> some View {
         VStack(spacing: 10) {
-            EditorWorkspaceCard {
+            VStack {
                 EditorWorkspaceColorRow(
-                    title: "Fill",
+                    title: "Color",
                     color: (item.color(for: .fill, at: localTime(for: item)) ?? item.style.color)
                         .swiftUIColor,
-                    systemImage: "paintpalette",
                     spacing: 10,
                     titleWeight: .semibold
                 ) { color in
@@ -265,23 +249,24 @@ struct TextWorkspaceView: View {
                     format: { "\(Int(($0 * 100).rounded()))%" }
                 )
                 animatedTextScrubber(
-                    "Text box",
+                    "Max width",
                     systemImage: "rectangle.horizontal",
                     item: item,
                     target: .textWidthFraction,
                     range: 0.1...1,
                     step: 0.01,
-                    format: { "\(Int(($0 * 100).rounded()))%" }
+                    unit: .canvasWidthFraction,
+                    format: { "\(Int($0.rounded()))" }
                 )
             }
 
             styleSection(
                 title: "Outline",
-                systemImage: "scribble.variable",
                 isEnabled: item.style.stroke != nil,
                 onChange: { enabled in
                     update(interactive: false) { item in
-                        item.style.stroke = enabled
+                        item.style.stroke =
+                            enabled
                             ? TextStrokeStyle(
                                 color: item.propertyAnimations.strokeColor.baseValue,
                                 width: item.propertyAnimations.strokeWidth.baseValue
@@ -304,6 +289,7 @@ struct TextWorkspaceView: View {
                         target: .textStrokeWidth,
                         range: 0...40,
                         step: 0.5,
+                        unit: .canvasPixels,
                         format: { $0.formatted(.number.precision(.fractionLength(1))) }
                     )
                 }
@@ -311,11 +297,11 @@ struct TextWorkspaceView: View {
 
             styleSection(
                 title: "Shadow",
-                systemImage: "shadow",
                 isEnabled: item.style.shadow != nil,
                 onChange: { enabled in
                     update(interactive: false) { item in
-                        item.style.shadow = enabled
+                        item.style.shadow =
+                            enabled
                             ? TextShadowStyle(
                                 color: item.propertyAnimations.shadowColor.baseValue,
                                 offsetX: item.propertyAnimations.shadowOffsetX.baseValue,
@@ -340,6 +326,7 @@ struct TextWorkspaceView: View {
                         target: .textShadowOffsetX,
                         range: -100...100,
                         step: 1,
+                        unit: .canvasPixels,
                         format: { "\(Int($0.rounded()))" }
                     )
                     animatedTextScrubber(
@@ -349,6 +336,7 @@ struct TextWorkspaceView: View {
                         target: .textShadowOffsetY,
                         range: -100...100,
                         step: 1,
+                        unit: .canvasPixels,
                         format: { "\(Int($0.rounded()))" }
                     )
                     animatedTextScrubber(
@@ -358,6 +346,7 @@ struct TextWorkspaceView: View {
                         target: .textShadowBlur,
                         range: 0...100,
                         step: 1,
+                        unit: .canvasPixels,
                         format: { "\(Int($0.rounded()))" }
                     )
                 }
@@ -365,11 +354,11 @@ struct TextWorkspaceView: View {
 
             styleSection(
                 title: "Background",
-                systemImage: "rectangle.fill",
                 isEnabled: item.style.background != nil,
                 onChange: { enabled in
                     update(interactive: false) { item in
-                        item.style.background = enabled
+                        item.style.background =
+                            enabled
                             ? TextBackgroundStyle(
                                 color: item.propertyAnimations.backgroundColor.baseValue,
                                 padding: item.propertyAnimations.backgroundPadding.baseValue,
@@ -393,6 +382,7 @@ struct TextWorkspaceView: View {
                         target: .textBackgroundPadding,
                         range: 0...120,
                         step: 1,
+                        unit: .canvasPixels,
                         format: { "\(Int($0.rounded()))" }
                     )
                     animatedTextScrubber(
@@ -402,6 +392,7 @@ struct TextWorkspaceView: View {
                         target: .textBackgroundCornerRadius,
                         range: 0...120,
                         step: 1,
+                        unit: .canvasPixels,
                         format: { "\(Int($0.rounded()))" }
                     )
                 }
@@ -416,19 +407,23 @@ struct TextWorkspaceView: View {
         target: KeyframeTarget,
         range: ClosedRange<Double>,
         step: Double,
+        unit: TextControlUnit = .raw,
         format: @escaping (Double) -> String
     ) -> some View {
-        EditorValueScrubber(
+        let unitSpace = EditorUnitSpace(size: viewModel.project.renderSettings.size)
+        let displayScale = unit.displayScale(in: unitSpace)
+        let rawValue = item.value(for: target, at: localTime(for: item)) ?? 0
+        return EditorValueScrubber(
             title: title,
             systemImage: systemImage,
-            value: item.value(for: target, at: localTime(for: item)) ?? 0,
-            range: range,
-            step: step,
+            value: rawValue * displayScale,
+            range: (range.lowerBound * displayScale)...(range.upperBound * displayScale),
+            step: step * displayScale,
             format: format,
             onBegan: viewModel.beginInteractiveEdit,
             onChanged: { value in
                 viewModel.setSelectedTextKeyframeValue(
-                    value,
+                    value / max(displayScale, 0.000_001),
                     target: target,
                     interactive: true
                 )
@@ -443,31 +438,17 @@ struct TextWorkspaceView: View {
 
     private func styleSection<Content: View>(
         title: String,
-        systemImage: String,
         isEnabled: Bool,
         onChange: @escaping (Bool) -> Void,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        EditorWorkspaceCard {
-            Button {
-                onChange(!isEnabled)
-                EditorHaptics.tap()
-            } label: {
-                HStack {
-                    Label(title, systemImage: systemImage)
-                        .font(.callout.weight(.semibold))
-                    Spacer()
-                    Text(isEnabled ? "On" : "Off")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(isEnabled ? MotionaryTheme.accent : MotionaryTheme.textSecondary)
-                    Image(systemName: isEnabled ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(isEnabled ? MotionaryTheme.accent : MotionaryTheme.textSecondary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        VStack(spacing: 12) {
+            EditorWorkspaceOnOffControl(
+                title: title,
+                isOn: isEnabled,
+                onChange: onChange
+            )
             .accessibilityLabel("\(title) style")
-            .accessibilityValue(isEnabled ? "On" : "Off")
 
             if isEnabled {
                 Divider().overlay(MotionaryTheme.separator)
@@ -537,6 +518,23 @@ struct TextWorkspaceView: View {
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "Text" }
         return String(trimmed.prefix(28))
+    }
+}
+
+private enum TextControlUnit {
+    case raw
+    case canvasPixels
+    case canvasWidthFraction
+
+    func displayScale(in space: EditorUnitSpace) -> Double {
+        switch self {
+        case .raw:
+            1
+        case .canvasPixels:
+            space.unitsPerPixel
+        case .canvasWidthFraction:
+            space.width
+        }
     }
 }
 

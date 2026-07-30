@@ -51,30 +51,17 @@ struct KeyframeWorkspaceView: View {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 7) {
                                 ForEach(KeyframeCurvePreset.allCases) { preset in
-                                    Button {
+                                    EditorWorkspacePillButton(
+                                        title: preset.title,
+                                        isSelected: context.segment.interpolation == preset.interpolation
+                                    ) {
                                         viewModel.setInterpolation(
                                             preset.interpolation,
                                             section: context.segment.section,
                                             startTime: context.segment.startTime
                                         )
-                                    } label: {
-                                        Text(preset.title)
-                                            .font(.caption2.weight(.semibold))
-                                            .padding(.horizontal, 10)
-                                            .frame(height: 30)
-                                            .background(
-                                                context.segment.interpolation == preset.interpolation
-                                                    ? MotionaryTheme.accent
-                                                    : MotionaryTheme.surface,
-                                                in: Capsule()
-                                            )
-                                            .foregroundStyle(
-                                                context.segment.interpolation == preset.interpolation
-                                                    ? MotionaryTheme.foregroundOnAccent
-                                                    : MotionaryTheme.textPrimary
-                                            )
                                     }
-                                    .buttonStyle(.plain)
+                                    .frame(width: 76)
                                 }
                             }
                         }
@@ -82,17 +69,19 @@ struct KeyframeWorkspaceView: View {
                 )
             } else {
                 Color.clear
-                    .motionaryGlass(cornerRadius: 20)
+                    .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
             }
         }
     }
 
-    private var graphContext: (
-        item: TimelineItem,
-        timelineStart: Double,
-        segment: KeyframeSegment,
-        isActive: Bool
-    )? {
+    private var graphContext:
+        (
+            item: TimelineItem,
+            timelineStart: Double,
+            segment: KeyframeSegment,
+            isActive: Bool
+        )?
+    {
         guard let segment = viewModel.graphSegment ?? viewModel.displayedGraphSegment,
             let item = viewModel.project.item(id: segment.clipID)
         else { return nil }
@@ -124,8 +113,8 @@ private struct SpeedKeyframeGraph: View {
                 height: max(geometry.size.height - 40, 1)
             )
             ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(MotionaryTheme.surfaceSubtle)
+                RoundedRectangle(cornerRadius: MotionaryDesign.Radius.graph, style: .continuous)
+                .fill(MotionaryTheme.surfaceSubtle)
 
                 speedGrid(in: plot)
 
@@ -136,9 +125,10 @@ private struct SpeedKeyframeGraph: View {
                     )
 
                 ForEach(item.speedMap.keyframes, id: \.time) { keyframe in
-                    let isSelected = selectedSourceTime.map {
-                        abs($0 - keyframe.time) <= 0.000_001
-                    } ?? false
+                    let isSelected =
+                        selectedSourceTime.map {
+                            abs($0 - keyframe.time) <= 0.000_001
+                        } ?? false
                     KeyframeDiamondShape()
                         .fill(isSelected ? MotionaryTheme.accent : MotionaryTheme.control)
                         .overlay {
@@ -313,11 +303,13 @@ private struct SpeedKeyframeGraph: View {
             verticalTranslation: verticalTranslation,
             plot: plot
         )
-        guard viewModel.setSelectedSpeedKeyframe(
-            atSourceTime: sourceTime,
-            speed: speed,
-            interactive: true
-        ) else { return }
+        guard
+            viewModel.setSelectedSpeedKeyframe(
+                atSourceTime: sourceTime,
+                speed: speed,
+                interactive: true
+            )
+        else { return }
         let bucket = Int((speed / 0.05).rounded())
         if let lastHapticBucket, bucket != lastHapticBucket {
             EditorHaptics.selection()
@@ -415,7 +407,6 @@ private enum SpeedGraphDragMode: Equatable {
     case keyframe(sourceTime: Double, initialSpeed: Double)
     case scrub
 }
-
 
 struct KeyframeDiamondShape: Shape {
     func path(in rect: CGRect) -> Path {

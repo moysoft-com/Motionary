@@ -11,6 +11,13 @@ struct TimelineEditingTests {
         let itemID = UUID()
         let speedMap = SpeedMap.constant(speed: 1.5)
         let mask = ItemMask(shape: .ellipse, insetX: 0.1, insetY: 0.2, feather: 0.3)
+        let backgroundRemoval = BackgroundRemovalSettings(edgeRefinement: 0.2, feather: 0.15)
+        let beats = AudioBeatAnalysis(
+            bpm: 120,
+            confidence: 0.9,
+            markers: [AudioBeatMarker(sourceTime: 1, strength: 0.8)],
+            sourceFingerprint: "fingerprint"
+        )
         let item = TimelineItem.media(
             MediaTimelineItem(
                 id: itemID,
@@ -19,9 +26,15 @@ struct TimelineEditingTests {
                 mediaType: .video,
                 timelineStart: 0,
                 sourceRange: TimeRangeValue(start: 0, duration: 4),
-                visuals: TimelineItemVisuals(blendMode: .screen, mask: mask),
+                visuals: TimelineItemVisuals(
+                    blendMode: .screen,
+                    blendIntensity: 0.35,
+                    mask: mask,
+                    backgroundRemoval: backgroundRemoval
+                ),
                 speedMap: speedMap,
-                pitchFollowsSpeed: true
+                pitchFollowsSpeed: true,
+                beatAnalysis: beats
             )
         )
         let project = EditorProject(
@@ -44,7 +57,10 @@ struct TimelineEditingTests {
         #expect(moved.speedMap == speedMap)
         #expect(moved.pitchFollowsSpeed)
         #expect(moved.visuals.blendMode == .screen)
+        #expect(moved.visuals.blendIntensity == 0.35)
         #expect(moved.visuals.mask == mask)
+        #expect(moved.visuals.backgroundRemoval == backgroundRemoval)
+        #expect(moved.beatAnalysis == beats)
         viewModel.undo()
 
         viewModel.duplicateSelectedClip(toNewLayer: true)
@@ -61,7 +77,10 @@ struct TimelineEditingTests {
         #expect(duplicate.speedMap == speedMap)
         #expect(duplicate.pitchFollowsSpeed)
         #expect(duplicate.visuals.blendMode == .screen)
+        #expect(duplicate.visuals.blendIntensity == 0.35)
         #expect(duplicate.visuals.mask == mask)
+        #expect(duplicate.visuals.backgroundRemoval == backgroundRemoval)
+        #expect(duplicate.beatAnalysis == beats)
 
         viewModel.undo()
         #expect(viewModel.project.item(id: duplicateID) == nil)
@@ -73,7 +92,10 @@ struct TimelineEditingTests {
         #expect(restored.speedMap == speedMap)
         #expect(restored.pitchFollowsSpeed)
         #expect(restored.visuals.blendMode == .screen)
+        #expect(restored.visuals.blendIntensity == 0.35)
         #expect(restored.visuals.mask == mask)
+        #expect(restored.visuals.backgroundRemoval == backgroundRemoval)
+        #expect(restored.beatAnalysis == beats)
     }
 
     @MainActor
@@ -81,6 +103,13 @@ struct TimelineEditingTests {
         let itemID = UUID()
         let speedMap = SpeedMap(keyframes: [SpeedKeyframe(time: 0, speed: 1.25)])
         let mask = ItemMask(shape: .rectangle, feather: 0.2)
+        let backgroundRemoval = BackgroundRemovalSettings(edgeRefinement: -0.1, feather: 0.25)
+        let beats = AudioBeatAnalysis(
+            bpm: 98,
+            confidence: 0.7,
+            markers: [AudioBeatMarker(sourceTime: 2.5, strength: 0.9)],
+            sourceFingerprint: "split-source"
+        )
         let item = TimelineItem.media(
             MediaTimelineItem(
                 id: itemID,
@@ -89,8 +118,14 @@ struct TimelineEditingTests {
                 mediaType: .video,
                 timelineStart: 0,
                 sourceRange: TimeRangeValue(start: 0, duration: 5),
-                visuals: TimelineItemVisuals(blendMode: .multiply, mask: mask),
-                speedMap: speedMap
+                visuals: TimelineItemVisuals(
+                    blendMode: .multiply,
+                    blendIntensity: 0.42,
+                    mask: mask,
+                    backgroundRemoval: backgroundRemoval
+                ),
+                speedMap: speedMap,
+                beatAnalysis: beats
             )
         )
         let project = EditorProject(
@@ -112,7 +147,10 @@ struct TimelineEditingTests {
         }
         #expect(right.speedMap == speedMap)
         #expect(right.visuals.blendMode == .multiply)
+        #expect(right.visuals.blendIntensity == 0.42)
         #expect(right.visuals.mask == mask)
+        #expect(right.visuals.backgroundRemoval == backgroundRemoval)
+        #expect(right.beatAnalysis == beats)
 
         viewModel.trimTimelineItemEnd(rightID, by: -0.2, rebuild: false)
         guard case .media(let trimmed) = try #require(viewModel.project.item(id: rightID)) else {
@@ -121,7 +159,10 @@ struct TimelineEditingTests {
         }
         #expect(trimmed.speedMap == speedMap)
         #expect(trimmed.visuals.blendMode == .multiply)
+        #expect(trimmed.visuals.blendIntensity == 0.42)
         #expect(trimmed.visuals.mask == mask)
+        #expect(trimmed.visuals.backgroundRemoval == backgroundRemoval)
+        #expect(trimmed.beatAnalysis == beats)
 
         viewModel.undo()
         viewModel.undo()

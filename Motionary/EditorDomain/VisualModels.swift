@@ -4,7 +4,7 @@ import CoreGraphics
 import Foundation
 import SwiftUI
 
-struct ScaleValue: Codable, Equatable {
+struct ScaleValue: Codable, Equatable, Sendable {
     var x: Double
     var y: Double
 
@@ -14,7 +14,7 @@ struct ScaleValue: Codable, Equatable {
     }
 }
 
-struct AnimatableScale: Codable, Equatable {
+struct AnimatableScale: Codable, Equatable, Sendable {
     var baseValue: ScaleValue
     var keyframes: [Keyframe<ScaleValue>]
     var isLinked: Bool
@@ -60,7 +60,7 @@ struct AnimatableScale: Codable, Equatable {
         }
         let left = keyframes[lower]
         let right = keyframes[upper]
-        let span = max(right.time - left.time, 0.001)
+        let span = max(right.time - left.time, KeyframeMergeSupport.minimumInterpolationSpan)
         let progress = left.interpolation.progress(at: (time - left.time) / span)
         return ScaleValue(
             x: left.value.x + (right.value.x - left.value.x) * progress,
@@ -86,21 +86,28 @@ struct AnimatableScale: Codable, Equatable {
         _ property: AnimatableProperty<Double>,
         axis: ScaleAxis
     ) {
+        let previous = self
+        let other = previous.axisProperty(axis == .x ? .y : .x)
         if axis == .x {
             baseValue.x = property.baseValue
         } else {
             baseValue.y = property.baseValue
         }
 
-        let other = axisProperty(axis == .x ? .y : .x)
-        keyframes = property.keyframes.map { frame in
-            Keyframe(
-                id: frame.id,
-                time: frame.time,
+        let times = KeyframeMergeSupport.mergedTimes([
+            property.keyframes.map(\.time),
+            other.keyframes.map(\.time)
+        ])
+        keyframes = times.map { time in
+            let editedFrame = KeyframeMergeSupport.frame(in: property.keyframes, at: time)
+            let otherFrame = KeyframeMergeSupport.frame(in: other.keyframes, at: time)
+            return Keyframe(
+                id: editedFrame?.id ?? otherFrame?.id ?? UUID(),
+                time: time,
                 value: axis == .x
-                    ? ScaleValue(x: frame.value, y: other.value(at: frame.time))
-                    : ScaleValue(x: other.value(at: frame.time), y: frame.value),
-                interpolation: frame.interpolation
+                    ? ScaleValue(x: property.value(at: time), y: other.value(at: time))
+                    : ScaleValue(x: other.value(at: time), y: property.value(at: time)),
+                interpolation: editedFrame?.interpolation ?? otherFrame?.interpolation ?? .linear
             )
         }
     }
@@ -175,12 +182,18 @@ struct AnimatableScale: Codable, Equatable {
         y: AnimatableProperty<Double>,
         isLinked: Bool
     ) -> AnimatableScale {
-        let frames = x.keyframes.map { frame in
-            Keyframe(
-                id: frame.id,
-                time: frame.time,
-                value: ScaleValue(x: frame.value, y: y.value(at: frame.time)),
-                interpolation: frame.interpolation
+        let times = KeyframeMergeSupport.mergedTimes([
+            x.keyframes.map(\.time),
+            y.keyframes.map(\.time)
+        ])
+        let frames = times.map { time in
+            let xFrame = KeyframeMergeSupport.frame(in: x.keyframes, at: time)
+            let yFrame = KeyframeMergeSupport.frame(in: y.keyframes, at: time)
+            return Keyframe(
+                id: xFrame?.id ?? yFrame?.id ?? UUID(),
+                time: time,
+                value: ScaleValue(x: x.value(at: time), y: y.value(at: time)),
+                interpolation: xFrame?.interpolation ?? yFrame?.interpolation ?? .linear
             )
         }
         return AnimatableScale(
@@ -197,7 +210,7 @@ enum ScaleAxis {
 }
 
 /// Animatable transform values applied during preview and export rendering.
-struct ClipTransform: Codable, Equatable {
+struct ClipTransform: Codable, Equatable, Sendable {
     var positionX: AnimatableProperty<Double>
     var positionY: AnimatableProperty<Double>
     var scale: AnimatableScale
@@ -268,7 +281,7 @@ extension ClipTransform {
 }
 
 /// Animatable color-adjustment values applied before clip effects.
-struct AdjustmentSettings: Codable, Equatable {
+struct AdjustmentSettings: Codable, Equatable, Sendable {
     var brightness: AnimatableProperty<Double>
     var contrast: AnimatableProperty<Double>
     var saturation: AnimatableProperty<Double>
@@ -287,45 +300,6 @@ struct AdjustmentSettings: Codable, Equatable {
     }
 }
 
-/// Supported Core Image effect types.
-enum ClipEffectKind: String, Codable, CaseIterable, Identifiable {
-    case sepia = "Sepia"
-    case noir = "Noir"
-    case chrome = "Chrome"
-    case blur = "Blur"
-    case vignette = "Vignette"
-
-    var id: String { rawValue }
-}
-
-/// One enabled or disabled effect with animatable intensity.
-struct ClipEffect: Identifiable, Codable, Equatable {
-    var id: UUID
-    var kind: ClipEffectKind
-    var isEnabled: Bool
-    var intensity: AnimatableProperty<Double>
-
-    init(
-        id: UUID = UUID(),
-        kind: ClipEffectKind,
-        isEnabled: Bool = true,
-        intensity: AnimatableProperty<Double> = AnimatableProperty(baseValue: 0.6)
-    ) {
-        self.id = id
-        self.kind = kind
-        self.isEnabled = isEnabled
-        self.intensity = intensity
-    }
-}
-
-/// Ordered effects applied to a clip.
-struct EffectStack: Codable, Equatable {
-    var effects: [ClipEffect]
-
-    init(effects: [ClipEffect] = []) {
-        self.effects = effects
-    }
-}
 
 struct RGBAColor: Codable, Equatable, Hashable, Sendable {
     var red: Double

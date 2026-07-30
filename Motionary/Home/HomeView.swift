@@ -3,12 +3,19 @@
 import PhotosUI
 import SwiftUI
 
+private struct ProjectEditorSelection: Identifiable, Equatable {
+    let project: Project
+    let initialContent: ProjectContent
+
+    var id: UUID { project.id }
+}
+
 struct HomeView: View {
     @AppStorage(AppPreferences.newProjectFrameRateKey)
     private var newProjectFrameRate = AppPreferences.defaultFrameRate
     @StateObject private var projectStore: ProjectStore
     @Environment(\.colorScheme) private var colorScheme
-    @State private var selectedProject: Project?
+    @State private var selectedProject: ProjectEditorSelection?
     @State private var editingProjectID: UUID?
     @State private var newProjectMediaItems: [PhotosPickerItem] = []
     @State private var isCreatingProject = false
@@ -23,7 +30,7 @@ struct HomeView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        ZStack {
             ZStack {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
@@ -36,7 +43,10 @@ struct HomeView: View {
                                         project: $project,
                                         isRenaming: editingProjectID == project.id,
                                         onOpen: {
-                                            selectedProject = project
+                                            selectedProject = ProjectEditorSelection(
+                                                project: project,
+                                                initialContent: projectStore.bestAvailableContent(for: project)
+                                            )
                                         },
                                         onRename: {
                                             editingProjectID = project.id
@@ -50,6 +60,9 @@ struct HomeView: View {
                                         },
                                         projectStore: projectStore
                                     )
+                                    .onAppear {
+                                        projectStore.warmContent(for: project)
+                                    }
                                 }
                             }
                         }
@@ -58,21 +71,6 @@ struct HomeView: View {
                 }
             }
             .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
-            .navigationDestination(item: $selectedProject) { project in
-                ProjectDetailView(project: project, projectStore: projectStore)
-                    .navigationBarBackButtonHidden(true)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button {
-                                selectedProject = nil
-                            } label: {
-                                Image(systemName: "chevron.left")
-                                    .contentShape(Rectangle())
-                            }
-                            .accessibilityLabel("Back to projects")
-                        }
-                    }
-            }
             .safeAreaBar(edge: .top) {
                 dashboardHeader
                     .padding(18)
@@ -106,7 +104,25 @@ struct HomeView: View {
             } message: {
                 Text(errorMessage ?? "")
             }
+
+            if let selectedProject {
+                NavigationStack {
+                    ProjectDetailView(
+                        project: selectedProject.project,
+                        projectStore: projectStore,
+                        initialContent: selectedProject.initialContent,
+                        onClose: {
+                            self.selectedProject = nil
+                        }
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
+                .transition(.opacity)
+                .zIndex(100)
+            }
         }
+        .animation(.easeInOut(duration: 0.18), value: selectedProject?.id)
     }
 
     private var dashboardHeader: some View {
@@ -207,10 +223,35 @@ struct HomeView: View {
                 let content = ProjectContent(editorProject: editorProject)
                 try await projectStore.repository.save(content, projectID: project.id)
                 projectStore.recordSavedContent(content, projectID: project.id)
-                selectedProject = projectStore.projects.first(where: { $0.id == project.id }) ?? project
+                schedulePosterRender(for: editorProject, projectID: project.id)
+                let savedProject = projectStore.projects.first(where: { $0.id == project.id }) ?? project
+                selectedProject = ProjectEditorSelection(
+                    project: savedProject,
+                    initialContent: content
+                )
             } catch {
                 projectStore.deleteProject(with: project.id)
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func schedulePosterRender(for project: EditorProject, projectID: UUID) {
+        let outputURL = projectStore.posterURL(for: projectID)
+        Task(priority: .utility) {
+            do {
+                try await ProjectPosterService.shared.renderPoster(
+                    for: project,
+                    outputURL: outputURL
+                )
+                guard !Task.isCancelled else { return }
+                projectStore.notePosterChanged()
+            } catch ProjectPosterError.noVisualContent {
+                projectStore.removePoster(for: projectID)
+            } catch {
+                AppLogger.rendering.warning(
+                    "Failed to render project poster: \(error.localizedDescription, privacy: .public)"
+                )
             }
         }
     }

@@ -432,8 +432,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = Motionary;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
-				CODE_SIGN_STYLE = Automatic;
 				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.debug.entitlements;
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
 				DEVELOPMENT_TEAM = 84TRSZD4QB;
@@ -467,8 +467,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = Motionary;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
-				CODE_SIGN_STYLE = Automatic;
 				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.entitlements;
+				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
 				DEVELOPMENT_TEAM = 84TRSZD4QB;
@@ -626,15 +626,15 @@
 			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseAuth;
 		};
-		8CF00100300A000100F00101 /* FirebaseAppCheck */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseAppCheck;
-		};
 		8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseFirestore;
+		};
+		8CF00100300A000100F00101 /* FirebaseAppCheck */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAppCheck;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

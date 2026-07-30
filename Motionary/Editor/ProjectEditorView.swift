@@ -18,6 +18,9 @@ enum CoreEditorPanel: Equatable {
     case audio
     case speed
     case mask
+    case removeBackground
+    case blend
+    case autoBeats
     case canvas
     case graph
 }
@@ -27,6 +30,7 @@ struct ProjectEditorView: View {
     let projectID: UUID
     @ObservedObject var projectStore: ProjectStore
     let initialContent: ProjectContent
+    let onClose: () -> Void
 
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.colorScheme) private var colorScheme
@@ -41,13 +45,21 @@ struct ProjectEditorView: View {
     @State private var miniTimelinePixelsPerSecond: CGFloat = 88
     @State private var propertyContextClipID: UUID?
     @State private var graphReturnPanel: CoreEditorPanel = .transform
+    @State private var activeEffectWorkspaceID: UUID?
     @State private var activeTextMotionPhase: TextAnimationPhase = .entrance
-    @State private var isCancelTaskConfirmationPresented = false
+    @State private var cancelTaskConfirmationLocation: CGPoint?
+    @State private var isTextKeyboardVisible = false
 
-    init(projectID: UUID, projectStore: ProjectStore, initialContent: ProjectContent) {
+    init(
+        projectID: UUID,
+        projectStore: ProjectStore,
+        initialContent: ProjectContent,
+        onClose: @escaping () -> Void = {}
+    ) {
         self.projectID = projectID
         self.projectStore = projectStore
         self.initialContent = initialContent
+        self.onClose = onClose
         _viewModel = StateObject(
             wrappedValue: EditorViewModel(
                 projectID: projectID,
@@ -75,6 +87,7 @@ struct ProjectEditorView: View {
                 }
                 .disabled(!viewModel.canExportVideo || viewModel.isPerformingLongTask)
                 .accessibilityLabel("Export")
+                .accessibilityIdentifier("motionary-editor-export")
                 .labelStyle(.titleAndIcon)
             }
         }
@@ -100,6 +113,7 @@ struct ProjectEditorView: View {
             selectedReplacementItem = nil
         }
         .onChange(of: viewModel.selectedClipID) { _, clipID in
+            activeEffectWorkspaceID = nil
             if let clipID {
                 if activePanel.isPropertyPanel || activePanel == .graph {
                     propertyContextClipID = clipID
@@ -109,7 +123,7 @@ struct ProjectEditorView: View {
                         viewModel.selectGraphSegment(atPlayheadIn: section)
                     }
                 }
-                
+
                 if let clip = viewModel.project.clip(id: clipID) {
                     let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
                     var isSupported = true
@@ -130,6 +144,12 @@ struct ProjectEditorView: View {
                         }
                     case .mask:
                         isSupported = clip.mediaType != .audio
+                    case .removeBackground:
+                        isSupported = clip.mediaType == .image || clip.mediaType == .video
+                    case .blend:
+                        isSupported = clip.mediaType != .audio
+                    case .autoBeats:
+                        isSupported = clip.mediaType == .audio
                     default:
                         isSupported = true
                     }
@@ -141,6 +161,7 @@ struct ProjectEditorView: View {
                     if !panelToCheck.isTextPanel
                         && panelToCheck != .transform
                         && panelToCheck != .mask
+                        && panelToCheck != .blend
                         && panelToCheck != .timeline
                     {
                         activePanel = .timeline
@@ -161,15 +182,24 @@ struct ProjectEditorView: View {
                 propertyContextClipID = nil
                 viewModel.activeKeyframeTarget = nil
             }
+            if panel != .effects && panel != .graph {
+                activeEffectWorkspaceID = nil
+            }
         }
         .onChange(of: viewModel.project) { _, project in
             if let contextID = propertyContextClipID,
                 project.item(id: contextID) == nil
             {
                 propertyContextClipID = nil
+                activeEffectWorkspaceID = nil
                 viewModel.graphSegment = nil
                 viewModel.displayedGraphSegment = nil
                 activePanel = .timeline
+            } else if let activeEffectWorkspaceID,
+                project.clip(id: propertyContextClipID ?? UUID())?
+                    .effectStack.effects.contains(where: { $0.id == activeEffectWorkspaceID }) != true
+            {
+                self.activeEffectWorkspaceID = nil
             } else if activePanel == .graph {
                 viewModel.refreshGraphSegment()
             }
@@ -178,7 +208,10 @@ struct ProjectEditorView: View {
             guard activePanel == .graph,
                 let section = graphReturnPanel.keyframeSection
             else { return }
-            viewModel.selectGraphSegment(atPlayheadIn: section)
+            viewModel.selectGraphSegment(
+                atPlayheadIn: section,
+                effectID: graphReturnPanel == .effects ? activeEffectWorkspaceID : nil
+            )
         }
         .alert(
             "Error",
@@ -213,22 +246,11 @@ struct ProjectEditorView: View {
                 viewModel.exportProject(settings: settings)
             }
         }
-        .confirmationDialog(
-            "Stop the current task?",
-            isPresented: $isCancelTaskConfirmationPresented,
-            titleVisibility: .visible
-        ) {
-            Button("Stop Task", role: .destructive) {
-                viewModel.cancelLongRunningTask()
-            }
-            Button("Keep Waiting", role: .cancel) {}
-        } message: {
-            Text("The current import, export, or preview preparation will be cancelled.")
-        }
     }
 
     private func editorCanvas(geometry: GeometryProxy) -> some View {
         let availableHeight = max(geometry.size.height - geometry.safeAreaInsets.bottom - 12, 1)
+        let activeKeyframeSection = activeTimelineKeyframeSection
         let showsMiniTimeline =
             (activePanel.keyframeSection != nil || activePanel == .graph)
             && propertyContextTimelineItem != nil
@@ -246,19 +268,22 @@ struct ProjectEditorView: View {
             MotionaryTheme.background(for: colorScheme).ignoresSafeArea()
 
             VStack(spacing: 10) {
-                CorePreviewSection(
-                    viewModel: viewModel,
-                    selectedMediaItems: $selectedMediaItems
-                )
-                .frame(height: previewHeight)
+                if !isTextKeyboardVisible {
+                    CorePreviewSection(
+                        viewModel: viewModel,
+                        selectedMediaItems: $selectedMediaItems
+                    )
+                    .frame(height: previewHeight)
 
-                EditorPlaybackControlBar(
-                    viewModel: viewModel,
-                    activePanel: $activePanel,
-                    graphReturnPanel: $graphReturnPanel,
-                    activeTextMotionPhase: $activeTextMotionPhase
-                )
-                .frame(height: controlHeight)
+                    EditorPlaybackControlBar(
+                        viewModel: viewModel,
+                        activePanel: $activePanel,
+                        graphReturnPanel: $graphReturnPanel,
+                        activeEffectWorkspaceID: $activeEffectWorkspaceID,
+                        activeTextMotionPhase: $activeTextMotionPhase
+                    )
+                    .frame(height: controlHeight)
+                }
 
                 workspace
                     .frame(maxWidth: .infinity)
@@ -270,7 +295,10 @@ struct ProjectEditorView: View {
                         pixelsPerSecond: $miniTimelinePixelsPerSecond,
                         activeSection: activePanel == .graph
                             ? graphReturnPanel.keyframeSection
-                            : activePanel.keyframeSection,
+                            : activeKeyframeSection,
+                        activeEffectID: activePanel == .graph && graphReturnPanel == .effects
+                            ? viewModel.graphSegment?.effectID
+                            : activeEffectWorkspaceID,
                         graphSegment: activePanel == .graph
                             ? viewModel.graphSegment
                             : nil
@@ -286,13 +314,33 @@ struct ProjectEditorView: View {
                     isAudioFileImporterPresented: $isAudioFileImporterPresented,
                     activePanel: $activePanel,
                     propertyContextClipID: $propertyContextClipID,
-                    graphReturnPanel: $graphReturnPanel
+                    graphReturnPanel: $graphReturnPanel,
+                    activeEffectWorkspaceID: $activeEffectWorkspaceID
                 )
             }
             .padding()
 
-            EditorBusyOverlay(viewModel: viewModel) {
-                isCancelTaskConfirmationPresented = true
+            EditorBusyOverlay(viewModel: viewModel) { location in
+                cancelTaskConfirmationLocation = location
+            }
+
+            if let location = cancelTaskConfirmationLocation,
+                viewModel.shouldPresentBusyOverlay
+            {
+                EditorCancelTaskPopover(
+                    title: "Stop the current task?",
+                    message: "The current import, analysis, export, or preview preparation will be cancelled.",
+                    onConfirm: {
+                        cancelTaskConfirmationLocation = nil
+                        viewModel.cancelLongRunningTask()
+                    },
+                    onDismiss: {
+                        cancelTaskConfirmationLocation = nil
+                    }
+                )
+                .position(cancelPopoverPosition(for: location, in: geometry.size))
+                .transition(.scale(scale: 0.94).combined(with: .opacity))
+                .zIndex(1_500)
             }
 
             if let message = viewModel.confirmationMessage {
@@ -305,6 +353,19 @@ struct ProjectEditorView: View {
             }
         }
         .animation(.spring(response: 0.42, dampingFraction: 0.82), value: viewModel.confirmationMessage)
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: cancelTaskConfirmationLocation)
+        .onChange(of: viewModel.shouldPresentBusyOverlay) { _, isBusy in
+            if !isBusy {
+                cancelTaskConfirmationLocation = nil
+            }
+        }
+    }
+
+    private func cancelPopoverPosition(for location: CGPoint, in size: CGSize) -> CGPoint {
+        CGPoint(
+            x: min(max(location.x, 132), max(size.width - 132, 132)),
+            y: min(max(location.y, 92), max(size.height - 92, 92))
+        )
     }
 
     @ViewBuilder
@@ -320,28 +381,32 @@ struct ProjectEditorView: View {
                 viewModel: viewModel,
                 item: propertyContextText,
                 mode: .content,
-                activeMotionPhase: $activeTextMotionPhase
+                activeMotionPhase: $activeTextMotionPhase,
+                isKeyboardVisible: $isTextKeyboardVisible
             )
         case .textType:
             TextWorkspaceView(
                 viewModel: viewModel,
                 item: propertyContextText,
                 mode: .type,
-                activeMotionPhase: $activeTextMotionPhase
+                activeMotionPhase: $activeTextMotionPhase,
+                isKeyboardVisible: $isTextKeyboardVisible
             )
         case .textStyle:
             TextWorkspaceView(
                 viewModel: viewModel,
                 item: propertyContextText,
                 mode: .style,
-                activeMotionPhase: $activeTextMotionPhase
+                activeMotionPhase: $activeTextMotionPhase,
+                isKeyboardVisible: $isTextKeyboardVisible
             )
         case .textMotion:
             TextWorkspaceView(
                 viewModel: viewModel,
                 item: propertyContextText,
                 mode: .motion,
-                activeMotionPhase: $activeTextMotionPhase
+                activeMotionPhase: $activeTextMotionPhase,
+                isKeyboardVisible: $isTextKeyboardVisible
             )
         case .textMotionGraph:
             TextMotionGraphWorkspace(
@@ -368,7 +433,8 @@ struct ProjectEditorView: View {
         case .effects:
             EffectsWorkspaceView(
                 viewModel: viewModel,
-                clip: propertyContextClip
+                clip: propertyContextClip,
+                activeEffectID: $activeEffectWorkspaceID
             )
         case .audio:
             AudioWorkspaceView(
@@ -382,6 +448,21 @@ struct ProjectEditorView: View {
             )
         case .mask:
             MaskWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextTimelineItem
+            )
+        case .removeBackground:
+            RemoveBackgroundWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextTimelineItem
+            )
+        case .blend:
+            BlendWorkspaceView(
+                viewModel: viewModel,
+                item: propertyContextTimelineItem
+            )
+        case .autoBeats:
+            AutoBeatsWorkspaceView(
                 viewModel: viewModel,
                 item: propertyContextTimelineItem
             )
@@ -407,6 +488,13 @@ struct ProjectEditorView: View {
     private var propertyContextTimelineItem: TimelineItem? {
         guard let propertyContextClipID else { return nil }
         return viewModel.project.item(id: propertyContextClipID)
+    }
+
+    private var activeTimelineKeyframeSection: KeyframeSection? {
+        if activePanel == .effects && activeEffectWorkspaceID == nil {
+            return nil
+        }
+        return activePanel.keyframeSection
     }
 
     @ViewBuilder
@@ -436,28 +524,37 @@ private struct EditorPlaybackControlBar: View {
     @ObservedObject private var playbackState: PlaybackState
     @Binding var activePanel: CoreEditorPanel
     @Binding var graphReturnPanel: CoreEditorPanel
+    @Binding var activeEffectWorkspaceID: UUID?
     @Binding var activeTextMotionPhase: TextAnimationPhase
+    @State private var isTimePadPresented = false
 
     init(
         viewModel: EditorViewModel,
         activePanel: Binding<CoreEditorPanel>,
         graphReturnPanel: Binding<CoreEditorPanel>,
+        activeEffectWorkspaceID: Binding<UUID?>,
         activeTextMotionPhase: Binding<TextAnimationPhase>
     ) {
         self.viewModel = viewModel
         _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
         _activePanel = activePanel
         _graphReturnPanel = graphReturnPanel
+        _activeEffectWorkspaceID = activeEffectWorkspaceID
         _activeTextMotionPhase = activeTextMotionPhase
     }
 
     var body: some View {
         ZStack {
             HStack(spacing: 9) {
-                Text("\(formatClock(playbackState.currentTime)) / \(formatClock(viewModel.duration))")
-                    .font(.callout.monospacedDigit().weight(.semibold))
-                    .foregroundStyle(MotionaryTheme.textSecondary)
-                    .lineLimit(1)
+                MotionaryNumberPadPopover(isPresented: $isTimePadPresented) { value in
+                    viewModel.seek(to: min(value, viewModel.duration), exact: true)
+                } label: {
+                    Text("\(formatClock(playbackState.currentTime)) / \(formatClock(viewModel.duration))")
+                        .font(.callout.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                        .lineLimit(1)
+                }
+                .accessibilityHint("Open number pad")
                 Spacer()
 
                 if activePanel == .textMotionGraph {
@@ -489,8 +586,8 @@ private struct EditorPlaybackControlBar: View {
                         action: { activePanel = .textMotionGraph },
                         isBordered: false
                     )
-                } else if let section = activePanel.keyframeSection,
-                    viewModel.candidateGraphSegment(in: section) != nil
+                } else if let section = activeGraphSection,
+                    viewModel.candidateGraphSegment(in: section, effectID: activeEffectWorkspaceID) != nil
                 {
                     CompactIconButton(
                         systemName: "point.topleft.down.curvedto.point.bottomright.up",
@@ -498,7 +595,10 @@ private struct EditorPlaybackControlBar: View {
                         isProminent: true,
                         action: {
                             graphReturnPanel = activePanel
-                            viewModel.openCandidateGraphSegment(in: section)
+                            viewModel.openCandidateGraphSegment(
+                                in: section,
+                                effectID: activeEffectWorkspaceID
+                            )
                             if viewModel.graphSegment != nil {
                                 activePanel = .graph
                             }
@@ -582,12 +682,21 @@ private struct EditorPlaybackControlBar: View {
             item.animations.exit != nil
         }
     }
+
+    private var activeGraphSection: KeyframeSection? {
+        if activePanel == .effects && activeEffectWorkspaceID == nil {
+            return nil
+        }
+        return activePanel.keyframeSection
+    }
+
 }
 
 extension CoreEditorPanel {
     var isPropertyPanel: Bool {
         isTextPanel || self == .shape || self == .transform || self == .adjust || self == .effects
-            || self == .audio || self == .speed || self == .mask
+            || self == .audio || self == .speed || self == .mask || self == .removeBackground
+            || self == .blend || self == .autoBeats
     }
 
     var isTextPanel: Bool {
@@ -619,7 +728,7 @@ extension CoreEditorPanel {
             .audio
         case .speed:
             nil
-        case .mask, .canvas, .timeline, .graph:
+        case .mask, .removeBackground, .blend, .autoBeats, .canvas, .timeline, .graph:
             nil
         }
     }

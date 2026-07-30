@@ -1,14 +1,17 @@
-// Image normalization and still-image video conversion.
+// Image decoding plus the isolated AVFoundation clock source used by generated layers.
 
 import AVFoundation
 import ImageIO
 import UIKit
+import UniformTypeIdentifiers
 
-/// Converts imported still images into orientation-safe video assets for the shared render pipeline.
+struct NormalizedStillImage {
+    let url: URL
+    let size: CGSize
+}
+
 enum MediaConversionHelper {
-    static let stillVideoSourceFrameCount = 1
-
-    /// Returns a temporary one-frame movie that only supplies AVFoundation's
+    /// Returns a temporary 2x2 movie that only supplies AVFoundation's
     /// timing source for generated visual layers such as text.
     static func blankVideoClockURL(duration: Double, frameRate: Int32) async throws -> URL {
         try await BlankVideoClockCache.shared.url(
@@ -35,32 +38,55 @@ enum MediaConversionHelper {
         return UIImage(cgImage: image)
     }
 
-    /// Redraws an image so its pixels use upright orientation metadata.
-    static func normalizedImage(_ image: UIImage) -> UIImage {
-        guard image.imageOrientation != .up else {
-            return image
+    /// Writes an orientation-applied still image to a temporary PNG so render
+    /// metadata and stored pixels use the same upright coordinate system.
+    static func normalizedStillImageFile(
+        at url: URL,
+        maxPixelSize: CGFloat = 4096
+    ) throws -> NormalizedStillImage {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw MediaImportError.invalidImage
         }
 
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = image.scale
-        format.opaque = false
-
-        return UIGraphicsImageRenderer(size: image.size, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: image.size))
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            throw MediaImportError.invalidImage
         }
-    }
 
-    /// Writes a still image as a fixed-duration, single-frame movie.
-    static func imageToVideo(image: UIImage, duration: Double, frameRate: Int32 = 30) async throws -> URL {
-        try await writeImageToVideo(
-            image: image,
-            duration: duration,
-            frameRate: frameRate
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).png")
+        guard let destination = CGImageDestinationCreateWithURL(
+            outputURL as CFURL,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw MediaImportError.invalidImage
+        }
+        CGImageDestinationAddImage(
+            destination,
+            image,
+            [kCGImagePropertyOrientation as String: CGImagePropertyOrientation.up.rawValue] as CFDictionary
+        )
+        guard CGImageDestinationFinalize(destination) else {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw MediaImportError.invalidImage
+        }
+
+        return NormalizedStillImage(
+            url: outputURL,
+            size: CGSize(width: image.width, height: image.height)
         )
     }
 
-    private static func writeImageToVideo(
-        image: UIImage,
+    /// Creates the single shared 2x2 clock track required by AVFoundation for
+    /// generated-only intervals. It never carries user-visible image pixels.
+    fileprivate static func writeBlankVideoClock(
         duration: Double,
         frameRate: Int32
     ) async throws -> URL {
@@ -71,126 +97,62 @@ enum MediaConversionHelper {
             try FileManager.default.removeItem(at: outputURL)
         }
 
-        let normalizedImage = normalizedImage(image)
-        guard let cgImage = normalizedImage.cgImage else {
-            throw MediaImportError.invalidImage
-        }
-
-        let videoSize = CGSize(
-            width: max(cgImage.width - cgImage.width % 2, 2),
-            height: max(cgImage.height - cgImage.height % 2, 2)
-        )
+        let videoSize = CGSize(width: 2, height: 2)
         let frameDuration = CMTime(value: 1, timescale: max(frameRate, 1))
         let stillDuration = CMTime(
             seconds: max(duration, CMTimeGetSeconds(frameDuration)),
             preferredTimescale: 600
         )
-        let rendererFormat = UIGraphicsImageRendererFormat()
-        rendererFormat.scale = 1
-        rendererFormat.opaque = true
-        let encodedImage = UIGraphicsImageRenderer(
-            size: videoSize,
-            format: rendererFormat
-        ).image { _ in
-            normalizedImage.draw(in: CGRect(origin: .zero, size: videoSize))
-        }
-        guard let jpegData = encodedImage.jpegData(compressionQuality: 0.96) else {
-            throw MediaImportError.invalidImage
-        }
-
-        var formatDescription: CMVideoFormatDescription?
-        guard
-            CMVideoFormatDescriptionCreate(
-                allocator: kCFAllocatorDefault,
-                codecType: kCMVideoCodecType_JPEG,
-                width: Int32(videoSize.width),
-                height: Int32(videoSize.height),
-                extensions: nil,
-                formatDescriptionOut: &formatDescription
-            ) == noErr,
-            let formatDescription
-        else {
-            throw MediaImportError.videoWriterUnavailable
-        }
-
-        var blockBuffer: CMBlockBuffer?
-        guard
-            CMBlockBufferCreateWithMemoryBlock(
-                allocator: kCFAllocatorDefault,
-                memoryBlock: nil,
-                blockLength: jpegData.count,
-                blockAllocator: kCFAllocatorDefault,
-                customBlockSource: nil,
-                offsetToData: 0,
-                dataLength: jpegData.count,
-                flags: 0,
-                blockBufferOut: &blockBuffer
-            ) == noErr,
-            let blockBuffer
-        else {
-            throw MediaImportError.videoWriterUnavailable
-        }
-        let copyStatus = jpegData.withUnsafeBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else { return kCMBlockBufferBadCustomBlockSourceErr }
-            return CMBlockBufferReplaceDataBytes(
-                with: baseAddress,
-                blockBuffer: blockBuffer,
-                offsetIntoDestination: 0,
-                dataLength: jpegData.count
-            )
-        }
-        guard copyStatus == noErr else {
-            throw MediaImportError.videoWriterUnavailable
-        }
-
-        var timing = CMSampleTimingInfo(
-            duration: stillDuration,
-            presentationTimeStamp: .zero,
-            decodeTimeStamp: .invalid
-        )
-        var sampleSize = jpegData.count
-        var sampleBuffer: CMSampleBuffer?
-        guard
-            CMSampleBufferCreateReady(
-                allocator: kCFAllocatorDefault,
-                dataBuffer: blockBuffer,
-                formatDescription: formatDescription,
-                sampleCount: 1,
-                sampleTimingEntryCount: 1,
-                sampleTimingArray: &timing,
-                sampleSizeEntryCount: 1,
-                sampleSizeArray: &sampleSize,
-                sampleBufferOut: &sampleBuffer
-            ) == noErr,
-            let sampleBuffer
-        else {
-            throw MediaImportError.videoWriterUnavailable
-        }
-
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
         let writerInput = AVAssetWriterInput(
             mediaType: .video,
-            outputSettings: nil,
-            sourceFormatHint: formatDescription
+            outputSettings: [
+                AVVideoCodecKey: AVVideoCodecType.h264,
+                AVVideoWidthKey: Int(videoSize.width),
+                AVVideoHeightKey: Int(videoSize.height),
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: 1_000,
+                    AVVideoExpectedSourceFrameRateKey: frameRate,
+                    AVVideoMaxKeyFrameIntervalKey: Int(frameRate)
+                ]
+            ]
         )
         writerInput.expectsMediaDataInRealTime = false
         guard writer.canAdd(writerInput) else {
             throw MediaImportError.videoWriterUnavailable
         }
         writer.add(writerInput)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: writerInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA),
+                kCVPixelBufferWidthKey as String: Int(videoSize.width),
+                kCVPixelBufferHeightKey as String: Int(videoSize.height),
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
+            ]
+        )
+        let framePixelBuffer = try blackClockPixelBuffer(size: videoSize)
         guard writer.startWriting() else {
             throw writer.error ?? MediaImportError.videoWriterUnavailable
         }
         writer.startSession(atSourceTime: .zero)
 
         do {
-            try Task.checkCancellation()
-            while !writerInput.isReadyForMoreMediaData {
+            let frameCount = max(
+                Int(ceil(CMTimeGetSeconds(stillDuration) * Double(max(frameRate, 1)))),
+                1
+            )
+            for frameIndex in 0..<frameCount {
                 try Task.checkCancellation()
-                try await Task.sleep(nanoseconds: 5_000_000)
-            }
-            guard writerInput.append(sampleBuffer) else {
-                throw writer.error ?? MediaImportError.videoWriterUnavailable
+                while !writerInput.isReadyForMoreMediaData {
+                    try Task.checkCancellation()
+                    try await Task.sleep(nanoseconds: 5_000_000)
+                }
+                let time = CMTime(value: CMTimeValue(frameIndex), timescale: max(frameRate, 1))
+                guard adaptor.append(framePixelBuffer, withPresentationTime: time) else {
+                    throw writer.error ?? MediaImportError.videoWriterUnavailable
+                }
             }
 
             writer.endSession(atSourceTime: stillDuration)
@@ -207,6 +169,35 @@ enum MediaConversionHelper {
         }
 
         return outputURL
+    }
+
+    private static func blackClockPixelBuffer(size: CGSize) throws -> CVPixelBuffer {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            Int(size.width),
+            Int(size.height),
+            kCVPixelFormatType_32BGRA,
+            [
+                kCVPixelBufferMetalCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [String: String]()
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else {
+            throw MediaImportError.videoWriterUnavailable
+        }
+
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        if let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) {
+            memset(
+                baseAddress,
+                0,
+                CVPixelBufferGetBytesPerRow(pixelBuffer) * CVPixelBufferGetHeight(pixelBuffer)
+            )
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        return pixelBuffer
     }
 }
 
@@ -232,18 +223,7 @@ private actor BlankVideoClockCache {
             return cached
         }
 
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = true
-        let image = UIGraphicsImageRenderer(
-            size: CGSize(width: 2, height: 2),
-            format: format
-        ).image { context in
-            UIColor.black.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
-        }
-        let result = try await MediaConversionHelper.imageToVideo(
-            image: image,
+        let result = try await MediaConversionHelper.writeBlankVideoClock(
             duration: CMTimeGetSeconds(
                 CMTime(value: durationTicks, timescale: 600)
             ),

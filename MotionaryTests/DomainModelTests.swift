@@ -30,21 +30,21 @@ struct DomainModelTests {
             mediaType: .video
         )
 
-        let content = ProjectContent(
+        let content = ProjectContent(editorProject: EditorProject.migratingLegacy(
+            title: "Legacy",
             clips: [clip],
             keyframes: [Keyframe(time: 2, value: 0.8)],
-            selectedEffect: .sepia,
-            effectIntensity: 0.4,
-            title: "Legacy"
-        )
+            selectedEffectModuleID: .sepia,
+            effectIntensity: 0.4
+        ))
 
         #expect(content.editorProject.schemaVersion == EditorProject.currentSchemaVersion)
         #expect(content.editorProject.tracks.count == 1)
         #expect(content.editorProject.tracks[0].kind == TrackKind.visual)
         #expect(content.editorProject.tracks[0].clips.count == 1)
         #expect(content.editorProject.tracks[0].clips[0].sourceRange.duration == 5)
-        #expect(content.editorProject.tracks[0].clips[0].effectStack.effects.first?.kind == .sepia)
-        #expect(content.editorProject.tracks[0].clips[0].effectStack.effects.first?.intensity.baseValue == 0.4)
+        #expect(content.editorProject.tracks[0].clips[0].effectStack.effects.first?.moduleID == .sepia)
+        #expect(content.editorProject.tracks[0].clips[0].effectStack.effects.first?.mix.baseValue == 0.4)
     }
 
     @Test func legacyAudioContentAddsAudioTrackOnlyWhenNeeded() async throws {
@@ -55,13 +55,13 @@ struct DomainModelTests {
             mediaType: .audio
         )
 
-        let content = ProjectContent(
+        let content = ProjectContent(editorProject: EditorProject.migratingLegacy(
+            title: "Audio",
             clips: [clip],
             keyframes: [],
-            selectedEffect: .none,
-            effectIntensity: 0,
-            title: "Audio"
-        )
+            selectedEffectModuleID: nil,
+            effectIntensity: 0
+        ))
 
         #expect(content.editorProject.tracks.count == 2)
         #expect(content.editorProject.tracks[0].kind == TrackKind.visual)
@@ -75,14 +75,21 @@ struct DomainModelTests {
             mediaType: .video,
             originalDuration: 3
         )
+        var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .vignette))
+        effect.mix = AnimatableProperty(baseValue: 0.7)
+        effect.setScalarProperty(
+            AnimatableProperty(
+                baseValue: 0.45,
+                keyframes: [Keyframe(time: 1.0, value: 0.72)]
+            ),
+            for: .softness
+        )
         let clip = TimelineClip(
             name: "Shot",
             source: source,
             timelineStart: 0,
             sourceRange: TimeRangeValue(start: 0, duration: 3),
-            effectStack: EffectStack(effects: [
-                ClipEffect(kind: .vignette, intensity: AnimatableProperty(baseValue: 0.7))
-            ])
+            effectStack: EffectStack(effects: [effect])
         )
         let project = EditorProject(
             title: "Roundtrip",
@@ -92,8 +99,14 @@ struct DomainModelTests {
         let data = try JSONEncoder().encode(ProjectContent(editorProject: project))
         let decoded = try JSONDecoder().decode(ProjectContent.self, from: data)
 
-        #expect(decoded.editorProject.tracks[0].clips[0].effectStack.effects[0].kind == ClipEffectKind.vignette)
-        #expect(decoded.editorProject.tracks[0].clips[0].effectStack.effects[0].intensity.baseValue == 0.7)
+        #expect(decoded.editorProject.tracks[0].clips[0].effectStack.effects[0].moduleID == .vignette)
+        #expect(decoded.editorProject.tracks[0].clips[0].effectStack.effects[0].mix.baseValue == 0.7)
+        let decodedSoftness = try #require(
+            decoded.editorProject.tracks[0].clips[0].effectStack.effects[0]
+                .scalarProperty(for: .softness)
+        )
+        #expect(decodedSoftness.baseValue == 0.45)
+        #expect(decodedSoftness.keyframes.first?.value == 0.72)
     }
 
     @Test func legacyTransformDefaultsFlipFlagsToFalse() async throws {
@@ -315,7 +328,7 @@ struct DomainModelTests {
         let legacyContent = try JSONSerialization.data(withJSONObject: [
             "clips": clipsObject,
             "keyframes": [],
-            "selectedEffect": VideoEffect.none.rawValue,
+            "selectedEffect": "None",
             "effectIntensity": 0.6
         ])
 
@@ -418,5 +431,89 @@ struct DomainModelTests {
         #expect(mask.insetX == 0.48)
         #expect(mask.insetY == 0)
         #expect(mask.feather == 0.25)
+    }
+
+    @Test func maskSizeAndFeatherRoundTripWithinInputBounds() throws {
+        let mask = ItemMask(
+            shape: .bar,
+            widthScale: 2.5,
+            heightScale: 1.75,
+            featherScale: 1.2,
+            roundnessScale: 1.4,
+            rotationDegrees: 240,
+            offsetScale: -2,
+            isInverted: true
+        )
+        let decoded = try JSONDecoder().decode(
+            ItemMask.self,
+            from: JSONEncoder().encode(mask)
+        )
+
+        #expect(decoded == mask)
+        #expect(decoded.widthScale == 1)
+        #expect(decoded.heightScale == 1)
+        #expect(decoded.featherScale == 1)
+        #expect(decoded.roundnessScale == 1)
+        #expect(decoded.rotationDegrees == 180)
+        #expect(decoded.offsetScale == -1)
+        #expect(decoded.isInverted)
+    }
+
+    @Test func schemaNineProjectLoadsWithNewAnalysisDefaults() throws {
+        let encoded = try JSONEncoder().encode(EditorProject.empty(title: "Schema 9"))
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["schemaVersion"] = 9
+        let decoded = try JSONDecoder().decode(
+            EditorProject.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        #expect(decoded.schemaVersion == EditorProject.currentSchemaVersion)
+        #expect(decoded.mediaLibrary.values.allSatisfy { $0.backgroundRemovalArtifact == nil })
+        #expect(decoded.tracks.flatMap(\.items).allSatisfy { item in
+            item.editableVisuals?.backgroundRemoval == nil
+        })
+    }
+
+    @Test func mediaAnalysisModelsRoundTrip() throws {
+        let range = TimeRangeValue(start: 1.5, duration: 3)
+        let artifact = BackgroundRemovalArtifact(
+            url: URL(fileURLWithPath: "/tmp/foreground.mov"),
+            sourceRange: range,
+            sourceFingerprint: "abc123"
+        )
+        let beats = AudioBeatAnalysis(
+            bpm: 123.4,
+            confidence: 0.86,
+            markers: [
+                AudioBeatMarker(sourceTime: 1.75, strength: 0.6),
+                AudioBeatMarker(sourceTime: 2.24, strength: 0.92),
+            ],
+            sourceFingerprint: "abc123"
+        )
+        let settings = BackgroundRemovalSettings(edgeRefinement: 0.2, feather: 0.35)
+
+        let decodedArtifact = try JSONDecoder().decode(
+            BackgroundRemovalArtifact.self,
+            from: JSONEncoder().encode(artifact)
+        )
+        let decodedBeats = try JSONDecoder().decode(
+            AudioBeatAnalysis.self,
+            from: JSONEncoder().encode(beats)
+        )
+        let decodedVisuals = try JSONDecoder().decode(
+            TimelineItemVisuals.self,
+            from: JSONEncoder().encode(
+                TimelineItemVisuals(
+                    blendMode: .luminosity,
+                    backgroundRemoval: settings
+                )
+            )
+        )
+
+        #expect(decodedArtifact == artifact)
+        #expect(decodedBeats == beats)
+        #expect(decodedVisuals.blendMode == .luminosity)
+        #expect(decodedVisuals.backgroundRemoval == settings)
     }
 }

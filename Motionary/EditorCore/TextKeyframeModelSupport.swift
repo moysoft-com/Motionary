@@ -46,7 +46,10 @@ extension TextTimelineItem {
     }
 
     func keyframeTimes(in section: KeyframeSection) -> [Double] {
-        Array(
+        if section == .effects {
+            return visuals.effectStack.allKeyframeTimes
+        }
+        return Array(
             Set(
                 keyframeTargets(in: section, includingInactiveEffects: true).flatMap { target in
                     animatableProperty(for: target)?.keyframes.map(\.time) ?? []
@@ -74,7 +77,7 @@ extension TextTimelineItem {
             .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
             .textStyle
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectIntensity, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume:
             .transform
         }
     }
@@ -144,7 +147,7 @@ extension TextTimelineItem {
                 style.background?.cornerRadius ?? propertyAnimations.backgroundCornerRadius.baseValue
             )
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectIntensity, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume:
             nil
         }
     }
@@ -223,7 +226,7 @@ extension TextTimelineItem {
                 style.background?.cornerRadius = property.baseValue
             }
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectIntensity, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume:
             break
         }
     }
@@ -394,7 +397,7 @@ extension TextTimelineItem {
         case .textFill(let component):
             colorMetadata("Fill", component)
         case .textWidthFraction:
-            textMetadata("Text Box", "rectangle.horizontal", .textStyle, 0.1...1, 0.01, 2)
+            textMetadata("Max Width", "rectangle.horizontal", .textStyle, 0.1...1, 0.01, 2)
         case .textStroke(let component):
             colorMetadata("Outline", component)
         case .textStrokeWidth:
@@ -414,7 +417,7 @@ extension TextTimelineItem {
         case .textBackgroundCornerRadius:
             textMetadata("Background Corners", "rectangle.roundedtop", .textStyle, 0...120, 1, 0)
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectIntensity, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume:
             textMetadata("Property", "slider.horizontal.3", .textStyle, -1...1, 0.01, 2)
         }
     }
@@ -490,12 +493,14 @@ extension TimelineItem {
         }
     }
 
-    func keyframeTimes(in section: KeyframeSection) -> [Double] {
+    func keyframeTimes(in section: KeyframeSection, effectID: UUID? = nil) -> [Double] {
         switch self {
         case .media where section == .speed:
             return []
         case .media, .shape:
-            return visibleKeyframeTimes(legacyClip()?.keyframeTimes(in: section) ?? [])
+            return visibleKeyframeTimes(
+                legacyClip()?.keyframeTimes(in: section, effectID: effectID) ?? []
+            )
         case .text(let item):
             return item.keyframeTimes(in: section)
         case .caption, .adjustment, .compound:
@@ -540,7 +545,7 @@ extension TimelineItem {
         ]
         let times = properties.flatMap { $0.keyframes.map(\.time) }
             + visuals.transform.scale.keyframes.map(\.time)
-            + visuals.effectStack.effects.flatMap { $0.intensity.keyframes.map(\.time) }
+            + visuals.effectStack.allKeyframeTimes
         return Array(Set(times)).sorted()
     }
 }

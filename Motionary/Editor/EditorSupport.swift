@@ -7,10 +7,10 @@ struct EditorBusyOverlay: View {
     @ObservedObject private var viewModel: EditorViewModel
     @ObservedObject private var exportState: ExportState
     @ObservedObject private var previewState: PreviewState
-    let onCancelRequest: () -> Void
+    let onCancelRequest: (CGPoint) -> Void
     @State private var showsOverlay = false
 
-    init(viewModel: EditorViewModel, onCancelRequest: @escaping () -> Void) {
+    init(viewModel: EditorViewModel, onCancelRequest: @escaping (CGPoint) -> Void) {
         self.viewModel = viewModel
         _exportState = ObservedObject(wrappedValue: viewModel.exportState)
         _previewState = ObservedObject(wrappedValue: viewModel.previewState)
@@ -18,39 +18,55 @@ struct EditorBusyOverlay: View {
     }
 
     var body: some View {
-        ZStack {
-            if showsOverlay, let title = viewModel.longRunningTaskTitle {
-                ZStack {
-                    Color.black.opacity(0.62)
-                        .ignoresSafeArea()
-                        .contentShape(Rectangle())
-                        .onTapGesture(perform: onCancelRequest)
+        GeometryReader { geometry in
+            ZStack {
+                if showsOverlay, let title = viewModel.longRunningTaskTitle {
+                    ZStack {
+                        Color.black.opacity(0.62)
+                            .ignoresSafeArea()
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onEnded { value in
+                                        onCancelRequest(value.location)
+                                    }
+                            )
 
-                    VStack(spacing: 12) {
-                        if exportState.isExporting {
-                            ProgressView(value: exportState.progress)
-                        } else {
-                            ProgressView()
+                        VStack(spacing: 12) {
+                            if exportState.isExporting {
+                                ProgressView(value: exportState.progress)
+                            } else if let analysisState = viewModel.analysisState {
+                                ProgressView(value: analysisState.progress)
+                            } else if viewModel.isInitialPreviewLoadBlocking {
+                                ProgressView(value: previewState.progress)
+                            } else {
+                                ProgressView()
+                            }
+                            Text(title)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(MotionaryTheme.textPrimary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+                            Text("Tap outside to stop")
+                                .font(.caption)
+                                .foregroundStyle(MotionaryTheme.textSecondary)
                         }
-                        Text(title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(MotionaryTheme.textPrimary)
-                        Text("Tap outside to stop")
-                            .font(.caption)
-                            .foregroundStyle(MotionaryTheme.textSecondary)
+                        .tint(MotionaryTheme.accent)
+                        .padding(18)
+                        .frame(
+                            width: min(max(geometry.size.width * 0.72, 236), 330)
+                        )
+                        .motionaryGlass(cornerRadius: 18)
                     }
-                    .tint(MotionaryTheme.accent)
-                    .padding(18)
-                    .motionaryGlass(cornerRadius: 18)
+                    .zIndex(1_000)
                 }
-                .zIndex(1_000)
             }
         }
         .task(id: busyKey) {
             showsOverlay = false
-            guard viewModel.isPerformingLongTask else { return }
-            try? await Task.sleep(nanoseconds: 650_000_000)
-            guard !Task.isCancelled, viewModel.isPerformingLongTask else { return }
+            guard viewModel.shouldPresentBusyOverlay else { return }
+            try? await Task.sleep(nanoseconds: overlayDelay)
+            guard !Task.isCancelled, viewModel.shouldPresentBusyOverlay else { return }
             showsOverlay = true
         }
     }
@@ -58,7 +74,52 @@ struct EditorBusyOverlay: View {
     private var busyKey: String {
         if exportState.isExporting { return "export" }
         if viewModel.isImporting { return "import" }
+        if let kind = viewModel.analysisState?.kind { return kind.rawValue }
+        if viewModel.isInitialPreviewLoadBlocking { return "preview" }
         return "idle"
+    }
+
+    private var overlayDelay: UInt64 {
+        viewModel.isInitialPreviewLoadBlocking ? 180_000_000 : 650_000_000
+    }
+}
+
+struct EditorCancelTaskPopover: View {
+    let title: String
+    let message: String
+    let onConfirm: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(MotionaryTheme.textPrimary)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(MotionaryTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                Button("Keep Waiting", action: onDismiss)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(MotionaryTheme.textPrimary)
+                    .frame(maxWidth: .infinity, minHeight: 34)
+                    .background(MotionaryTheme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .buttonStyle(.plain)
+
+                Button("Stop Task", role: .destructive, action: onConfirm)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 34)
+                    .background(Color.red, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .frame(width: 244)
+        .motionaryGlass(cornerRadius: 16)
+        .shadow(color: .black.opacity(0.24), radius: 18, y: 8)
     }
 }
 

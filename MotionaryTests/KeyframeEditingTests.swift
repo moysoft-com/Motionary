@@ -39,6 +39,51 @@ struct KeyframeEditingTests {
         #expect(eased.value(at: 0.5) < linear.value(at: 0.5))
     }
 
+    @Test func shortKeyframeSpansInterpolateConsistentlyAcrossDomains() throws {
+        let end = 0.000_1
+        let sample = end * 0.5
+        let scalar = AnimatableProperty(
+            baseValue: 0.0,
+            keyframes: [
+                Keyframe(time: 0, value: 0.0),
+                Keyframe(time: end, value: 1.0)
+            ]
+        )
+        let scale = AnimatableScale(
+            keyframes: [
+                Keyframe(time: 0, value: ScaleValue(x: 1, y: 2)),
+                Keyframe(time: end, value: ScaleValue(x: 3, y: 6))
+            ],
+            isLinked: false
+        )
+        let color = AnimatableColor(
+            baseValue: .black,
+            keyframes: [
+                Keyframe(time: 0, value: RGBAColor(red: 0, green: 0, blue: 0, alpha: 1)),
+                Keyframe(time: end, value: RGBAColor(red: 1, green: 0.5, blue: 0, alpha: 0.5))
+            ]
+        )
+        let effect = EffectParameterState(
+            baseValue: .point(EffectPoint(x: 0, y: 0)),
+            keyframes: [
+                Keyframe(time: 0, value: .point(EffectPoint(x: 0, y: 1))),
+                Keyframe(time: end, value: .point(EffectPoint(x: 1, y: 3)))
+            ]
+        )
+
+        #expect(abs(scalar.value(at: sample) - 0.5) < 0.0001)
+        let sampledScale = scale.value(at: sample)
+        #expect(abs(sampledScale.x - 2) < 0.0001)
+        #expect(abs(sampledScale.y - 4) < 0.0001)
+        let sampledColor = color.value(at: sample)
+        #expect(abs(sampledColor.red - 0.5) < 0.0001)
+        #expect(abs(sampledColor.green - 0.25) < 0.0001)
+        #expect(abs(sampledColor.alpha - 0.75) < 0.0001)
+        let sampledEffect = effect.value(at: sample)
+        #expect(abs((sampledEffect.component(.x) ?? -1) - 0.5) < 0.0001)
+        #expect(abs((sampledEffect.component(.y) ?? -1) - 2) < 0.0001)
+    }
+
     @Test func motionPresetsExposeExpectedControlPointsAndOvershoot() async throws {
         #expect(
             KeyframeCurvePreset.fast.interpolation
@@ -443,6 +488,101 @@ struct KeyframeEditingTests {
             #expect(abs(actual.x - expected.x) < 0.001)
             #expect(abs(actual.y - expected.y) < 0.001)
         }
+    }
+
+    @Test func scaleAxisEditPreservesOtherAxisOnlyKeyframes() async throws {
+        var scale = AnimatableScale(
+            baseValue: ScaleValue(x: 1, y: 1),
+            keyframes: [
+                Keyframe(time: 0, value: ScaleValue(x: 1, y: 10)),
+                Keyframe(time: 2, value: ScaleValue(x: 2, y: 20)),
+            ],
+            isLinked: false
+        )
+        let editedY = AnimatableProperty(
+            baseValue: 3.0,
+            keyframes: [
+                Keyframe(time: 1, value: 30.0)
+            ]
+        )
+
+        scale.setAxisProperty(editedY, axis: .y)
+
+        #expect(scale.keyframes.map(\.time) == [0, 1, 2])
+        #expect(scale.keyframes[0].value.x == 1)
+        #expect(scale.keyframes[1].value.y == 30)
+        #expect(scale.keyframes[2].value.x == 2)
+    }
+
+    @Test func textColorComponentEditPreservesOtherChannelKeyframes() async throws {
+        var color = AnimatableColor(
+            baseValue: RGBAColor(red: 0.1, green: 0.2, blue: 0.3, alpha: 1),
+            keyframes: [
+                Keyframe(
+                    time: 0,
+                    value: RGBAColor(red: 0.2, green: 0.3, blue: 0.4, alpha: 1)
+                ),
+                Keyframe(
+                    time: 2,
+                    value: RGBAColor(red: 0.8, green: 0.7, blue: 0.6, alpha: 1)
+                ),
+            ]
+        )
+        let editedAlpha = AnimatableProperty(
+            baseValue: 0.5,
+            keyframes: [
+                Keyframe(time: 1, value: 0.25)
+            ]
+        )
+
+        color.setComponentProperty(editedAlpha, component: .alpha)
+
+        #expect(color.keyframes.map(\.time) == [0, 1, 2])
+        #expect(abs(color.keyframes[0].value.red - 0.2) < 0.0001)
+        #expect(abs(color.keyframes[1].value.alpha - 0.25) < 0.0001)
+        #expect(abs(color.keyframes[2].value.blue - 0.6) < 0.0001)
+    }
+
+    @Test func effectComponentEditsPreserveOtherComponentKeyframes() async throws {
+        var pointState = EffectParameterState(
+            baseValue: .point(EffectPoint(x: 0, y: 0)),
+            keyframes: [
+                Keyframe(time: 0, value: .point(EffectPoint(x: 0, y: 1))),
+                Keyframe(time: 2, value: .point(EffectPoint(x: 2, y: 3))),
+            ]
+        )
+        pointState.setProperty(
+            AnimatableProperty(baseValue: 5.0, keyframes: [Keyframe(time: 1, value: 9.0)]),
+            for: .x
+        )
+
+        #expect(pointState.keyframes.map(\.time) == [0, 1, 2])
+        #expect(pointState.keyframes[0].value.component(.y) == 1)
+        #expect(pointState.keyframes[1].value.component(.x) == 9)
+        #expect(pointState.keyframes[2].value.component(.y) == 3)
+
+        var colorState = EffectParameterState(
+            baseValue: .color(RGBAColor(red: 0, green: 0, blue: 0, alpha: 1)),
+            keyframes: [
+                Keyframe(
+                    time: 0,
+                    value: .color(RGBAColor(red: 0.1, green: 0.2, blue: 0.3, alpha: 1))
+                ),
+                Keyframe(
+                    time: 2,
+                    value: .color(RGBAColor(red: 0.7, green: 0.6, blue: 0.5, alpha: 1))
+                ),
+            ]
+        )
+        colorState.setProperty(
+            AnimatableProperty(baseValue: 0.4, keyframes: [Keyframe(time: 1, value: 0.9)]),
+            for: .green
+        )
+
+        #expect(colorState.keyframes.map(\.time) == [0, 1, 2])
+        #expect(abs((colorState.keyframes[0].value.component(.red) ?? 0) - 0.1) < 0.0001)
+        #expect(abs((colorState.keyframes[1].value.component(.green) ?? 0) - 0.9) < 0.0001)
+        #expect(abs((colorState.keyframes[2].value.component(.blue) ?? 0) - 0.5) < 0.0001)
     }
 
     @MainActor

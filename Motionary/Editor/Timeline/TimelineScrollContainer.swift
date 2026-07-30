@@ -7,11 +7,21 @@ enum TimelineScrollContainerPullToAdd {
     static let threshold: CGFloat = 62
 }
 
+private final class TimelineUIScrollView: UIScrollView {
+    var onLayoutSubviews: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayoutSubviews?()
+    }
+}
+
 struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     @Binding var pixelsPerSecond: CGFloat
     @Binding var horizontalScrollOffset: CGFloat
     let currentTime: Double
     let duration: Double
+    let maximumTimelineTime: Double
     let contentRevision: Int
     let contentSize: CGSize
     let isScrollDisabled: Bool
@@ -30,6 +40,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         horizontalScrollOffset: Binding<CGFloat> = .constant(0),
         currentTime: Double,
         duration: Double,
+        maximumTimelineTime: Double? = nil,
         contentRevision: Int,
         contentSize: CGSize,
         isScrollDisabled: Bool,
@@ -47,6 +58,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         _horizontalScrollOffset = horizontalScrollOffset
         self.currentTime = currentTime
         self.duration = duration
+        self.maximumTimelineTime = min(max(maximumTimelineTime ?? duration, 0), max(duration, 0))
         self.contentRevision = contentRevision
         self.contentSize = contentSize
         self.isScrollDisabled = isScrollDisabled
@@ -66,7 +78,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+        let scrollView = TimelineUIScrollView()
         scrollView.delegate = context.coordinator
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
@@ -76,6 +88,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         scrollView.isDirectionalLockEnabled = !allowsVerticalScrolling
         scrollView.decelerationRate = .fast
         scrollView.backgroundColor = .clear
+        scrollView.panGestureRecognizer.maximumNumberOfTouches = 1
 
         let host = context.coordinator.hostingController
         host.view.backgroundColor = .clear
@@ -87,6 +100,10 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         pinch.delegate = context.coordinator
         scrollView.addGestureRecognizer(pinch)
         context.coordinator.pinchRecognizer = pinch
+        scrollView.onLayoutSubviews = { [weak scrollView, weak coordinator = context.coordinator] in
+            guard let scrollView, let coordinator else { return }
+            coordinator.synchronizeToCurrentTime(in: scrollView)
+        }
 
         return scrollView
     }
@@ -95,9 +112,16 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.updateAutoScroll(in: scrollView)
         context.coordinator.clampZoom(in: scrollView)
-        context.coordinator.updateHostedContentIfNeeded(content, contentSize: contentSize)
+        let hostedContentChanged = context.coordinator.updateHostedContentIfNeeded(
+            content,
+            contentSize: contentSize
+        )
         context.coordinator.hostingController.view.frame = CGRect(origin: .zero, size: contentSize)
-        scrollView.contentSize = contentSize
+        scrollView.contentSize = context.coordinator.scrollContentSize(
+            for: contentSize,
+            in: scrollView
+        )
+        scrollView.layoutIfNeeded()
         scrollView.isScrollEnabled = !isScrollDisabled
         scrollView.alwaysBounceVertical = allowsVerticalScrolling
         scrollView.isDirectionalLockEnabled = !allowsVerticalScrolling
@@ -106,7 +130,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         let activePixelsPerSecond = context.coordinator.parent.pixelsPerSecond
-        let maxX = max(contentSize.width - scrollView.bounds.width, 0)
+        let maxX = max(scrollView.contentSize.width - scrollView.bounds.width, 0)
         let targetX = min(max(CGFloat(currentTime) * activePixelsPerSecond, 0), maxX)
         let targetY = allowsVerticalScrolling
             ? min(
@@ -114,6 +138,13 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 max(contentSize.height - scrollView.bounds.height, 0)
             )
             : 0
+
+        if hostedContentChanged {
+            DispatchQueue.main.async { [weak scrollView, weak coordinator = context.coordinator] in
+                guard let scrollView, let coordinator else { return }
+                coordinator.synchronizeToCurrentTime(in: scrollView)
+            }
+        }
 
         guard !context.coordinator.isUserInteracting else { return }
         guard abs(scrollView.contentOffset.x - targetX) > 0.01 || abs(scrollView.contentOffset.y - targetY) > 0.01 else {
@@ -133,17 +164,20 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         var pinchAnchorTime: Double = 0
         var isProgrammaticScroll = false
         var isUserInteracting = false
+        private var isPinching = false
+        private var isApplyingPinchScale = false
         private var hostedContentRevision: Int
         private var hostedContentSize: CGSize
         private var hostedPixelsPerSecond: CGFloat
         private var isPullToAddArmed = false
         private let maximumPixelsPerSecond: CGFloat = 280
-        private var lastScrubCallbackTime: CFAbsoluteTime = 0
         private var pendingHorizontalScrollOffset: CGFloat?
         private var isHorizontalScrollOffsetUpdateScheduled = false
         private weak var scrollView: UIScrollView?
         private var autoScrollDisplayLink: CADisplayLink?
         private var lastAutoScrollTimestamp: CFTimeInterval?
+        private var scrubDisplayLink: CADisplayLink?
+        private var pendingScrubTime: Double?
 
         init(parent: TimelineScrollContainer) {
             self.parent = parent
@@ -155,6 +189,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
         deinit {
             autoScrollDisplayLink?.invalidate()
+            scrubDisplayLink?.invalidate()
         }
 
         func updateAutoScroll(in scrollView: UIScrollView) {
@@ -218,15 +253,45 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             parent.onAutoScroll(delta)
         }
 
-        func updateHostedContentIfNeeded(_ content: Content, contentSize: CGSize) {
+        @discardableResult
+        func updateHostedContentIfNeeded(_ content: Content, contentSize: CGSize) -> Bool {
             let zoomChanged = abs(hostedPixelsPerSecond - parent.pixelsPerSecond) > 0.1
             guard hostedContentRevision != parent.contentRevision || hostedContentSize != contentSize || zoomChanged
-            else { return }
+            else { return false }
 
             hostingController.rootView = content
             hostedContentRevision = parent.contentRevision
             hostedContentSize = contentSize
             hostedPixelsPerSecond = parent.pixelsPerSecond
+            return true
+        }
+
+        func synchronizeToCurrentTime(in scrollView: UIScrollView) {
+            guard !isUserInteracting else { return }
+            let resolvedContentSize = scrollContentSize(
+                for: parent.contentSize,
+                in: scrollView
+            )
+            if abs(scrollView.contentSize.width - resolvedContentSize.width) > 0.01
+                || abs(scrollView.contentSize.height - resolvedContentSize.height) > 0.01
+            {
+                scrollView.contentSize = resolvedContentSize
+            }
+            let maxX = max(scrollView.contentSize.width - scrollView.bounds.width, 0)
+            let targetX = min(
+                max(CGFloat(parent.currentTime) * parent.pixelsPerSecond, 0),
+                maxX
+            )
+            let targetY = parent.allowsVerticalScrolling
+                ? min(scrollView.contentOffset.y, max(scrollView.contentSize.height - scrollView.bounds.height, 0))
+                : 0
+            guard abs(scrollView.contentOffset.x - targetX) > 0.01
+                || abs(scrollView.contentOffset.y - targetY) > 0.01
+            else { return }
+            isProgrammaticScroll = true
+            scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
+            isProgrammaticScroll = false
+            publishHorizontalScrollOffset(targetX, immediately: true)
         }
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -235,7 +300,12 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            scheduleHorizontalScrollOffsetUpdate(scrollView.contentOffset.x)
+            if !isApplyingPinchScale {
+                publishHorizontalScrollOffset(
+                    scrollView.contentOffset.x,
+                    immediately: pinchRecognizer?.state == .began || pinchRecognizer?.state == .changed
+                )
+            }
 
             if !parent.allowsVerticalScrolling, abs(scrollView.contentOffset.y) > 0.5 {
                 isProgrammaticScroll = true
@@ -263,14 +333,25 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 parent.onPullToAddChanged(0)
             }
 
+            guard !isPinching else { return }
             guard !isProgrammaticScroll, isUserInteracting || scrollView.isDragging || scrollView.isDecelerating else {
                 return
             }
-            let time = min(max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0), parent.duration)
+            let time = min(
+                max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0),
+                parent.maximumTimelineTime
+            )
             emitScrubTime(time)
         }
 
-        private func scheduleHorizontalScrollOffsetUpdate(_ offset: CGFloat) {
+        private func publishHorizontalScrollOffset(_ offset: CGFloat, immediately: Bool = false) {
+            if immediately {
+                pendingHorizontalScrollOffset = nil
+                guard abs(parent.horizontalScrollOffset - offset) > 0.01 else { return }
+                parent.horizontalScrollOffset = offset
+                return
+            }
+
             pendingHorizontalScrollOffset = offset
             guard !isHorizontalScrollOffsetUpdateScheduled else { return }
             isHorizontalScrollOffsetUpdateScheduled = true
@@ -286,6 +367,27 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         private func emitScrubTime(_ time: Double) {
+            pendingScrubTime = time
+            guard scrubDisplayLink == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(flushPendingScrubTime))
+            let frameRate = preferredScrubFrameRate()
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: Float(frameRate),
+                maximum: Float(frameRate),
+                preferred: Float(frameRate)
+            )
+            link.add(to: .main, forMode: .common)
+            scrubDisplayLink = link
+        }
+
+        @objc private func flushPendingScrubTime() {
+            guard isUserInteracting || pendingScrubTime != nil else {
+                scrubDisplayLink?.invalidate()
+                scrubDisplayLink = nil
+                return
+            }
+            guard let time = pendingScrubTime else { return }
+            pendingScrubTime = nil
             parent.onScrubChanged(time)
         }
 
@@ -309,10 +411,23 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private func finishScrub(_ scrollView: UIScrollView) {
             isPullToAddArmed = false
             parent.onPullToAddChanged(0)
-            let time = min(max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0), parent.duration)
-            lastScrubCallbackTime = 0
+            let time = min(
+                max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0),
+                parent.maximumTimelineTime
+            )
+            if pendingScrubTime != nil {
+                self.pendingScrubTime = nil
+                parent.onScrubChanged(time)
+            }
+            scrubDisplayLink?.invalidate()
+            scrubDisplayLink = nil
             parent.onScrubEnd(time)
             isUserInteracting = false
+        }
+
+        private func preferredScrubFrameRate() -> Int {
+            let native = scrollView?.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+            return max(native, 1)
         }
 
         @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
@@ -320,21 +435,18 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
             switch recognizer.state {
             case .began:
+                isPinching = true
                 isUserInteracting = true
-                parent.onScrubStart()
                 pinchStartPixelsPerSecond = parent.pixelsPerSecond
-                pinchAnchorTime = Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1))
+                pinchAnchorTime = min(
+                    max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0),
+                    parent.maximumTimelineTime
+                )
             case .changed:
-                parent.pixelsPerSecond = clampedPixelsPerSecond(
-                    pinchStartPixelsPerSecond * recognizer.scale, in: scrollView)
-                keepPinchAnchorCentered(in: scrollView)
+                applyPinchScale(recognizer.scale, in: scrollView)
             case .ended, .cancelled, .failed:
-                parent.pixelsPerSecond = clampedPixelsPerSecond(
-                    pinchStartPixelsPerSecond * recognizer.scale, in: scrollView)
-                keepPinchAnchorCentered(in: scrollView)
-                let time = min(
-                    max(Double(scrollView.contentOffset.x / max(parent.pixelsPerSecond, 1)), 0), parent.duration)
-                parent.onScrubEnd(time)
+                applyPinchScale(recognizer.scale, in: scrollView)
+                isPinching = false
                 isUserInteracting = false
             default:
                 break
@@ -355,11 +467,46 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             4
         }
 
-        private func keepPinchAnchorCentered(in scrollView: UIScrollView) {
-            let targetX = CGFloat(pinchAnchorTime) * parent.pixelsPerSecond
-            let maxX = max(parent.contentSize.width - scrollView.bounds.width, 0)
+        func scrollContentSize(
+            for hostedContentSize: CGSize,
+            in scrollView: UIScrollView
+        ) -> CGSize {
+            var size = hostedContentSize
+            let playableWidth = CGFloat(parent.maximumTimelineTime) * parent.pixelsPerSecond
+                + scrollView.bounds.width
+            size.width = min(hostedContentSize.width, max(playableWidth, scrollView.bounds.width))
+            return size
+        }
+
+        @discardableResult
+        private func applyPinchScale(_ scale: CGFloat, in scrollView: UIScrollView) -> CGFloat {
+            isApplyingPinchScale = true
+            defer { isApplyingPinchScale = false }
+            let pixelsPerSecond = clampedPixelsPerSecond(
+                pinchStartPixelsPerSecond * scale,
+                in: scrollView
+            )
+            parent.pixelsPerSecond = pixelsPerSecond
+            keepPinchAnchorCentered(pixelsPerSecond: pixelsPerSecond, in: scrollView)
+            return pixelsPerSecond
+        }
+
+        private func keepPinchAnchorCentered(
+            pixelsPerSecond: CGFloat,
+            in scrollView: UIScrollView
+        ) {
+            let targetX = CGFloat(pinchAnchorTime) * pixelsPerSecond
+            // `parent.contentSize` is updated by SwiftUI on the next render pass. During a
+            // pinch it therefore still describes the previous scale. Derive the horizontal
+            // range from the new scale immediately so the playhead cannot be clamped backward
+            // at the end of the timeline.
+            let maxX = max(CGFloat(parent.maximumTimelineTime) * pixelsPerSecond, 0)
             let clampedX = min(max(targetX, 0), maxX)
+            let zoomedContentWidth = maxX + scrollView.bounds.width
             isProgrammaticScroll = true
+            if abs(scrollView.contentSize.width - zoomedContentWidth) > 0.01 {
+                scrollView.contentSize.width = zoomedContentWidth
+            }
             scrollView.setContentOffset(
                 CGPoint(
                     x: clampedX,
@@ -368,15 +515,14 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 animated: false
             )
             isProgrammaticScroll = false
-            let time = min(max(Double(clampedX / max(parent.pixelsPerSecond, 1)), 0), parent.duration)
-            emitScrubTime(time)
+            publishHorizontalScrollOffset(clampedX, immediately: true)
         }
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
-            otherGestureRecognizer is UIPanGestureRecognizer
+            false
         }
     }
 }

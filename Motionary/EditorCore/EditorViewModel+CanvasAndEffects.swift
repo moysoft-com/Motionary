@@ -159,13 +159,17 @@ extension EditorViewModel {
         }
     }
 
-    func finishInteractiveEdit(rebuild: Bool = true) {
-        cancelInteractivePreviewRebuild()
+    func finishInteractiveEdit(
+        rebuild: Bool = true,
+        delayRebuild: Bool = true,
+        preserveLivePreviewRefresh: Bool = false
+    ) {
+        cancelInteractivePreviewRebuild(cancelLivePreviewRefresh: !preserveLivePreviewRefresh)
         setPreviewQualityForInteraction(false)
         guard let snapshot = interactiveEditSnapshot else {
             persist()
             if rebuild {
-                schedulePreviewRebuild(seekTo: currentTime)
+                schedulePreviewRebuild(seekTo: currentTime, delay: delayRebuild)
             }
             return
         }
@@ -185,9 +189,13 @@ extension EditorViewModel {
         updateHistoryFlags()
         project.updatedAt = Date()
         persist()
+        if rebuild, prepareSelectedBackgroundRemovalExtensionIfNeeded() {
+            return
+        }
         if rebuild {
             schedulePreviewRebuild(
                 seekTo: currentTime,
+                delay: delayRebuild,
                 invalidation: renderInvalidation
             )
         }

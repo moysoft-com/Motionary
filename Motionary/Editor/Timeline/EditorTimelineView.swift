@@ -50,14 +50,9 @@ struct CoreTimelineLayout: View {
     let rowSpacing: CGFloat
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topLeading) {
             timelineScroll
-            TimelineRulerOverlay(
-                viewModel: viewModel,
-                playbackState: playbackState,
-                pixelsPerSecond: pixelsPerSecond,
-                size: size
-            )
+            rulerOverlay
             playhead
             pullToAddIndicator
         }
@@ -82,6 +77,9 @@ struct CoreTimelineLayout: View {
     }
 
     private var centerPadding: CGFloat { size.width / 2 }
+    private var visibleTime: Double {
+        viewModel.isPlaying ? displayTime : playbackState.currentTime
+    }
     private var duration: Double { max(viewModel.duration, 0.1) }
     private var contentWidth: CGFloat { max(CGFloat(viewModel.duration) * pixelsPerSecond, 0) + centerPadding * 2 }
     private var rowCount: Int { max(viewModel.project.tracks.count, 1) }
@@ -92,8 +90,9 @@ struct CoreTimelineLayout: View {
         TimelineScrollContainer(
             pixelsPerSecond: $pixelsPerSecond,
             horizontalScrollOffset: $horizontalScrollOffset,
-            currentTime: displayTime,
+            currentTime: visibleTime,
             duration: viewModel.duration,
+            maximumTimelineTime: viewModel.lastPlayableTime,
             contentRevision: timelineContentRevision,
             contentSize: CGSize(width: contentWidth, height: max(contentHeight, size.height)),
             isScrollDisabled: activeClipDrag != nil || activeTrackDrag != nil,
@@ -131,13 +130,24 @@ struct CoreTimelineLayout: View {
                 clipDragScrollOffset: clipDragScrollOffset
             )
         }
+        .onChange(of: activeClipDrag?.clipID) { _, _ in
+            clipDragScrollOffset = .zero
+        }
         .mask(alignment: .bottom) {
             Rectangle()
                 .frame(height: max(size.height - 38, 0))
         }
-        .onChange(of: activeClipDrag?.clipID) { _, _ in
-            clipDragScrollOffset = .zero
-        }
+    }
+
+    private var rulerOverlay: some View {
+        TimelineRulerOverlay(
+            duration: viewModel.duration,
+            currentTime: visibleTime,
+            maximumTimelineTime: viewModel.lastPlayableTime,
+            pixelsPerSecond: pixelsPerSecond,
+            centerPadding: centerPadding,
+            width: size.width
+        )
     }
 
     private var timelineContentRevision: Int {
@@ -190,41 +200,38 @@ struct CoreTimelineLayout: View {
 }
 
 private struct TimelineRulerOverlay: View {
-    @ObservedObject var viewModel: EditorViewModel
-    @ObservedObject var playbackState: PlaybackState
+    let duration: Double
+    let currentTime: Double
+    let maximumTimelineTime: Double
     let pixelsPerSecond: CGFloat
-    let size: CGSize
-    @State private var displayTime: Double = 0
+    let centerPadding: CGFloat
+    let width: CGFloat
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        VStack(spacing: 0) {
-            FixedTimelineRuler(
-                duration: viewModel.duration,
-                currentTime: displayTime,
-                pixelsPerSecond: pixelsPerSecond
-            )
-            .frame(height: 30)
-            .allowsHitTesting(false)
+        let safePixelsPerSecond = max(pixelsPerSecond, 1)
+        let rulerContentWidth = max(
+            CGFloat(max(duration, 4)) * safePixelsPerSecond + centerPadding * 2,
+            width
+        )
+        let clampedTime = min(max(currentTime, 0), max(maximumTimelineTime, 0))
 
-            Spacer(minLength: 0)
-        }
-        .frame(width: size.width, height: size.height, alignment: .top)
+        EmbeddedTimelineRuler(
+            duration: duration,
+            pixelsPerSecond: safePixelsPerSecond,
+            centerPadding: centerPadding
+        )
+        .frame(width: rulerContentWidth, height: 30, alignment: .topLeading)
+        .offset(x: pixelAligned(-CGFloat(clampedTime) * safePixelsPerSecond), y: 0)
+        .frame(width: width, height: 30, alignment: .topLeading)
+        .clipped()
         .allowsHitTesting(false)
-        .background {
-            TimelineDisplayLink(
-                player: viewModel.player,
-                isPlaying: viewModel.isPlaying
-            ) { time in
-                displayTime = min(max(time, 0), max(viewModel.duration, 0))
-            }
-        }
-        .onAppear {
-            displayTime = viewModel.currentTime
-        }
-        .onChange(of: playbackState.currentTime) { _, time in
-            guard !viewModel.isPlaying else { return }
-            displayTime = time
-        }
+        .transaction { $0.animation = nil }
+    }
+
+    private func pixelAligned(_ value: CGFloat) -> CGFloat {
+        let scale = max(displayScale, 1)
+        return (value * scale).rounded() / scale
     }
 }
 
@@ -246,6 +253,9 @@ struct TimelineDisplayLink: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.screenMaximumFrameRate =
+            uiView.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+        context.coordinator.updateFrameRate()
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
@@ -255,6 +265,7 @@ struct TimelineDisplayLink: UIViewRepresentable {
     final class Coordinator {
         var parent: TimelineDisplayLink
         private var displayLink: CADisplayLink?
+        var screenMaximumFrameRate = 60
 
         init(parent: TimelineDisplayLink) {
             self.parent = parent
@@ -263,9 +274,14 @@ struct TimelineDisplayLink: UIViewRepresentable {
         func start() {
             guard displayLink == nil else { return }
             let link = CADisplayLink(target: self, selector: #selector(handleFrame))
-            link.preferredFrameRateRange = .default
+            configure(link)
             link.add(to: .main, forMode: .common)
             displayLink = link
+        }
+
+        func updateFrameRate() {
+            guard let displayLink else { return }
+            configure(displayLink)
         }
 
         func stop() {
@@ -278,6 +294,15 @@ struct TimelineDisplayLink: UIViewRepresentable {
             let time = CMTimeGetSeconds(player.currentTime())
             guard time.isFinite else { return }
             parent.onFrame(time)
+        }
+
+        private func configure(_ link: CADisplayLink) {
+            let native = max(screenMaximumFrameRate, 1)
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: Float(native),
+                maximum: Float(native),
+                preferred: Float(native)
+            )
         }
     }
 }

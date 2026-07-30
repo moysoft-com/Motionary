@@ -61,13 +61,17 @@ extension EditorViewModel {
         }
     }
 
-    func hasKeyframes(in section: KeyframeSection, clip: TimelineClip? = nil) -> Bool {
+    func hasKeyframes(
+        in section: KeyframeSection,
+        clip: TimelineClip? = nil,
+        effectID: UUID? = nil
+    ) -> Bool {
         if clip == nil, selectedTextItem != nil {
             return textHasKeyframes(in: section)
         }
         guard let clip = clip ?? selectedClip else { return false }
         let duration = timelinePlacementDuration(for: clip)
-        return clip.keyframeTimes(in: section).contains {
+        return clip.keyframeTimes(in: section, effectID: effectID).contains {
             $0 >= -0.000_001 && $0 <= duration + 0.000_001
         }
     }
@@ -116,7 +120,10 @@ extension EditorViewModel {
         }
     }
 
-    func candidateGraphSegment(in section: KeyframeSection) -> KeyframeSegment? {
+    func candidateGraphSegment(
+        in section: KeyframeSection,
+        effectID: UUID? = nil
+    ) -> KeyframeSegment? {
         if section == .speed {
             return nil
         }
@@ -132,17 +139,19 @@ extension EditorViewModel {
         return graphSegmentCandidate(
             in: section,
             clip: clip,
-            localTime: currentTime - clip.timelineStart
+            localTime: currentTime - clip.timelineStart,
+            effectID: effectID ?? activeKeyframeTarget?.effectID
         )
     }
 
     private func graphSegmentCandidate(
         in section: KeyframeSection,
         clip: TimelineClip,
-        localTime: Double
+        localTime: Double,
+        effectID: UUID? = nil
     ) -> KeyframeSegment? {
         let placementDuration = timelinePlacementDuration(for: clip)
-        let times = clip.keyframeTimes(in: section).filter {
+        let times = clip.keyframeTimes(in: section, effectID: effectID).filter {
             $0 >= -0.000_001 && $0 <= placementDuration + 0.000_001
         }
         guard times.count >= 2 else { return nil }
@@ -162,7 +171,7 @@ extension EditorViewModel {
         let startTime = times[leftIndex]
         let endTime = times[leftIndex + 1]
         let interpolation =
-            clip.keyframeTargets(in: section).lazy.compactMap { target in
+            clip.keyframeTargets(in: section, effectID: effectID).lazy.compactMap { target in
                 clip.animatableProperty(for: target)?.keyframes.first {
                     abs($0.time - startTime) <= self.keyframeTimeTolerance
                 }?.interpolation
@@ -171,22 +180,23 @@ extension EditorViewModel {
         return KeyframeSegment(
             clipID: clip.id,
             section: section,
+            effectID: effectID,
             startTime: startTime,
             endTime: endTime,
             interpolation: interpolation
         )
     }
 
-    func openCandidateGraphSegment(in section: KeyframeSection) {
-        guard let segment = candidateGraphSegment(in: section) else { return }
+    func openCandidateGraphSegment(in section: KeyframeSection, effectID: UUID? = nil) {
+        guard let segment = candidateGraphSegment(in: section, effectID: effectID) else { return }
         graphSegment = segment
         displayedGraphSegment = segment
         activeKeyframeTarget = nil
         selectedKeyframeID = nil
     }
 
-    func selectGraphSegment(atPlayheadIn section: KeyframeSection) {
-        graphSegment = candidateGraphSegment(in: section)
+    func selectGraphSegment(atPlayheadIn section: KeyframeSection, effectID: UUID? = nil) {
+        graphSegment = candidateGraphSegment(in: section, effectID: effectID)
         if let graphSegment {
             displayedGraphSegment = graphSegment
         }
@@ -215,7 +225,8 @@ extension EditorViewModel {
         graphSegment = graphSegmentCandidate(
             in: segment.section,
             clip: clip,
-            localTime: currentTime - clip.timelineStart
+            localTime: currentTime - clip.timelineStart,
+            effectID: segment.effectID
         )
         if let graphSegment {
             displayedGraphSegment = graphSegment
@@ -253,10 +264,11 @@ extension EditorViewModel {
                 clip: clip
             )
             let section = clip.keyframeSection(for: target)
-            if self.hasKeyframes(in: section, clip: clip) {
+            if self.hasKeyframes(in: section, clip: clip, effectID: target.effectID) {
                 self.insertSectionKeyframe(
                     at: localTime,
                     section: section,
+                    effectID: target.effectID,
                     into: &clip
                 )
             }
@@ -283,7 +295,7 @@ extension EditorViewModel {
             clip.setAnimatableProperty(property, for: target)
         }
         if interactive {
-            schedulePreviewRebuild(seekTo: currentTime)
+            scheduleInteractivePreviewRebuild(invalidation: interactiveInvalidation(for: target))
         }
         refreshGraphSegment()
     }
@@ -346,7 +358,8 @@ extension EditorViewModel {
                 self.currentTime - clip.timelineStart,
                 clip: clip
             )
-            let targets = clip.keyframeTargets(in: section)
+            let effectID = self.activeKeyframeTarget?.effectID
+            let targets = clip.keyframeTargets(in: section, effectID: effectID)
             let hasMarker = targets.contains { target in
                 clip.animatableProperty(for: target)?.keyframeIndex(
                     at: time,
@@ -358,6 +371,7 @@ extension EditorViewModel {
                 self.removeSectionKeyframe(
                     at: time,
                     section: section,
+                    effectID: effectID,
                     from: &clip
                 )
                 self.selectedKeyframeID = nil
@@ -365,6 +379,7 @@ extension EditorViewModel {
                 self.insertSectionKeyframe(
                     at: time,
                     section: section,
+                    effectID: effectID,
                     into: &clip
                 )
                 let preferredTarget =
@@ -436,7 +451,7 @@ extension EditorViewModel {
             clip.setAnimatableProperty(property, for: target)
         }
         if interactive {
-            schedulePreviewRebuild(seekTo: currentTime)
+            scheduleInteractivePreviewRebuild(invalidation: interactiveInvalidation(for: target))
         }
         refreshGraphSegment()
     }
@@ -487,7 +502,7 @@ extension EditorViewModel {
             touchUpdatedAt: !interactive,
             refreshTimeline: true
         ) { clip in
-            let targets = clip.keyframeTargets(in: section)
+            let targets = clip.keyframeTargets(in: section, effectID: graphSegment?.effectID)
             if targets.contains(where: \.isScaleTarget),
                 let index = clip.transform.scale.keyframes.firstIndex(
                     where: {
@@ -510,7 +525,9 @@ extension EditorViewModel {
             }
         }
         if interactive {
-            schedulePreviewRebuild(seekTo: currentTime)
+            scheduleInteractivePreviewRebuild(
+                invalidation: section == .audio ? [.audioMix] : [.previewFrame]
+            )
         }
         refreshGraphSegment()
     }
@@ -536,12 +553,54 @@ extension EditorViewModel {
         seek(to: clip.timelineStart + frame.time)
     }
 
-    func addEffect(_ kind: ClipEffectKind) {
+    @discardableResult
+    func addEffect(moduleID: EffectModuleID) -> UUID? {
+        var addedEffectID: UUID?
         updateSelectedClip { clip in
             guard clip.mediaType != .audio else { return }
-            let effect = ClipEffect(kind: kind)
+            guard let effect = EffectRegistry.shared.makeEffect(moduleID: moduleID) else { return }
             clip.effectStack.effects.append(effect)
-            self.activeKeyframeTarget = .effectIntensity(effect.id)
+            addedEffectID = effect.id
+            self.activeKeyframeTarget = .effectMix(effect.id)
+        }
+        return addedEffectID
+    }
+
+    func toggleEffectKeyframe(_ effectID: UUID) {
+        activeKeyframeTarget = .effectMix(effectID)
+        updateSelectedClip { clip in
+            let time = self.snappedKeyframeTime(
+                self.currentTime - clip.timelineStart,
+                clip: clip
+            )
+            let targets = clip.keyframeTargets(in: .effects, effectID: effectID)
+            let hasMarker = targets.contains { target in
+                clip.animatableProperty(for: target)?.keyframeIndex(
+                    at: time,
+                    tolerance: self.keyframeTimeTolerance
+                ) != nil
+            }
+
+            if hasMarker {
+                self.removeSectionKeyframe(
+                    at: time,
+                    section: .effects,
+                    effectID: effectID,
+                    from: &clip
+                )
+                self.selectedKeyframeID = nil
+            } else {
+                self.insertSectionKeyframe(
+                    at: time,
+                    section: .effects,
+                    effectID: effectID,
+                    into: &clip
+                )
+                self.selectedKeyframeID = clip.animatableProperty(for: .effectMix(effectID))?
+                    .keyframes.first {
+                        abs($0.time - time) <= self.keyframeTimeTolerance
+                    }?.id
+            }
         }
     }
 
@@ -555,7 +614,7 @@ extension EditorViewModel {
     func removeEffect(_ effectID: UUID) {
         updateSelectedClip { clip in
             clip.effectStack.effects.removeAll { $0.id == effectID }
-            if self.activeKeyframeTarget == .effectIntensity(effectID) {
+            if self.activeKeyframeTarget?.effectID == effectID {
                 self.activeKeyframeTarget = clip.availableKeyframeTargets.first
                 self.selectedKeyframeID = nil
             }
@@ -610,10 +669,11 @@ extension EditorViewModel {
                 clip: clip
             )
             let section = clip.keyframeSection(for: target)
-            if self.hasKeyframes(in: section, clip: clip) {
+            if self.hasKeyframes(in: section, clip: clip, effectID: target.effectID) {
                 self.insertSectionKeyframe(
                     at: localTime,
                     section: section,
+                    effectID: target.effectID,
                     into: &clip
                 )
             }
@@ -654,16 +714,21 @@ extension EditorViewModel {
         }
 
         if interactive {
-            schedulePreviewRebuild(seekTo: currentTime)
+            scheduleInteractivePreviewRebuild(invalidation: [.previewFrame])
         }
+    }
+
+    private func interactiveInvalidation(for target: KeyframeTarget) -> EditorInvalidation {
+        target == .volume ? [.audioMix] : [.previewFrame]
     }
 
     private func insertSectionKeyframe(
         at time: Double,
         section: KeyframeSection,
+        effectID: UUID? = nil,
         into clip: inout TimelineClip
     ) {
-        let targets = clip.keyframeTargets(in: section)
+        let targets = clip.keyframeTargets(in: section, effectID: effectID)
         if targets.contains(where: \.isScaleTarget) {
             _ = clip.transform.scale.setKeyframe(
                 at: time,
@@ -685,9 +750,10 @@ extension EditorViewModel {
     private func removeSectionKeyframe(
         at time: Double,
         section: KeyframeSection,
+        effectID: UUID? = nil,
         from clip: inout TimelineClip
     ) {
-        let targets = clip.keyframeTargets(in: section)
+        let targets = clip.keyframeTargets(in: section, effectID: effectID)
         if targets.contains(where: \.isScaleTarget) {
             _ = clip.transform.scale.removeKeyframe(
                 at: time,

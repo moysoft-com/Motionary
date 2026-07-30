@@ -26,21 +26,18 @@ struct SpeedWorkspaceView: View {
                             isEnabled: isEnabled
                         )
 
-                        Toggle(
-                            "Pitch follows speed",
-                            isOn: Binding(
-                                get: { media.pitchFollowsSpeed },
-                                set: { viewModel.setSelectedPitchFollowsSpeed($0) }
-                            )
+                        EditorWorkspaceOnOffControl(
+                            title: "Pitch follows speed",
+                            isOn: media.pitchFollowsSpeed,
+                            isEnabled: isEnabled,
+                            onChange: viewModel.setSelectedPitchFollowsSpeed
                         )
-                        .font(.callout.weight(.medium))
-                        .tint(MotionaryTheme.accent)
-                        .disabled(!isEnabled)
 
-                        Toggle("Ripple following clips", isOn: $viewModel.isRippleEditingEnabled)
-                            .font(.callout.weight(.medium))
-                            .tint(MotionaryTheme.accent)
-                            .disabled(!isEnabled)
+                        EditorWorkspaceOnOffControl(
+                            title: "Ripple following clips",
+                            isOn: viewModel.isRippleEditingEnabled,
+                            isEnabled: isEnabled
+                        ) { viewModel.isRippleEditingEnabled = $0 }
 
                         Text(
                             viewModel.isRippleEditingEnabled
@@ -117,89 +114,287 @@ struct MaskWorkspaceView: View {
             viewModel: viewModel,
             item: item,
             title: "Mask",
-            systemImage: "circle.lefthalf.filled"
+            systemImage: "circle.dashed"
         ) { item, isEnabled in
             if let visuals = item.editableVisuals, supportsMask(item) {
                 let mask = visuals.mask
+                let unitSpace = maskUnitSpace(for: item)
                 VStack(spacing: 14) {
-                    Toggle(
-                        "Enable mask",
-                        isOn: Binding(
-                            get: { mask != nil },
-                            set: { viewModel.setSelectedMaskEnabled($0) }
-                        )
-                    )
-                    .font(.callout.weight(.medium))
-                    .tint(MotionaryTheme.accent)
-                    .disabled(!isEnabled)
+                    EditorWorkspaceSection(title: "Preset") {
+                        EditorWorkspaceHorizontalStrip {
+                            ForEach(MaskPreset.allCases) { preset in
+                                presetButton(
+                                    preset,
+                                    mask: mask,
+                                    unitSpace: unitSpace,
+                                    isEnabled: isEnabled
+                                )
+                            }
+                        }
+                    }
 
                     if let mask {
-                        Picker(
-                            "Shape",
-                            selection: Binding(
-                                get: { mask.shape },
-                                set: { viewModel.setSelectedMaskShape($0) }
+                        if mask.shape != .bar && mask.shape != .split {
+                            maskScrubber(
+                                title: "Width",
+                                value: mask.widthScale * unitSpace.width,
+                                range: 0...unitSpace.width,
+                                update: {
+                                    viewModel.setSelectedMaskSize(
+                                        widthScale: $0 / max(unitSpace.width, 0.000_001),
+                                        interactive: true
+                                    )
+                                }
                             )
-                        ) {
-                            Label("Rectangle", systemImage: "rectangle").tag(ItemMask.Shape.rectangle)
-                            Label("Ellipse", systemImage: "circle").tag(ItemMask.Shape.ellipse)
+                            .disabled(!isEnabled)
                         }
-                        .pickerStyle(.segmented)
-                        .disabled(!isEnabled)
-
+                        if mask.shape != .split {
+                            maskScrubber(
+                                title: mask.shape == .bar ? "Thickness" : "Height",
+                                value: mask.heightScale * unitSpace.height,
+                                range: 0...unitSpace.height,
+                                update: {
+                                    viewModel.setSelectedMaskSize(
+                                        heightScale: $0 / max(unitSpace.height, 0.000_001),
+                                        interactive: true
+                                    )
+                                }
+                            )
+                            .disabled(!isEnabled)
+                        }
+                        if mask.shape != .ellipse && mask.shape != .heart
+                            && mask.shape != .bar && mask.shape != .split
+                        {
+                            let maximumRoundness = min(unitSpace.width, unitSpace.height) * 0.5
+                            maskScrubber(
+                                title: "Roundness",
+                                value: mask.roundnessScale * maximumRoundness,
+                                range: 0...maximumRoundness,
+                                update: {
+                                    viewModel.setSelectedMaskGeometry(
+                                        roundnessScale: $0 / max(maximumRoundness, 0.000_001),
+                                        interactive: true
+                                    )
+                                }
+                            )
+                            .disabled(!isEnabled)
+                        }
+                        if mask.shape == .bar || mask.shape == .split {
+                            let maximumOffset = unitSpace.height * 0.5
+                            maskScrubber(
+                                title: "Offset",
+                                value: mask.offsetScale * maximumOffset,
+                                range: -maximumOffset...maximumOffset,
+                                update: {
+                                    viewModel.setSelectedMaskGeometry(
+                                        offsetScale: $0 / max(maximumOffset, 0.000_001),
+                                        interactive: true
+                                    )
+                                }
+                            )
+                            .disabled(!isEnabled)
+                        }
                         maskScrubber(
-                            title: "Horizontal inset",
-                            value: mask.insetX,
-                            range: 0...0.48,
-                            update: { viewModel.setSelectedMaskInsets(horizontal: $0, interactive: true) }
-                        )
-                        .disabled(!isEnabled)
-                        maskScrubber(
-                            title: "Vertical inset",
-                            value: mask.insetY,
-                            range: 0...0.48,
-                            update: { viewModel.setSelectedMaskInsets(vertical: $0, interactive: true) }
+                            title: "Rotation",
+                            value: mask.rotationDegrees,
+                            range: -180...180,
+                            systemImage: "rotate.right",
+                            format: { "\(Int($0.rounded()))°" },
+                            update: {
+                                viewModel.setSelectedMaskGeometry(
+                                    rotationDegrees: $0,
+                                    interactive: true
+                                )
+                            }
                         )
                         .disabled(!isEnabled)
                         maskScrubber(
                             title: "Feather",
-                            value: mask.feather,
-                            range: 0...0.25,
-                            update: { viewModel.setSelectedMaskInsets(feather: $0, interactive: true) }
+                            value: mask.featherScale * EditorUnitSpace.referenceUnits,
+                            range: 0...min(unitSpace.width, unitSpace.height),
+                            update: {
+                                viewModel.setSelectedMaskSize(
+                                    featherScale: $0 / EditorUnitSpace.referenceUnits,
+                                    interactive: true
+                                )
+                            }
                         )
                         .disabled(!isEnabled)
+                        EditorWorkspaceOnOffControl(
+                            title: "Invert",
+                            isOn: mask.isInverted,
+                            isEnabled: isEnabled
+                        ) {
+                            viewModel.setSelectedMaskGeometry(isInverted: $0)
+                        }
                     }
                 }
             } else {
                 EditorWorkspaceMessage(
                     text: "Masks are available for visual media, shapes, and text.",
-                    systemImage: "circle.lefthalf.filled"
+                    systemImage: "circle.dashed"
                 )
             }
         }
     }
 
-    private func percent(_ value: Double) -> String {
-        "\(Int((value * 100).rounded()))%"
+    private func presetButton(
+        _ preset: MaskPreset,
+        mask: ItemMask?,
+        unitSpace: EditorUnitSpace,
+        isEnabled: Bool
+    ) -> some View {
+        let isSelected = preset.matches(mask, in: unitSpace)
+        return EditorWorkspaceTileButton(
+            title: preset.title,
+            systemImage: preset.systemImage,
+            isSelected: isSelected,
+            isEnabled: isEnabled
+        ) {
+            viewModel.setSelectedMask(preset.mask(in: unitSpace))
+        }
     }
 
     private func maskScrubber(
         title: String,
         value: Double,
         range: ClosedRange<Double>,
+        systemImage: String = "slider.horizontal.3",
+        format: @escaping (Double) -> String = { "\(Int($0.rounded()))" },
         update: @escaping (Double) -> Void
     ) -> some View {
         EditorValueScrubber(
             title: title,
-            systemImage: "slider.horizontal.3",
+            systemImage: systemImage,
             value: value,
             range: range,
-            step: 0.01,
-            format: percent,
+            step: 1,
+            format: format,
             onBegan: viewModel.beginInteractiveEdit,
             onChanged: update,
             onEnded: { viewModel.finishInteractiveEdit() }
         )
+    }
+
+    private func maskUnitSpace(for item: TimelineItem) -> EditorUnitSpace {
+        let canvasSize = viewModel.project.renderSettings.size
+        let size: CGSize
+        switch item {
+        case .media:
+            if let clip = item.legacyClip(),
+                let naturalSize = viewModel.project.naturalSize(for: clip)?.displaySafeSize
+            {
+                size = naturalSize
+            } else {
+                size = canvasSize
+            }
+        case .shape(let shape):
+            let localTime = max(viewModel.currentTime - shape.timelineStart, 0)
+            size = CGSize(
+                width: CGFloat(shape.shape.width.value(at: localTime)),
+                height: CGFloat(shape.shape.height.value(at: localTime))
+            )
+        case .text(let text):
+            size =
+                TextLayerRenderer.geometry(
+                    for: text,
+                    renderSize: canvasSize,
+                    renderScale: 1,
+                    at: max(viewModel.currentTime - text.timelineStart, 0)
+                ).layerSize
+        case .caption, .adjustment, .compound:
+            size = canvasSize
+        }
+        return EditorUnitSpace(size: size)
+    }
+}
+
+private enum MaskPreset: String, CaseIterable, Identifiable {
+    case none
+    case rectangle
+    case circle
+    case diamond
+    case triangle
+    case star
+    case heart
+    case bar
+    case split
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .none: "None"
+        case .rectangle: "Rectangle"
+        case .circle: "Circle"
+        case .diamond: "Diamond"
+        case .triangle: "Triangle"
+        case .star: "Star"
+        case .heart: "Heart"
+        case .bar: "Bar"
+        case .split: "Split"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .none: "nosign"
+        case .rectangle: "rectangle"
+        case .circle: "circle"
+        case .diamond: "diamond"
+        case .triangle: "triangle"
+        case .star: "star"
+        case .heart: "heart"
+        case .bar: "minus"
+        case .split: "square.lefthalf.filled"
+        }
+    }
+
+    func mask(in space: EditorUnitSpace) -> ItemMask? {
+        guard self != .none else { return nil }
+        let shape: ItemMask.Shape
+        let widthScale: Double
+        let heightScale: Double
+        switch self {
+        case .circle, .star, .heart:
+            let side = min(space.width, space.height)
+            widthScale = side / max(space.width, 0.000_001)
+            heightScale = side / max(space.height, 0.000_001)
+        case .rectangle, .diamond, .triangle, .split:
+            widthScale = 1
+            heightScale = 1
+        case .bar:
+            widthScale = 1
+            heightScale = 0.2
+        case .none:
+            return nil
+        }
+        switch self {
+        case .rectangle: shape = .rectangle
+        case .circle: shape = .ellipse
+        case .diamond: shape = .diamond
+        case .triangle: shape = .triangle
+        case .star: shape = .star
+        case .heart: shape = .heart
+        case .bar: shape = .bar
+        case .split: shape = .split
+        case .none: return nil
+        }
+        return ItemMask(
+            shape: shape,
+            widthScale: widthScale,
+            heightScale: heightScale
+        )
+    }
+
+    func matches(_ mask: ItemMask?, in space: EditorUnitSpace) -> Bool {
+        guard let expected = self.mask(in: space) else { return mask == nil }
+        guard let mask else { return false }
+        let shapeMatches =
+            self == .rectangle
+            ? mask.shape == .rectangle || mask.shape == .roundedRectangle
+            : mask.shape == expected.shape
+        return shapeMatches
     }
 }
 

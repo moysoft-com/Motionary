@@ -4,6 +4,24 @@ import AVFoundation
 import Combine
 import SwiftUI
 
+enum EditorAnalysisKind: String, Equatable {
+    case backgroundRemoval
+    case audioBeats
+
+    var title: String {
+        switch self {
+        case .backgroundRemoval: "Removing background"
+        case .audioBeats: "Analyzing beats"
+        }
+    }
+}
+
+struct EditorAnalysisState: Equatable {
+    var kind: EditorAnalysisKind
+    var progress: Double
+    var blocksEditor: Bool = true
+}
+
 @MainActor
 /// Coordinates all editor state transitions and delegates media, rendering, export, and persistence work to services.
 final class EditorViewModel: ObservableObject {
@@ -55,6 +73,10 @@ final class EditorViewModel: ObservableObject {
         get { previewState.contentRevision }
         set { previewState.contentRevision = newValue }
     }
+    var previewProgress: Double {
+        get { previewState.progress }
+        set { previewState.progress = min(max(newValue, 0), 1) }
+    }
     var isExporting: Bool {
         get { exportState.isExporting }
         set { exportState.isExporting = newValue }
@@ -65,6 +87,9 @@ final class EditorViewModel: ObservableObject {
     }
     @Published var confirmationMessage: String?
     @Published var errorMessage: String?
+    @Published private(set) var effectRenderDiagnostics: [EffectRenderDiagnostic] = []
+    @Published var analysisState: EditorAnalysisState?
+    @Published var invalidBackgroundRemovalMediaIDs: Set<MediaID> = []
     var timelineContentRevision: Int {
         get { timelineState.contentRevision }
         set { timelineState.contentRevision = newValue }
@@ -90,6 +115,8 @@ final class EditorViewModel: ObservableObject {
     let importService = MediaImportService()
     let exportService = VideoExportService()
     var timeObserver: Any?
+    var previewVideoOutput: AVPlayerItemVideoOutput?
+    var effectRenderDiagnosticsHandlerToken: UUID?
     var wasPlayingBeforeScrub = false
     var undoStack: [AnyEditorCommand] = []
     var redoStack: [AnyEditorCommand] = []
@@ -99,12 +126,27 @@ final class EditorViewModel: ObservableObject {
     var scrubSeekTask: Task<Void, Never>?
     var importTask: Task<Void, Never>?
     var exportTask: Task<Void, Never>?
+    var analysisTask: Task<Void, Never>?
     var toastTask: Task<Void, Never>?
     var autosaveTask: Task<Void, Never>?
+    var projectPosterTask: Task<Void, Never>?
+    var lastProjectPosterSignature: Data?
     var interactivePreviewThrottleTask: Task<Void, Never>?
+    var livePreviewFrameRefreshTask: Task<Void, Never>?
+    var livePreviewOverrideClearTask: Task<Void, Never>?
     var lastInteractivePreviewRebuild: CFAbsoluteTime = 0
+    var lastLivePreviewFrameRefresh: CFAbsoluteTime = 0
+    var livePreviewFrameRefreshInFlight = false
+    var pendingInteractivePreviewInvalidation: EditorInvalidation = []
+    var pendingLivePreviewFrameRefresh = false
     var pendingScrubSeekTime: Double?
+    var isScrubSeekInFlight = false
+    var lastIssuedScrubSeekTime: Double?
+    var scrubSeekLatencyEstimate: CFTimeInterval = 0
     var scrubSessionGeneration = 0
+    var scrubSeekGeneration = 0
+    var livePreviewInteractionGeneration = 0
+    var playbackCommandGeneration = 0
     var interactiveEditSnapshot: EditorProject?
     var timelineClipCache: [UUID: [TimelineClip]] = [:]
     var timelineClipCacheRevision = -1
@@ -123,6 +165,10 @@ final class EditorViewModel: ObservableObject {
     }
 
     func clampedTimelineTime(_ time: Double) -> Double {
+        min(max(time, 0), duration)
+    }
+
+    func clampedPlayableTime(_ time: Double) -> Double {
         min(max(time, 0), lastPlayableTime)
     }
 
@@ -133,11 +179,28 @@ final class EditorViewModel: ObservableObject {
         if isImporting {
             return "Importing"
         }
+        if let analysisState {
+            return "\(analysisState.kind.title) \(Int(analysisState.progress * 100))%"
+        }
+        if isInitialPreviewLoadBlocking {
+            return "Preparing preview \(Int(previewProgress * 100))%"
+        }
         return nil
     }
 
     var isPerformingLongTask: Bool {
         longRunningTaskTitle != nil
+    }
+
+    var shouldPresentBusyOverlay: Bool {
+        if let analysisState {
+            return analysisState.blocksEditor
+        }
+        return isExporting || isImporting || isInitialPreviewLoadBlocking
+    }
+
+    var isInitialPreviewLoadBlocking: Bool {
+        isRenderingPreview && previewContentRevision == 0
     }
     var canExportVideo: Bool {
         project.tracks.contains { track in
@@ -202,5 +265,37 @@ final class EditorViewModel: ObservableObject {
         exportState.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &stateCancellables)
+        installEffectRenderDiagnosticsHandler()
+    }
+
+    deinit {
+        if let effectRenderDiagnosticsHandlerToken {
+            EffectRenderDiagnostics.shared.removeHandler(effectRenderDiagnosticsHandlerToken)
+        }
+    }
+
+    func installEffectRenderDiagnosticsHandler() {
+        guard effectRenderDiagnosticsHandlerToken == nil else { return }
+        effectRenderDiagnosticsHandlerToken = EffectRenderDiagnostics.shared.installHandler {
+            [weak self] diagnostic in
+            Task { @MainActor [weak self] in
+                self?.recordEffectRenderDiagnostic(diagnostic)
+            }
+        }
+    }
+
+    func removeEffectRenderDiagnosticsHandler() {
+        guard let token = effectRenderDiagnosticsHandlerToken else { return }
+        effectRenderDiagnosticsHandlerToken = nil
+        EffectRenderDiagnostics.shared.removeHandler(token)
+    }
+
+    private func recordEffectRenderDiagnostic(_ diagnostic: EffectRenderDiagnostic) {
+        guard !effectRenderDiagnostics.contains(diagnostic) else { return }
+        effectRenderDiagnostics.append(diagnostic)
+        let overflow = effectRenderDiagnostics.count - 32
+        if overflow > 0 {
+            effectRenderDiagnostics.removeFirst(overflow)
+        }
     }
 }

@@ -5,7 +5,7 @@ import Foundation
 
 /// Persisted aggregate containing canvas settings, tracks, clips, and migration metadata.
 struct EditorProject: Identifiable, Codable, Equatable {
-    static let currentSchemaVersion = 9
+    static let currentSchemaVersion = 11
 
     var id: UUID
     var schemaVersion: Int
@@ -66,7 +66,18 @@ struct EditorProject: Identifiable, Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        let decodedSchemaVersion = try container.decodeIfPresent(
+            Int.self,
+            forKey: .schemaVersion
+        ) ?? 1
+        guard decodedSchemaVersion <= Self.currentSchemaVersion else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Project schema \(decodedSchemaVersion) is newer than supported schema \(Self.currentSchemaVersion)."
+            )
+        }
+        schemaVersion = decodedSchemaVersion
         title = try container.decode(String.self, forKey: .title)
         renderSettings = try container.decodeIfPresent(RenderSettings.self, forKey: .renderSettings)
             ?? RenderSettings()
@@ -77,6 +88,20 @@ struct EditorProject: Identifiable, Codable, Equatable {
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
         synchronizeMediaLibrary()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
+        try container.encode(title, forKey: .title)
+        try container.encode(renderSettings, forKey: .renderSettings)
+        try container.encode(mediaLibrary, forKey: .mediaLibrary)
+        try container.encode(tracks, forKey: .tracks)
+        try container.encode(sequences, forKey: .sequences)
+        try container.encode(itemLinks, forKey: .itemLinks)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
     }
 
     static func empty(title: String) -> EditorProject {
@@ -183,20 +208,40 @@ struct EditorProject: Identifiable, Codable, Equatable {
     }
 
     mutating func updateMediaAsset(_ mediaID: MediaID, source: ClipSource) {
-        mediaLibrary[mediaID] = MediaAsset(id: mediaID, source: source)
+        let previousAsset = mediaLibrary[mediaID]
+        let preservesDerivedAnalysis = previousAsset.map {
+            $0.fileName == source.url.lastPathComponent
+                && $0.mediaType == source.mediaType
+                && abs($0.originalDuration - source.originalDuration) < 0.000_001
+                && $0.naturalSize == source.naturalSize
+        } ?? false
+        var updatedAsset = MediaAsset(id: mediaID, source: source)
+        if preservesDerivedAnalysis {
+            updatedAsset.backgroundRemovalArtifact = previousAsset?.backgroundRemovalArtifact
+        }
+        mediaLibrary[mediaID] = updatedAsset
         for trackIndex in tracks.indices {
             for itemIndex in tracks[trackIndex].items.indices {
-                guard var clip = tracks[trackIndex].items[itemIndex].legacyClip(),
+                let previousItem = tracks[trackIndex].items[itemIndex]
+                guard var clip = previousItem.legacyClip(),
                     clip.mediaID == mediaID
                 else { continue }
                 clip.mediaType = source.mediaType
-                tracks[trackIndex].items[itemIndex] = TimelineItem.fromLegacyClip(clip)
+                var updatedItem = previousItem.mergingLegacyClip(clip)
+                if !preservesDerivedAnalysis, case .media(var mediaItem) = updatedItem {
+                    mediaItem.beatAnalysis = nil
+                    updatedItem = .media(mediaItem)
+                }
+                tracks[trackIndex].items[itemIndex] = updatedItem
             }
         }
     }
 
     static func migratingLegacy(
-        title: String, clips: [Clip], keyframes: [Keyframe<Double>], selectedEffect: VideoEffect,
+        title: String,
+        clips: [Clip],
+        keyframes: [Keyframe<Double>],
+        selectedEffectModuleID: EffectModuleID?,
         effectIntensity: Double
     ) -> EditorProject {
         var timelineStart = 0.0
@@ -214,16 +259,26 @@ struct EditorProject: Identifiable, Codable, Equatable {
             )
 
             var stack = EffectStack()
-            if mediaType != .audio, let kind = selectedEffect.effectKind {
+            if mediaType != .audio, let moduleID = selectedEffectModuleID {
                 let localKeyframes =
                     keyframes
                     .filter { $0.time >= timelineStart && $0.time <= timelineStart + duration }
-                    .map { Keyframe<Double>(id: $0.id, time: $0.time - timelineStart, value: $0.value) }
-                stack.effects = [
-                    ClipEffect(
-                        kind: kind, intensity: AnimatableProperty(baseValue: effectIntensity, keyframes: localKeyframes)
+                    .map {
+                        Keyframe<Double>(
+                            id: $0.id,
+                            time: $0.time - timelineStart,
+                            value: $0.value,
+                            interpolation: $0.interpolation
+                        )
+                    }
+                if var effect = EffectRegistry.shared.makeEffect(moduleID: moduleID) {
+                    effect.seed = EffectInstance.deterministicSeed(for: effect.id)
+                    effect.mix = AnimatableProperty(
+                        baseValue: effectIntensity,
+                        keyframes: localKeyframes
                     )
-                ]
+                    stack.effects = [effect]
+                }
             }
 
             let clip = TimelineClip(

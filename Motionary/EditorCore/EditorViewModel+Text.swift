@@ -12,7 +12,7 @@ extension EditorViewModel {
     func addText() -> UUID? {
         guard !isImporting else { return nil }
 
-        let insertionTime = min(max(currentTime, 0), max(duration, currentTime))
+        let insertionTime = visibleInsertionTime(at: currentTime)
         let remainingDuration = max(duration - insertionTime, 0)
         let textDuration = remainingDuration >= 0.1 ? min(remainingDuration, 5) : 5
         var insertedItemID: UUID?
@@ -30,6 +30,7 @@ extension EditorViewModel {
                 "Text",
                 at: insertionTime,
                 duration: textDuration,
+                style: TextStyle(fontSize: 72),
                 trackIndex: trackIndex
             )
             insertedItemID = item.id
@@ -38,6 +39,7 @@ extension EditorViewModel {
 
         guard let insertedItemID else { return nil }
         selectTimelineItem(insertedItemID, trackID: insertedTrackID, revealInPreview: true)
+        seek(to: insertionTime, exact: true)
         return insertedItemID
     }
 
@@ -52,6 +54,7 @@ extension EditorViewModel {
     func updateTextItem(
         _ itemID: UUID,
         interactive: Bool = false,
+        refreshTimeline: Bool = true,
         _ update: @escaping (inout TextTimelineItem) -> Void
     ) {
         if interactive {
@@ -63,7 +66,7 @@ extension EditorViewModel {
             recordHistory: !interactive,
             persistChanges: !interactive,
             touchUpdatedAt: !interactive,
-            refreshTimeline: true
+            refreshTimeline: refreshTimeline
         ) { project in
             guard let location = project.itemLocation(id: itemID),
                 case .text(var item) = project.tracks[location.track].items[location.item]

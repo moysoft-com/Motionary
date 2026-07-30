@@ -2,6 +2,27 @@
 
 import Foundation
 
+/// Decoder-only representation used by the pre-timeline project envelope.
+private enum LegacyVideoEffect: String, Codable {
+    case none = "None"
+    case sepia = "Sepia"
+    case noir = "Noir"
+    case chrome = "Chrome"
+    case blur = "Blur"
+    case vignette = "Vignette"
+
+    var moduleID: EffectModuleID? {
+        switch self {
+        case .none: nil
+        case .sepia: .sepia
+        case .noir: .noir
+        case .chrome: .chrome
+        case .blur: .blur
+        case .vignette: .vignette
+        }
+    }
+}
+
 /// Persists the current editor schema while retaining backward-compatible decoding.
 struct ProjectContent: Codable, Equatable {
     var schemaVersion: Int
@@ -9,24 +30,9 @@ struct ProjectContent: Codable, Equatable {
 
     init(editorProject: EditorProject) {
         self.schemaVersion = EditorProject.currentSchemaVersion
-        self.editorProject = editorProject
-    }
-
-    init(
-        clips: [Clip],
-        keyframes: [Keyframe<Double>],
-        selectedEffect: VideoEffect,
-        effectIntensity: Double,
-        title: String = "Untitled Project"
-    ) {
-        self.schemaVersion = EditorProject.currentSchemaVersion
-        self.editorProject = EditorProject.migratingLegacy(
-            title: title,
-            clips: clips,
-            keyframes: keyframes,
-            selectedEffect: selectedEffect,
-            effectIntensity: effectIntensity
-        )
+        var currentProject = editorProject
+        currentProject.schemaVersion = EditorProject.currentSchemaVersion
+        self.editorProject = currentProject
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -40,6 +46,16 @@ struct ProjectContent: Codable, Equatable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let declaredSchemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+        if let declaredSchemaVersion,
+            declaredSchemaVersion > EditorProject.currentSchemaVersion
+        {
+            throw DecodingError.dataCorruptedError(
+                forKey: .schemaVersion,
+                in: container,
+                debugDescription: "Project schema \(declaredSchemaVersion) is newer than supported schema \(EditorProject.currentSchemaVersion)."
+            )
+        }
 
         if let editorProject = try container.decodeIfPresent(EditorProject.self, forKey: .editorProject) {
             var migratedProject = editorProject.removingTemporaryTracks()
@@ -51,7 +67,10 @@ struct ProjectContent: Codable, Equatable {
 
         let clips = try container.decodeIfPresent([Clip].self, forKey: .clips) ?? []
         let keyframes = try container.decodeIfPresent([Keyframe<Double>].self, forKey: .keyframes) ?? []
-        let selectedEffect = try container.decodeIfPresent(VideoEffect.self, forKey: .selectedEffect) ?? .none
+        let selectedEffect = try container.decodeIfPresent(
+            LegacyVideoEffect.self,
+            forKey: .selectedEffect
+        ) ?? .none
         let effectIntensity = try container.decodeIfPresent(Double.self, forKey: .effectIntensity) ?? 0.6
 
         self.schemaVersion = EditorProject.currentSchemaVersion
@@ -59,7 +78,7 @@ struct ProjectContent: Codable, Equatable {
             title: "Migrated Project",
             clips: clips,
             keyframes: keyframes,
-            selectedEffect: selectedEffect,
+            selectedEffectModuleID: selectedEffect.moduleID,
             effectIntensity: effectIntensity
         )
     }
@@ -74,6 +93,7 @@ struct ProjectContent: Codable, Equatable {
 private extension EditorProject {
     func removingTemporaryTracks() -> EditorProject {
         var persistedProject = self
+        persistedProject.schemaVersion = EditorProject.currentSchemaVersion
         let fallbackTrack = persistedProject.tracks.first {
             $0.kind == .undefined && $0.items.isEmpty
         }

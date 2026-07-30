@@ -117,11 +117,18 @@ actor ProjectRepository {
     private func portableContent(_ content: ProjectContent, projectID: UUID) -> ProjectContent {
         var project = content.editorProject
         let folderURL = projectFolderURL(for: projectID)
-        for (mediaID, asset) in project.mediaLibrary {
-            guard asset.url.deletingLastPathComponent() == folderURL else { continue }
-            var source = asset.source
-            source.url = URL(fileURLWithPath: asset.fileName)
-            project.updateMediaAsset(mediaID, source: source)
+        for (mediaID, originalAsset) in project.mediaLibrary {
+            var asset = originalAsset
+            if asset.url.deletingLastPathComponent() == folderURL {
+                asset.url = URL(fileURLWithPath: asset.fileName)
+            }
+            if var artifact = asset.backgroundRemovalArtifact,
+                artifact.url.deletingLastPathComponent() == folderURL
+            {
+                artifact.url = URL(fileURLWithPath: artifact.url.lastPathComponent)
+                asset.backgroundRemovalArtifact = artifact
+            }
+            project.mediaLibrary[mediaID] = asset
         }
         return ProjectContent(editorProject: project)
     }
@@ -129,13 +136,24 @@ actor ProjectRepository {
     private func resolvingMediaURLs(in content: ProjectContent, projectID: UUID) -> ProjectContent {
         var project = content.editorProject
         let folderURL = projectFolderURL(for: projectID)
-        for (mediaID, asset) in project.mediaLibrary {
-            guard !fileManager.fileExists(atPath: asset.url.path) else { continue }
-            let candidate = folderURL.appendingPathComponent(asset.fileName)
-            guard fileManager.fileExists(atPath: candidate.path) else { continue }
-            var source = asset.source
-            source.url = candidate
-            project.updateMediaAsset(mediaID, source: source)
+        for (mediaID, originalAsset) in project.mediaLibrary {
+            var asset = originalAsset
+            if !fileManager.fileExists(atPath: asset.url.path) {
+                let candidate = folderURL.appendingPathComponent(asset.fileName)
+                if fileManager.fileExists(atPath: candidate.path) {
+                    asset.url = candidate
+                }
+            }
+            if var artifact = asset.backgroundRemovalArtifact,
+                !fileManager.fileExists(atPath: artifact.url.path)
+            {
+                let candidate = folderURL.appendingPathComponent(artifact.url.lastPathComponent)
+                if fileManager.fileExists(atPath: candidate.path) {
+                    artifact.url = candidate
+                    asset.backgroundRemovalArtifact = artifact
+                }
+            }
+            project.mediaLibrary[mediaID] = asset
         }
         return ProjectContent(editorProject: project)
     }

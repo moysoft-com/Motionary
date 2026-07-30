@@ -2,6 +2,51 @@
 
 import Foundation
 
+struct EditorUnitSpace {
+    static let referenceUnits = 1_000.0
+
+    let pixelSize: CGSize
+
+    init(size: CGSize) {
+        pixelSize = CGSize(
+            width: max(abs(size.width), 1),
+            height: max(abs(size.height), 1)
+        )
+    }
+
+    var unitsPerPixel: Double {
+        Self.referenceUnits / Double(max(pixelSize.width, pixelSize.height))
+    }
+
+    var pixelsPerUnit: Double { 1 / unitsPerPixel }
+    var width: Double { Double(pixelSize.width) * unitsPerPixel }
+    var height: Double { Double(pixelSize.height) * unitsPerPixel }
+
+    func units(fromPixels pixels: Double) -> Double {
+        pixels * unitsPerPixel
+    }
+
+    func pixels(fromUnits units: Double) -> Double {
+        units * pixelsPerUnit
+    }
+
+    func horizontalUnits(fromNormalizedPosition value: Double) -> Double {
+        value * width * 0.5
+    }
+
+    func verticalUnits(fromNormalizedPosition value: Double) -> Double {
+        value * height * 0.5
+    }
+
+    func normalizedHorizontalPosition(fromUnits value: Double) -> Double {
+        value / max(width * 0.5, 0.000_001)
+    }
+
+    func normalizedVerticalPosition(fromUnits value: Double) -> Double {
+        value / max(height * 0.5, 0.000_001)
+    }
+}
+
 enum KeyframeTarget: Hashable, Identifiable {
     case positionX
     case positionY
@@ -17,7 +62,8 @@ enum KeyframeTarget: Hashable, Identifiable {
     case contrast
     case saturation
     case exposure
-    case effectIntensity(UUID)
+    case effectMix(UUID)
+    case effectParameter(UUID, EffectParameterID, EffectValueComponent)
     case volume
     case textFontSize
     case textLetterSpacing
@@ -50,7 +96,9 @@ enum KeyframeTarget: Hashable, Identifiable {
         case .contrast: "adjustments.contrast"
         case .saturation: "adjustments.saturation"
         case .exposure: "adjustments.exposure"
-        case .effectIntensity(let id): "effect.\(id.uuidString).intensity"
+        case .effectMix(let id): "effect.\(id.uuidString).mix"
+        case .effectParameter(let id, let parameterID, let component):
+            "effect.\(id.uuidString).\(parameterID.rawValue).\(component.rawValue)"
         case .volume: "audio.volume"
         case .textFontSize: "text.type.fontSize"
         case .textLetterSpacing: "text.type.letterSpacing"
@@ -120,6 +168,7 @@ struct KeyframePropertyMetadata {
 struct KeyframeSegment: Equatable {
     let clipID: UUID
     let section: KeyframeSection
+    var effectID: UUID? = nil
     let startTime: Double
     let endTime: Double
     let interpolation: KeyframeInterpolation

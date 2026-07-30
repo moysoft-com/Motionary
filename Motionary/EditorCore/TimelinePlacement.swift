@@ -19,6 +19,7 @@ extension EditorProject {
         currentTime: Double
     ) -> TimelinePlacementResult? {
         guard let location = clipLocation(id: clipID) else { return nil }
+        let beatAnchors = beatSnapAnchors(excluding: clipID)
         let item = tracks[location.track].items.remove(at: location.clip)
         let requiredKind = item.requiredTrackKind
         let destinationIndex = compatibleTrackIndex(
@@ -32,7 +33,7 @@ extension EditorProject {
             duration: item.placementDuration,
             destinationTrackIndex: destinationIndex,
             requiredKind: requiredKind,
-            snapAnchors: [currentTime]
+            snapAnchors: [currentTime] + beatAnchors
         )
         return TimelinePlacementResult(
             start: placement.start,
@@ -315,6 +316,21 @@ extension EditorProject {
         }
 
         return (max(0, best), true)
+    }
+
+    func beatSnapAnchors(excluding itemID: UUID? = nil) -> [Double] {
+        tracks.flatMap(\.items).compactMap { item -> MediaTimelineItem? in
+            guard item.id != itemID,
+                case .media(let media) = item,
+                media.mediaType == .audio,
+                media.beatAnalysis != nil
+            else { return nil }
+            return media
+        }
+        .flatMap { item in
+            item.visibleBeatMarkers.map { item.timelineStart + $0.localTimelineTime }
+        }
+        .filter(\.isFinite)
     }
 
     private func nearestNonOverlappingStart(proposedStart: Double, duration: Double, items: [TimelineItem]) -> Double {

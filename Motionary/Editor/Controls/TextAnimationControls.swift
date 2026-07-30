@@ -8,47 +8,34 @@ struct TextAnimationControls: View {
     @Binding var activePhase: TextAnimationPhase
 
     var body: some View {
-        VStack(spacing: 12) {
-            MotionRangeStrip(animations: item.animations, duration: item.duration)
-
+        VStack(spacing: 14) {
             HStack(spacing: 8) {
                 ForEach(TextAnimationPhase.allCases, id: \.rawValue) { phase in
                     phaseButton(phase)
                 }
             }
 
-            EditorWorkspaceCard(alignment: .leading, spacing: 9, padding: 11) {
-                Text("Choose a motion")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(MotionaryTheme.textSecondary)
+            MotionRangeStrip(
+                viewModel: viewModel,
+                item: item,
+                phase: activePhase
+            )
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        presetTile(id: nil, title: "None", systemImage: "nosign")
-                        ForEach(TextAnimationPresetCatalog.definitions(for: activePhase)) { definition in
-                            presetTile(
-                                id: definition.id,
-                                title: definition.title,
-                                systemImage: motionIcon(for: definition.id)
-                            )
-                        }
+            EditorWorkspaceSection(title: "Preset") {
+                EditorWorkspaceHorizontalStrip {
+                    presetTile(id: nil, title: "None", systemImage: "nosign")
+                    ForEach(TextAnimationPresetCatalog.definitions(for: activePhase)) { definition in
+                        presetTile(
+                            id: definition.id,
+                            title: definition.title,
+                            systemImage: motionIcon(for: definition.id)
+                        )
                     }
                 }
             }
 
             if selectedPresetID != nil {
                 phaseSettings
-            } else {
-                HStack(spacing: 10) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(MotionaryTheme.textSecondary)
-                    Text("Pick a preset to shape this phase.")
-                        .font(.caption)
-                        .foregroundStyle(MotionaryTheme.textSecondary)
-                    Spacer()
-                }
-                .padding(12)
-                .background(MotionaryTheme.surfaceSubtle, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
             }
         }
     }
@@ -70,108 +57,52 @@ struct TextAnimationControls: View {
         case .exit: isConfigured = item.animations.exit != nil
         }
 
-        return Button {
+        return EditorWorkspacePillButton(
+            title: phase.shortTitle,
+            systemImage: phase.systemImage,
+            isSelected: isSelected,
+            indicatorColor: isConfigured ? phase.tint : nil,
+            haptic: { EditorHaptics.selection() }
+        ) {
             activePhase = phase
-            EditorHaptics.selection()
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: phase.systemImage)
-                    .font(.caption.weight(.semibold))
-                Text(phase.shortTitle)
-                    .font(.caption.weight(.semibold))
-                Circle()
-                    .fill(isConfigured ? phase.tint : MotionaryTheme.surfaceStrong)
-                    .frame(width: 6, height: 6)
-            }
-            .foregroundStyle(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 38)
-            .background(
-                isSelected ? MotionaryTheme.accent : MotionaryTheme.surface,
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-            )
         }
-        .buttonStyle(.plain)
     }
 
     private func presetTile(id: String?, title: String, systemImage: String) -> some View {
         let isSelected = id == selectedPresetID
-        return Button {
+        return EditorWorkspaceTileButton(
+            title: title,
+            systemImage: systemImage,
+            isSelected: isSelected
+        ) {
             setPreset(id, phase: activePhase)
-            EditorHaptics.tap()
-        } label: {
-            VStack(spacing: 7) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 17, weight: .semibold))
-                Text(title)
-                    .font(.caption2.weight(.semibold))
-                    .lineLimit(1)
-            }
-            .foregroundStyle(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
-            .frame(width: 82, height: 58)
-            .background(
-                isSelected ? MotionaryTheme.accent : MotionaryTheme.surface,
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-            )
-            .overlay {
-                if !isSelected, id != nil {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(activePhase.tint.opacity(0.24), lineWidth: 1)
-                }
-            }
         }
-        .buttonStyle(.plain)
     }
 
     @ViewBuilder
     private var phaseSettings: some View {
-        EditorWorkspaceCard {
-            HStack {
-                Label("Timing", systemImage: "timer")
-                    .font(.callout.weight(.semibold))
-                Spacer()
-            }
-
-            phaseTimingScrubbers
-        }
+        phaseTimingScrubbers
     }
 
     @ViewBuilder
     private var phaseTimingScrubbers: some View {
         switch activePhase {
         case .entrance:
-            if let entrance = item.animations.entrance {
-                motionScrubber(
-                    title: "Duration",
-                    systemImage: "timer",
-                    value: entrance.endTime,
-                    range: 0.05...max(item.animations.exit?.startTime ?? item.duration, 0.05),
-                    step: timeStep
-                ) { value in
-                    update(interactive: true) { $0.animations.entrance?.endTime = value }
-                }
-            }
+//            if let entrance = item.animations.entrance {
+//                motionScrubber(
+//                    title: "Duration",
+//                    systemImage: "timer",
+//                    value: entrance.endTime,
+//                    range: 0.05...max(item.animations.exit?.startTime ?? item.duration, 0.05),
+//                    step: timeStep
+//                ) { value in
+//                    update(interactive: true) { $0.animations.entrance?.endTime = value }
+//                }
+//            }
+            EmptyView()
 
         case .loop:
             if let loop = item.animations.loop {
-                motionScrubber(
-                    title: "Starts at",
-                    systemImage: "arrow.right.to.line",
-                    value: loop.startTime,
-                    range: 0...max(loop.endTime, 0),
-                    step: timeStep
-                ) { value in
-                    update(interactive: true) { $0.animations.loop?.startTime = value }
-                }
-                motionScrubber(
-                    title: "Ends at",
-                    systemImage: "arrow.left.to.line",
-                    value: loop.endTime,
-                    range: loop.startTime...max(item.duration, loop.startTime),
-                    step: timeStep
-                ) { value in
-                    update(interactive: true) { $0.animations.loop?.endTime = value }
-                }
                 motionScrubber(
                     title: "Cycle",
                     systemImage: "repeat",
@@ -184,19 +115,20 @@ struct TextAnimationControls: View {
             }
 
         case .exit:
-            if let exit = item.animations.exit {
-                let duration = max(item.duration - exit.startTime, 0.05)
-                let maximum = max(item.duration - (item.animations.entrance?.endTime ?? 0), 0.05)
-                motionScrubber(
-                    title: "Duration",
-                    systemImage: "timer",
-                    value: duration,
-                    range: 0.05...maximum,
-                    step: timeStep
-                ) { value in
-                    update(interactive: true) { $0.animations.exit?.startTime = max($0.duration - value, 0) }
-                }
-            }
+//            if let exit = item.animations.exit {
+//                let duration = max(item.duration - exit.startTime, 0.05)
+//                let maximum = max(item.duration - (item.animations.entrance?.endTime ?? 0), 0.05)
+//                motionScrubber(
+//                    title: "Duration",
+//                    systemImage: "timer",
+//                    value: duration,
+//                    range: 0.05...maximum,
+//                    step: timeStep
+//                ) { value in
+//                    update(interactive: true) { $0.animations.exit?.startTime = max($0.duration - value, 0) }
+//                }
+//            }
+            EmptyView()
         }
     }
 
@@ -277,9 +209,13 @@ struct TextAnimationControls: View {
         if presetID.contains("slideDown") { return "arrow.down" }
         if presetID.contains("slideLeft") { return "arrow.left" }
         if presetID.contains("slideRight") { return "arrow.right" }
-        if presetID.contains("scale") || presetID.contains("pop") || presetID.contains("pulse") { return "arrow.up.left.and.arrow.down.right" }
+        if presetID.contains("scale") || presetID.contains("pop") || presetID.contains("pulse") {
+            return "arrow.up.left.and.arrow.down.right"
+        }
         if presetID.contains("typewriter") { return "character.cursor.ibeam" }
-        if presetID.contains("spin") || presetID.contains("swing") || presetID.contains("wobble") { return "rotate.right" }
+        if presetID.contains("spin") || presetID.contains("swing") || presetID.contains("wobble") {
+            return "rotate.right"
+        }
         if presetID.contains("wipe") { return "rectangle.split.1x2" }
         if presetID.contains("float") || presetID.contains("bounce") { return "arrow.up.and.down" }
         if presetID.contains("shake") { return "waveform.path" }
@@ -347,11 +283,13 @@ struct TextMotionGraphWorkspace: View {
         )
     }
 
-    private var workspaceContext: (
-        item: TextTimelineItem,
-        range: ClosedRange<Double>,
-        interpolation: KeyframeInterpolation
-    )? {
+    private var workspaceContext:
+        (
+            item: TextTimelineItem,
+            range: ClosedRange<Double>,
+            interpolation: KeyframeInterpolation
+        )?
+    {
         guard let currentItem, let graphContext = graphContext(for: currentItem) else { return nil }
         return (currentItem, graphContext.range, graphContext.interpolation)
     }
@@ -404,71 +342,229 @@ struct TextMotionGraphWorkspace: View {
     }
 }
 
-
 private struct MotionRangeStrip: View {
-    let animations: TextAnimationSet
-    let duration: Double
+    @ObservedObject var viewModel: EditorViewModel
+    let item: TextTimelineItem
+    let phase: TextAnimationPhase
 
-    var body: some View {
-        EditorWorkspaceCard(spacing: 7, padding: 11) {
-            HStack {
-                Text("Clip motion")
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                Text(duration.formatted(.number.precision(.fractionLength(2))) + " s")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(MotionaryTheme.textSecondary)
-            }
-            GeometryReader { proxy in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(MotionaryTheme.surface)
-                    if let entrance = animations.entrance {
-                        segment(
-                            color: TextAnimationPhase.entrance.tint,
-                            start: 0,
-                            end: entrance.endTime,
-                            width: proxy.size.width
-                        )
-                    }
-                    if let loop = animations.loop {
-                        segment(
-                            color: TextAnimationPhase.loop.tint,
-                            start: loop.startTime,
-                            end: loop.endTime,
-                            width: proxy.size.width
-                        )
-                    }
-                    if let exit = animations.exit {
-                        segment(
-                            color: TextAnimationPhase.exit.tint,
-                            start: exit.startTime,
-                            end: duration,
-                            width: proxy.size.width
-                        )
-                    }
-                }
-            }
-            .frame(height: 12)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Configured text motion across the clip")
+    @State private var dragState: DragState?
+
+    private enum Edge {
+        case lower
+        case upper
     }
 
-    private func segment(
-        color: Color,
-        start: Double,
-        end: Double,
-        width: CGFloat
-    ) -> some View {
-        let safeDuration = max(duration, 0.000_001)
-        let lower = min(max(start, 0), safeDuration)
-        let upper = min(max(end, lower), safeDuration)
-        let x = CGFloat(lower / safeDuration) * width
-        let segmentWidth = max(CGFloat((upper - lower) / safeDuration) * width, 2)
-        return Capsule()
-            .fill(color.opacity(0.78))
-            .frame(width: segmentWidth, height: 12)
-            .offset(x: x)
+    private struct DragState {
+        let edge: Edge
+        let lowerBound: Double
+        let upperBound: Double
+    }
+
+    var body: some View {
+        if isConfigured {
+            VStack(spacing: 8) {
+                HStack {
+                    Text("Duration")
+                        .font(MotionaryDesign.Typography.sectionTitle)
+                    Spacer()
+                    Text(rangeLabel)
+                        .font(MotionaryDesign.Typography.controlValue)
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                }
+
+                GeometryReader { proxy in
+                    let horizontalInset: CGFloat = 0
+                    let trackWidth = max(proxy.size.width - horizontalInset * 2, 1)
+                    let positions = handlePositions(width: trackWidth, inset: horizontalInset)
+
+                    ZStack(alignment: .topLeading) {
+                        Capsule()
+                            .fill(MotionaryTheme.surface)
+                            .frame(width: trackWidth, height: 12)
+                            .offset(x: horizontalInset, y: 16)
+
+                        if isConfigured {
+                            Capsule()
+                                .fill(phase.tint.opacity(0.82))
+                                .frame(width: max(positions.upper - positions.lower, 2), height: 12)
+                                .offset(x: positions.lower, y: 16)
+                        }
+
+                        if canEditLowerBound {
+                            rangeHandle(edge: .lower, trackWidth: trackWidth)
+                                .position(x: positions.lower, y: 22)
+                        }
+
+                        if canEditUpperBound {
+                            rangeHandle(edge: .upper, trackWidth: trackWidth)
+                                .position(x: positions.upper, y: 22)
+                        }
+                    }
+                }
+                .frame(height: MotionaryDesign.Control.rangeStripHeight)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(phase.shortTitle) motion range")
+            .accessibilityValue(rangeLabel)
+            .onChange(of: phase) { _, _ in finishDragging() }
+            .onChange(of: item.id) { _, _ in finishDragging() }
+            .onDisappear(perform: finishDragging)
+            .transaction { transaction in
+                if dragState != nil {
+                    transaction.animation = nil
+                }
+            }
+        }
+    }
+
+    private var currentRange: ClosedRange<Double> {
+        switch phase {
+        case .entrance:
+            0...max(item.animations.entrance?.endTime ?? 0, 0)
+        case .loop:
+            (item.animations.loop?.startTime ?? 0)...max(
+                item.animations.loop?.endTime ?? item.duration,
+                item.animations.loop?.startTime ?? 0
+            )
+        case .exit:
+            min(item.animations.exit?.startTime ?? item.duration, item.duration)...item.duration
+        }
+    }
+
+    private var rangeLabel: String {
+        guard isConfigured else { return "No motion" }
+        return "\(format(currentRange.lowerBound)) – \(format(currentRange.upperBound)) s"
+    }
+
+    private var canEditLowerBound: Bool {
+        isConfigured && (phase == .loop || phase == .exit)
+    }
+
+    private var canEditUpperBound: Bool {
+        isConfigured && (phase == .entrance || phase == .loop)
+    }
+
+    private var isConfigured: Bool {
+        switch phase {
+        case .entrance:
+            item.animations.entrance != nil
+        case .loop:
+            item.animations.loop != nil
+        case .exit:
+            item.animations.exit != nil
+        }
+    }
+
+    private func handlePositions(width: CGFloat, inset: CGFloat) -> (lower: CGFloat, upper: CGFloat) {
+        let duration = max(item.duration, 0.000_001)
+        let range = currentRange
+        return (
+            inset + CGFloat(range.lowerBound / duration) * width,
+            inset + CGFloat(range.upperBound / duration) * width
+        )
+    }
+
+    private func rangeHandle(edge: Edge, trackWidth: CGFloat) -> some View {
+        Image(systemName: edge == .lower ? "chevron.left" : "chevron.right")
+            .font(MotionaryDesign.Typography.rangeHandle)
+            .foregroundStyle(MotionaryTheme.foregroundOnAccent)
+            .frame(
+                width: MotionaryDesign.Control.rangeHandleSize.width,
+                height: MotionaryDesign.Control.rangeHandleSize.height
+            )
+            .background(phase.tint, in: Capsule())
+            .frame(
+                width: MotionaryDesign.Control.rangeHandleHitSize.width,
+                height: MotionaryDesign.Control.rangeHandleHitSize.height
+            )
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .onChanged { gesture in
+                        update(edge: edge, translation: gesture.translation.width, trackWidth: trackWidth)
+                    }
+                    .onEnded { _ in finishDragging() }
+            )
+    }
+
+    private func update(edge: Edge, translation: CGFloat, trackWidth: CGFloat) {
+        let initialState: DragState
+        if let dragState {
+            initialState = dragState
+        } else {
+            let range = currentRange
+            initialState = DragState(
+                edge: edge,
+                lowerBound: range.lowerBound,
+                upperBound: range.upperBound
+            )
+        }
+
+        guard initialState.edge == edge else { return }
+        let delta = Double(translation / max(trackWidth, 1)) * item.duration
+        let proposedValue = proposedValue(for: edge, state: initialState, delta: delta)
+        let currentValue = edge == .lower ? currentRange.lowerBound : currentRange.upperBound
+        let minimumVisibleChange = max(item.duration / Double(max(trackWidth, 1)) * 0.1, 0.000_01)
+        guard abs(proposedValue - currentValue) >= minimumVisibleChange else { return }
+        if dragState == nil {
+            dragState = initialState
+        }
+
+        viewModel.updateTextItem(
+            item.id,
+            interactive: true,
+            refreshTimeline: false
+        ) { text in
+            switch (phase, edge) {
+            case (.entrance, .upper):
+                text.animations.entrance?.endTime = proposedValue
+            case (.loop, .lower):
+                text.animations.loop?.startTime = proposedValue
+            case (.loop, .upper):
+                text.animations.loop?.endTime = proposedValue
+            case (.exit, .lower):
+                text.animations.exit?.startTime = proposedValue
+            default:
+                break
+            }
+        }
+    }
+
+    private func proposedValue(for edge: Edge, state: DragState, delta: Double) -> Double {
+        let minimumLength = min(0.05, item.duration)
+        switch (phase, edge) {
+        case (.entrance, .upper):
+            let maximum = item.animations.exit?.startTime ?? item.duration
+            return min(max(state.upperBound + delta, minimumLength), maximum)
+        case (.loop, .lower):
+            return min(
+                max(state.lowerBound + delta, 0),
+                max(state.upperBound - minimumLength, 0)
+            )
+        case (.loop, .upper):
+            return min(
+                max(state.upperBound + delta, state.lowerBound + minimumLength),
+                item.duration
+            )
+        case (.exit, .lower):
+            let minimum = item.animations.entrance?.endTime ?? 0
+            return min(
+                max(state.lowerBound + delta, minimum),
+                max(item.duration - minimumLength, minimum)
+            )
+        default:
+            return edge == .lower ? state.lowerBound : state.upperBound
+        }
+    }
+
+    private func finishDragging() {
+        guard dragState != nil else { return }
+        dragState = nil
+        viewModel.finishTextEditing()
+    }
+
+    private func format(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(2)))
     }
 }
 
@@ -491,8 +587,8 @@ extension TextAnimationPhase {
 
     var tint: Color {
         switch self {
-        case .entrance: .cyan
-        case .loop: MotionaryTheme.accent
+        case .entrance: .purple
+        case .loop: .yellow
         case .exit: .pink
         }
     }

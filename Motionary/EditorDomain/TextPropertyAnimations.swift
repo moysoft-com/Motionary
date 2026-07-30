@@ -45,7 +45,7 @@ struct AnimatableColor: Codable, Equatable, Sendable {
 
         let left = keyframes[lower]
         let right = keyframes[upper]
-        let span = max(right.time - left.time, 0.000_001)
+        let span = max(right.time - left.time, KeyframeMergeSupport.minimumInterpolationSpan)
         let progress = left.interpolation.progress(at: (time - left.time) / span)
         return left.value.interpolated(to: right.value, progress: progress)
     }
@@ -69,17 +69,14 @@ struct AnimatableColor: Codable, Equatable, Sendable {
         component: ColorComponent
     ) {
         let previous = self
-        baseValue.setValue(property.baseValue, for: component)
-        keyframes = property.keyframes.map { frame in
-            var color = previous.value(at: frame.time)
-            color.setValue(frame.value, for: component)
-            return Keyframe(
-                id: frame.id,
-                time: frame.time,
-                value: color,
-                interpolation: frame.interpolation
-            )
-        }
+        let merged = Self.merging(
+            red: component == .red ? property : previous.componentProperty(.red),
+            green: component == .green ? property : previous.componentProperty(.green),
+            blue: component == .blue ? property : previous.componentProperty(.blue),
+            alpha: component == .alpha ? property : previous.componentProperty(.alpha)
+        )
+        baseValue = merged.baseValue
+        keyframes = merged.keyframes
     }
 
     @discardableResult
@@ -144,24 +141,38 @@ struct AnimatableColor: Codable, Equatable, Sendable {
         blue: AnimatableProperty<Double>,
         alpha: AnimatableProperty<Double>
     ) -> AnimatableColor {
-        AnimatableColor(
+        let times = KeyframeMergeSupport.mergedTimes([
+            red.keyframes.map(\.time),
+            green.keyframes.map(\.time),
+            blue.keyframes.map(\.time),
+            alpha.keyframes.map(\.time)
+        ])
+        return AnimatableColor(
             baseValue: RGBAColor(
                 red: red.baseValue,
                 green: green.baseValue,
                 blue: blue.baseValue,
                 alpha: alpha.baseValue
             ),
-            keyframes: red.keyframes.map { frame in
-                Keyframe(
-                    id: frame.id,
-                    time: frame.time,
+            keyframes: times.map { time in
+                let redFrame = KeyframeMergeSupport.frame(in: red.keyframes, at: time)
+                let greenFrame = KeyframeMergeSupport.frame(in: green.keyframes, at: time)
+                let blueFrame = KeyframeMergeSupport.frame(in: blue.keyframes, at: time)
+                let alphaFrame = KeyframeMergeSupport.frame(in: alpha.keyframes, at: time)
+                return Keyframe(
+                    id: redFrame?.id ?? greenFrame?.id ?? blueFrame?.id ?? alphaFrame?.id ?? UUID(),
+                    time: time,
                     value: RGBAColor(
-                        red: frame.value,
-                        green: green.value(at: frame.time),
-                        blue: blue.value(at: frame.time),
-                        alpha: alpha.value(at: frame.time)
+                        red: red.value(at: time),
+                        green: green.value(at: time),
+                        blue: blue.value(at: time),
+                        alpha: alpha.value(at: time)
                     ),
-                    interpolation: frame.interpolation
+                    interpolation: redFrame?.interpolation
+                        ?? greenFrame?.interpolation
+                        ?? blueFrame?.interpolation
+                        ?? alphaFrame?.interpolation
+                        ?? .linear
                 )
             }
         )

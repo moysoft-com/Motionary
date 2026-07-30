@@ -13,6 +13,7 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
     var speedMap: SpeedMap
     var pitchFollowsSpeed: Bool
     var linkGroupID: UUID?
+    var beatAnalysis: AudioBeatAnalysis?
 
     var timelineEnd: Double {
         timelineStart + timelineDuration
@@ -32,7 +33,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         visuals: TimelineItemVisuals = TimelineItemVisuals(),
         speedMap: SpeedMap = .constant,
         pitchFollowsSpeed: Bool = false,
-        linkGroupID: UUID? = nil
+        linkGroupID: UUID? = nil,
+        beatAnalysis: AudioBeatAnalysis? = nil
     ) {
         self.id = id
         self.name = name
@@ -41,11 +43,10 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         self.timelineStart = max(0, timelineStart)
         self.sourceRange = sourceRange
         self.visuals = visuals
-        self.speedMap = mediaType == .video || mediaType == .audio
-            ? .constant(speed: speedMap.speed(at: 0))
-            : .constant
+        self.speedMap = speedMap
         self.pitchFollowsSpeed = pitchFollowsSpeed
         self.linkGroupID = linkGroupID
+        self.beatAnalysis = beatAnalysis
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -59,6 +60,7 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         case speedMap
         case pitchFollowsSpeed
         case linkGroupID
+        case beatAnalysis
     }
 
     init(from decoder: Decoder) throws {
@@ -74,7 +76,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
                 ?? TimelineItemVisuals(),
             speedMap: try container.decodeIfPresent(SpeedMap.self, forKey: .speedMap) ?? .constant,
             pitchFollowsSpeed: try container.decodeIfPresent(Bool.self, forKey: .pitchFollowsSpeed) ?? false,
-            linkGroupID: try container.decodeIfPresent(UUID.self, forKey: .linkGroupID)
+            linkGroupID: try container.decodeIfPresent(UUID.self, forKey: .linkGroupID),
+            beatAnalysis: try container.decodeIfPresent(AudioBeatAnalysis.self, forKey: .beatAnalysis)
         )
     }
 }
@@ -492,16 +495,20 @@ extension TimelineItem {
         let replacement = TimelineItem.fromLegacyClip(clip)
         switch (self, replacement) {
         case (.media(let previous), .media(var updated)):
-            updated.speedMap = updated.mediaType == .video || updated.mediaType == .audio
-                ? .constant(speed: previous.speedMap.speed(at: 0))
-                : .constant
+            updated.speedMap = .constant(speed: previous.speedMap.speed(at: 0))
             updated.pitchFollowsSpeed = previous.pitchFollowsSpeed
             updated.linkGroupID = previous.linkGroupID
             updated.visuals.blendMode = previous.visuals.blendMode
+            updated.visuals.blendIntensity = previous.visuals.blendIntensity
             updated.visuals.mask = previous.visuals.mask
+            if previous.mediaID == updated.mediaID {
+                updated.visuals.backgroundRemoval = previous.visuals.backgroundRemoval
+                updated.beatAnalysis = previous.beatAnalysis
+            }
             return .media(updated)
         case (.shape(let previous), .shape(var updated)):
             updated.visuals.blendMode = previous.visuals.blendMode
+            updated.visuals.blendIntensity = previous.visuals.blendIntensity
             updated.visuals.mask = previous.visuals.mask
             return .shape(updated)
         default:

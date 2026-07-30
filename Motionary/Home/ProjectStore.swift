@@ -20,9 +20,12 @@ final class ProjectStore: ObservableObject {
             save()
         }
     }
+    @Published private(set) var posterRevision: Int = 0
 
     private let storageURL: URL
     let repository: ProjectRepository
+    private var contentCache: [UUID: ProjectContent] = [:]
+    private var contentWarmupTasks: [UUID: Task<Void, Never>] = [:]
     private var isLoading = false
     private let fileManager = FileManager.default
 
@@ -33,6 +36,7 @@ final class ProjectStore: ObservableObject {
             .appendingPathComponent("projects.json")
         repository = ProjectRepository(rootURL: rootURL)
         load()
+        warmRecentProjectContent()
     }
 
     func addProject(title: String? = nil) -> Project {
@@ -99,7 +103,46 @@ final class ProjectStore: ObservableObject {
     }
 
     func recordSavedContent(_ content: ProjectContent, projectID: UUID) {
+        contentCache[projectID] = content
         syncProjectMetadata(projectID: projectID, content: content)
+    }
+
+    func cachedContent(for projectID: UUID) -> ProjectContent? {
+        contentCache[projectID]
+    }
+
+    func bestAvailableContent(for project: Project) -> ProjectContent {
+        contentCache[project.id] ?? ProjectContent(editorProject: EditorProject.empty(title: project.title))
+    }
+
+    func warmContent(for project: Project) {
+        guard contentCache[project.id] == nil,
+            contentWarmupTasks[project.id] == nil
+        else { return }
+
+        let projectID = project.id
+        let title = project.title
+        let repository = repository
+        contentWarmupTasks[projectID] = Task { @MainActor [weak self] in
+            defer {
+                self?.contentWarmupTasks[projectID] = nil
+            }
+            do {
+                let result = try await repository.load(
+                    projectID: projectID,
+                    preferredTitle: title
+                )
+                guard !Task.isCancelled else { return }
+                self?.contentCache[projectID] = result.content
+            } catch ProjectRepositoryError.missingContent {
+                let content = ProjectContent(editorProject: EditorProject.empty(title: title))
+                self?.contentCache[projectID] = content
+            } catch {
+                AppLogger.persistence.warning(
+                    "Failed to warm project content: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     func storeMedia(from url: URL, projectID: UUID) throws -> URL {
@@ -134,7 +177,35 @@ final class ProjectStore: ObservableObject {
         return url
     }
 
+    func derivedMediaURL(fileName: String, projectID: UUID) -> URL {
+        projectFolderURL(for: projectID).appendingPathComponent(fileName)
+    }
+
+    func posterURL(for projectID: UUID) -> URL {
+        projectFolderURL(for: projectID).appendingPathComponent("poster.png")
+    }
+
+    func existingPosterURL(for projectID: UUID) -> URL? {
+        let url = posterURL(for: projectID)
+        return fileManager.fileExists(atPath: url.path) ? url : nil
+    }
+
+    func removePoster(for projectID: UUID) {
+        let url = posterURL(for: projectID)
+        if fileManager.fileExists(atPath: url.path) {
+            try? fileManager.removeItem(at: url)
+        }
+        notePosterChanged()
+    }
+
+    func notePosterChanged() {
+        posterRevision &+= 1
+    }
+
     private func deleteContent(for projectID: UUID) {
+        contentCache[projectID] = nil
+        contentWarmupTasks[projectID]?.cancel()
+        contentWarmupTasks[projectID] = nil
         let contentURL = contentURL(for: projectID)
         if fileManager.fileExists(atPath: contentURL.path) {
             try? fileManager.removeItem(at: contentURL)
@@ -182,6 +253,12 @@ final class ProjectStore: ObservableObject {
                 return $0.createdAt > $1.createdAt
             }
             return $0.updatedAt > $1.updatedAt
+        }
+    }
+
+    private func warmRecentProjectContent() {
+        for project in projects.prefix(12) {
+            warmContent(for: project)
         }
     }
 }

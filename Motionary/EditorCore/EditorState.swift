@@ -32,6 +32,7 @@ final class PreviewState: ObservableObject {
 
     @Published var status: Status = .idle
     @Published var contentRevision = 0
+    @Published var progress = 0.0
 
     var isBuilding: Bool {
         if case .building = status { return true }

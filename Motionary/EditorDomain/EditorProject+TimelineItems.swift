@@ -82,9 +82,7 @@ extension EditorProject {
     mutating func setSpeedMap(for itemID: UUID, speedMap: SpeedMap) {
         guard let location = itemLocation(id: itemID) else { return }
         guard case .media(var item) = tracks[location.track].items[location.item] else { return }
-        item.speedMap = item.mediaType == .video || item.mediaType == .audio
-            ? .constant(speed: speedMap.speed(at: 0))
-            : .constant
+        item.speedMap = .constant(speed: speedMap.speed(at: 0))
         tracks[location.track].items[location.item] = .media(item)
     }
 

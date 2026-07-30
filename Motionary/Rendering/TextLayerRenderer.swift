@@ -33,6 +33,8 @@ final class TextLayerRenderer {
         let renderWidth: Double
         let renderHeight: Double
         let renderScale: Double
+        let rasterScaleX: Double
+        let rasterScaleY: Double
         let visibleUTF16Length: Int
     }
 
@@ -44,7 +46,7 @@ final class TextLayerRenderer {
     private let cache: NSCache<NSString, CachedLayer> = {
         let cache = NSCache<NSString, CachedLayer>()
         cache.countLimit = 64
-        cache.totalCostLimit = 64 * 1_024 * 1_024
+        cache.totalCostLimit = GeneratedRasterPolicy.textCacheBytes
         return cache
     }()
 
@@ -56,6 +58,8 @@ final class TextLayerRenderer {
         item: TextTimelineItem,
         renderSize: CGSize,
         renderScale: CGFloat,
+        rasterScaleMultiplier: CGFloat = 1,
+        rasterScale requestedRasterScale: CGSize? = nil,
         at localTime: Double? = nil,
         glyphReveal: Double = 1
     ) -> TextLayerRenderResult {
@@ -64,29 +68,41 @@ final class TextLayerRenderer {
             in: item.text,
             progress: glyphReveal
         )
-        let key = cacheKey(
-            item: item,
-            renderSize: renderSize,
-            renderScale: renderScale,
-            visibleUTF16Length: visibleUTF16Length
-        )
-        if let cached = cache.object(forKey: key) {
-            return cached.result
-        }
-
         let prepared = Self.prepare(
             item: item,
             renderSize: renderSize,
             renderScale: renderScale,
             visibleUTF16Length: visibleUTF16Length
         )
+        let requestedRasterScale = requestedRasterScale
+            ?? CGSize(width: rasterScaleMultiplier, height: rasterScaleMultiplier)
+        let rasterScale = GeneratedRasterPolicy.boundedRasterScale(
+            requestedRasterScale,
+            logicalSize: prepared.geometry.layerSize
+        )
+        let key = cacheKey(
+            item: item,
+            renderSize: renderSize,
+            renderScale: renderScale,
+            rasterScale: rasterScale,
+            visibleUTF16Length: visibleUTF16Length
+        )
+        if let cached = cache.object(forKey: key) {
+            return cached.result
+        }
+
+        let rasterLayerSize = CGSize(
+            width: max(ceil(prepared.geometry.layerSize.width * rasterScale.width), 1),
+            height: max(ceil(prepared.geometry.layerSize.height * rasterScale.height), 1)
+        )
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
         let raster = UIGraphicsImageRenderer(
-            size: prepared.geometry.layerSize,
+            size: rasterLayerSize,
             format: format
-        ).image { _ in
+        ).image { context in
+            context.cgContext.scaleBy(x: rasterScale.width, y: rasterScale.height)
             if let background = item.style.background,
                 let backgroundRect = prepared.geometry.backgroundRect
             {
@@ -99,11 +115,29 @@ final class TextLayerRenderer {
                     )
                 ).fill()
             }
-            prepared.attributedText.draw(
-                with: prepared.geometry.textRect,
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                context: nil
-            )
+            if item.style.stroke?.width ?? 0 > 0 {
+                prepared.attributedText.draw(
+                    with: prepared.geometry.textRect,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                )
+                let fillText = NSMutableAttributedString(attributedString: prepared.attributedText)
+                let fullRange = NSRange(location: 0, length: fillText.length)
+                fillText.removeAttribute(.strokeColor, range: fullRange)
+                fillText.removeAttribute(.strokeWidth, range: fullRange)
+                fillText.removeAttribute(.shadow, range: fullRange)
+                fillText.draw(
+                    with: prepared.geometry.textRect,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                )
+            } else {
+                prepared.attributedText.draw(
+                    with: prepared.geometry.textRect,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                )
+            }
         }
         let image = raster.cgImage.map(CIImage.init(cgImage:)) ?? CIImage.empty()
         let result = TextLayerRenderResult(image: image, geometry: prepared.geometry)
@@ -111,7 +145,7 @@ final class TextLayerRenderer {
             CachedLayer(result: result),
             forKey: key,
             cost: max(
-                Int(prepared.geometry.layerSize.width * prepared.geometry.layerSize.height * 4),
+                Int(rasterLayerSize.width * rasterLayerSize.height * 4),
                 1
             )
         )
@@ -146,6 +180,7 @@ final class TextLayerRenderer {
         item: TextTimelineItem,
         renderSize: CGSize,
         renderScale: CGFloat,
+        rasterScale: CGSize,
         visibleUTF16Length: Int
     ) -> NSString {
         let value = RasterCacheKey(
@@ -155,6 +190,8 @@ final class TextLayerRenderer {
             renderWidth: renderSize.width,
             renderHeight: renderSize.height,
             renderScale: renderScale,
+            rasterScaleX: rasterScale.width,
+            rasterScaleY: rasterScale.height,
             visibleUTF16Length: visibleUTF16Length
         )
         let encoder = JSONEncoder()
@@ -193,7 +230,7 @@ final class TextLayerRenderer {
         if let stroke = item.style.stroke, stroke.width > 0 {
             let scaledStrokeWidth = CGFloat(stroke.width) * scale
             attributes[.strokeColor] = uiColor(stroke.color)
-            attributes[.strokeWidth] = -(scaledStrokeWidth / max(font.pointSize, 1)) * 100
+            attributes[.strokeWidth] = (scaledStrokeWidth * 2 / max(font.pointSize, 1)) * 100
         }
         if let shadow = item.style.shadow {
             let textShadow = NSShadow()
@@ -222,16 +259,21 @@ final class TextLayerRenderer {
         } else {
             shadowInset = 0
         }
-        let boxWidth = max(
+        let maximumBoxWidth = max(
             renderSize.width * CGFloat(item.layout.widthFraction),
             1
         )
-        let textWidth = max(boxWidth - contentInset * 2, 1)
+        let maximumTextWidth = max(maximumBoxWidth - contentInset * 2, 1)
         let measured = attributedText.boundingRect(
-            with: CGSize(width: textWidth, height: .greatestFiniteMagnitude),
+            with: CGSize(width: maximumTextWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             context: nil
         )
+        let textWidth = min(max(ceil(measured.width), 1), maximumTextWidth)
+        let contentBoxWidth = max(textWidth + contentInset * 2, 1)
+        let boxWidth = item.style.background == nil
+            ? contentBoxWidth
+            : maximumBoxWidth
         let explicitLineCount = max(
             item.text.split(separator: "\n", omittingEmptySubsequences: false).count,
             1

@@ -1,6 +1,5 @@
 // Project card presentation and asynchronously generated cover artwork.
 
-import AVFoundation
 import SwiftUI
 import UIKit
 
@@ -77,7 +76,7 @@ struct ProjectCard: View {
             }
         }
         .buttonStyle(.plain)
-        .task(id: project.updatedAt) {
+        .task(id: "\(project.id.uuidString)-\(project.updatedAt.timeIntervalSinceReferenceDate)-\(projectStore.posterRevision)") {
             coverImage = await ProjectCoverLoader.cover(for: project, projectStore: projectStore)
         }
     }
@@ -115,32 +114,10 @@ struct ProjectCard: View {
 
 enum ProjectCoverLoader {
     static func cover(for project: Project, projectStore: ProjectStore) async -> UIImage? {
-        guard let content = try? await projectStore.repository.load(projectID: project.id).content,
-            let clip = content.editorProject.tracks
-                .filter({ $0.kind == .visual })
-                .flatMap(\.clips)
-                .filter({ $0.mediaType != .audio })
-                .min(by: { $0.timelineStart < $1.timelineStart })
-        else { return nil }
-
-        let editorProject = content.editorProject
-        let url = projectStore.resolvedMediaURL(editorProject.mediaURL(for: clip), projectID: project.id)
-        let sourceStart = clip.sourceRange.start
+        guard let url = projectStore.existingPosterURL(for: project.id) else { return nil }
         return await Task<UIImage?, Never>.detached(priority: .utility) {
-            let asset = AVURLAsset(url: url)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 520, height: 520)
-            generator.requestedTimeToleranceBefore = .zero
-            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.15, preferredTimescale: 600)
-
-            for seconds in [sourceStart, min(sourceStart + 0.05, clip.sourceRange.end), 0] {
-                let time = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
-                if let cgImage = try? await generator.image(at: time).image {
-                    return UIImage(cgImage: cgImage)
-                }
-            }
-            return nil
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return UIImage(data: data)
         }.value
     }
 }

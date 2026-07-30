@@ -2,15 +2,15 @@
 
 import PhotosUI
 import SwiftUI
+import UIKit
 
 struct CorePreviewSection: View {
     @ObservedObject var viewModel: EditorViewModel
-    @ObservedObject private var previewState: PreviewState
     @Binding var selectedMediaItems: [PhotosPickerItem]
+    @State private var posterImage: UIImage?
 
     init(viewModel: EditorViewModel, selectedMediaItems: Binding<[PhotosPickerItem]>) {
         self.viewModel = viewModel
-        _previewState = ObservedObject(wrappedValue: viewModel.previewState)
         _selectedMediaItems = selectedMediaItems
     }
 
@@ -26,13 +26,19 @@ struct CorePreviewSection: View {
                     ZStack {
                         viewModel.project.renderSettings.backgroundColor.swiftUIColor
 
+                        if shouldShowOpeningPlaceholder {
+                            openingPlaceholder
+                        }
+
                         Color.clear
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 viewModel.deselectTimeline()
                             }
 
-                        if let player = viewModel.player {
+                        if let player = viewModel.player,
+                            viewModel.previewContentRevision > 0 || !viewModel.isRenderingPreview
+                        {
                             PreviewRendererView(player: player)
                                 .frame(width: canvasRect.width, height: canvasRect.height)
                                 .allowsHitTesting(false)
@@ -40,7 +46,6 @@ struct CorePreviewSection: View {
                     }
                     .frame(width: canvasRect.width, height: canvasRect.height)
                     .clipped()
-                    .border(.gray.opacity(0.3), width: 0.5)
                     .position(x: canvasRect.midX, y: canvasRect.midY)
 
                     PreviewTransformCanvas(
@@ -48,16 +53,50 @@ struct CorePreviewSection: View {
                         canvasFrame: canvasRect
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
+
+                    Rectangle()
+                        .stroke(.gray.opacity(0.3), lineWidth: 0.5)
+                        .frame(width: canvasRect.width, height: canvasRect.height)
+                        .position(x: canvasRect.midX, y: canvasRect.midY)
+                        .allowsHitTesting(false)
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
             }
-
-            if previewState.isBuilding, viewModel.player == nil {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(10)
-                    .glassEffect(.regular)
-            }
         }
+        .task(id: viewModel.projectID) {
+            posterImage = await loadPosterImage()
+        }
+    }
+
+    private var shouldShowOpeningPlaceholder: Bool {
+        viewModel.previewContentRevision == 0
+    }
+
+    @ViewBuilder
+    private var openingPlaceholder: some View {
+        if let posterImage {
+            Image(uiImage: posterImage)
+                .resizable()
+                .scaledToFill()
+        } else {
+            LinearGradient(
+                colors: [
+                    MotionaryTheme.surfaceStrong,
+                    MotionaryTheme.surfaceSubtle
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    private func loadPosterImage() async -> UIImage? {
+        guard let url = viewModel.projectStore.existingPosterURL(for: viewModel.projectID) else {
+            return nil
+        }
+        return await Task<UIImage?, Never>.detached(priority: .utility) {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return UIImage(data: data)
+        }.value
     }
 }

@@ -6,7 +6,7 @@ import SwiftUI
 
 extension EditorViewModel {
     func importPhotosItems(_ items: [PhotosPickerItem]) {
-        guard !items.isEmpty, !isImporting else { return }
+        guard !items.isEmpty, !isPerformingLongTask else { return }
         isImporting = true
         importTask = Task { [weak self] in
             guard let self else { return }
@@ -70,7 +70,7 @@ extension EditorViewModel {
     }
 
     func replaceSelectedMedia(with item: PhotosPickerItem) {
-        guard let selectedClipID, selectedClip?.mediaType != .audio, !isImporting else { return }
+        guard let selectedClipID, selectedClip?.mediaType != .audio, !isPerformingLongTask else { return }
         isImporting = true
         importTask = Task { [weak self] in
             guard let self else { return }
@@ -122,52 +122,49 @@ extension EditorViewModel {
     }
 
     func addShape(_ kind: ClipShapeKind) {
-        guard !isImporting else { return }
-        isImporting = true
-        importTask = Task { [weak self] in
-            guard let self else { return }
-            defer {
-                isImporting = false
-                importTask = nil
-            }
-            do {
-                let shapeDuration = max(duration - currentTime, 5)
-                let imported = try await importService.makeShapeMedia(
-                    duration: shapeDuration,
-                    canvasSize: project.renderSettings.size,
-                    projectID: projectID,
-                    projectStore: projectStore
-                )
-                try Task.checkCancellation()
-                let before = project
-                var after = project
-                let trackIndex = after.insertFreshTrack(kind: .shape)
-                var source = imported.source
-                source.naturalSize = CGSizeValue(width: 400, height: 400)
-                var clip = TimelineClip(
-                    name: kind.title,
-                    source: source,
-                    timelineStart: self.currentTime,
-                    sourceRange: TimeRangeValue(start: 0, duration: shapeDuration),
-                    shape: ClipShape(kind: kind)
-                )
-                after.registerClipMedia(&clip, source: source)
-                after.tracks[trackIndex].appendLegacyClip(clip)
-                selectedTrackID = after.tracks[trackIndex].id
-                selectedClipID = clip.id
-                commit(
-                    EditorCommandFactory.importMedia(
-                        before: before,
-                        after: after,
-                        invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
-                    )
-                )
-            } catch is CancellationError {
-                return
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
+        guard !isPerformingLongTask else { return }
+        let insertionTime = visibleInsertionTime(at: currentTime)
+        let shapeDuration = max(duration - insertionTime, 5)
+        let before = project
+        var after = project
+        let trackIndex = after.insertFreshTrack(kind: .shape)
+        let mediaID = MediaID()
+        let generatedURL = URL(
+            string: "motionary-generated://shape/\(mediaID.rawValue.uuidString)"
+        )!
+        let source = ClipSource(
+            url: generatedURL,
+            mediaType: .image,
+            originalDuration: shapeDuration,
+            naturalSize: CGSizeValue(width: 400, height: 400)
+        )
+        after.registerMedia(from: source, mediaID: mediaID)
+        let item = ShapeTimelineItem(
+            name: kind.title,
+            mediaID: mediaID,
+            shape: ClipShape(kind: kind),
+            timelineStart: insertionTime,
+            sourceRange: TimeRangeValue(start: 0, duration: shapeDuration)
+        )
+        after.tracks[trackIndex].items.append(.shape(item))
+        after.tracks[trackIndex].sortItems()
+        selectedTrackID = after.tracks[trackIndex].id
+        selectedClipID = item.id
+        commit(
+            EditorCommandFactory.importMedia(
+                before: before,
+                after: after,
+                invalidation: [
+                    .previewFrame,
+                    .compositionTopology,
+                    .audioMix,
+                    .timelineLayout,
+                    .userInterface,
+                    .persistence,
+                ]
+            ),
+            seekTo: insertionTime
+        )
     }
 
     func addImportedMediaBatch(
@@ -178,7 +175,7 @@ extension EditorViewModel {
 
         let before = project
         var after = project
-        var finalSelection: (clipID: UUID, trackID: UUID)?
+        var finalSelection: (clipID: UUID, trackID: UUID, timelineStart: Double)?
 
         for imported in importedMedia {
             let kind: TrackKind = imported.source.mediaType == .audio ? .audio : .visual
@@ -187,7 +184,7 @@ extension EditorViewModel {
             }
             let targetInsertionTime: Double
             if kind == .visual, hadVisualClips, !sequentialVisual {
-                targetInsertionTime = currentTime
+                targetInsertionTime = visibleInsertionTime(at: currentTime)
             } else {
                 targetInsertionTime = insertionTime(for: kind, in: after)
             }
@@ -215,7 +212,7 @@ extension EditorViewModel {
             {
                 after.renderSettings = RenderSettings(size: naturalSize)
             }
-            finalSelection = (clip.id, after.tracks[trackIndex].id)
+            finalSelection = (clip.id, after.tracks[trackIndex].id, clip.timelineStart)
         }
 
         after.renumberTracks()
@@ -228,12 +225,13 @@ extension EditorViewModel {
                 before: before,
                 after: after,
                 invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
-            )
+            ),
+            seekTo: finalSelection?.timelineStart
         )
     }
 
     func importAudioFromPhotosItem(_ item: PhotosPickerItem) {
-        guard !isImporting else { return }
+        guard !isPerformingLongTask else { return }
         isImporting = true
         importTask = Task { [weak self] in
             guard let self else { return }
@@ -257,7 +255,7 @@ extension EditorViewModel {
     }
 
     func importAudio(url: URL) {
-        guard !isImporting else { return }
+        guard !isPerformingLongTask else { return }
         isImporting = true
         importTask = Task { [weak self] in
             guard let self else { return }

@@ -79,13 +79,17 @@ struct ExportSettingsView: View {
                             }
                         }
                         
-                        VStack(alignment: .leading, spacing: 8) {
-                            LabeledContent("Video bitrate") {
-                                Text("\(videoBitrateMbps, specifier: "%.1f") Mbit/s")
-                                    .monospacedDigit()
-                            }
-                            Slider(value: videoBitrateBinding, in: 1...80, step: 0.5)
-                        }
+                        EditorValueScrubber(
+                            title: "Video bitrate",
+                            systemImage: "speedometer",
+                            value: videoBitrateMbps,
+                            range: 1...80,
+                            step: 0.5,
+                            format: { String(format: "%.1f Mbit/s", $0) },
+                            onBegan: {},
+                            onChanged: { settings.videoBitrate = Int($0 * 1_000_000) },
+                            onEnded: {}
+                        )
                         
                         Picker("Audio bitrate", selection: $settings.audioBitrate) {
                             ForEach([96_000, 128_000, 192_000, 256_000, 320_000], id: \.self) { bitrate in
@@ -134,13 +138,6 @@ struct ExportSettingsView: View {
 
     private var videoBitrateMbps: Double {
         Double(settings.videoBitrate) / 1_000_000
-    }
-
-    private var videoBitrateBinding: Binding<Double> {
-        Binding(
-            get: { videoBitrateMbps },
-            set: { settings.videoBitrate = Int($0 * 1_000_000) }
-        )
     }
 
     private func dimensionBinding(_ keyPath: WritableKeyPath<VideoExportSettings, Int>) -> Binding<Int> {

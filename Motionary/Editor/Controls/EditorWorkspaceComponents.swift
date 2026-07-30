@@ -72,12 +72,12 @@ struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
                         }
                     }
                 }
-                .padding(14)
+                .padding(MotionaryDesign.Spacing.xl)
                 .opacity(isEnabled ? 1 : 0.42)
                 .disabled(disablesContentWhenUnavailable && !isEnabled)
             }
         }
-        .motionaryGlass(cornerRadius: 20)
+        .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
     }
 }
 
@@ -122,7 +122,7 @@ struct EditorWorkspaceHeader<Accessory: View>: View {
     var body: some View {
         HStack(spacing: 9) {
             Label(title, systemImage: systemImage)
-                .font(.headline.weight(.semibold))
+                .font(MotionaryDesign.Typography.workspaceHeader)
                 .labelStyle(.titleAndIcon)
                 .accessibilityAddTraits(.isHeader)
             Spacer()
@@ -140,18 +140,18 @@ extension EditorWorkspaceHeader where Accessory == EmptyView {
 
 struct EditorWorkspaceCard<Content: View>: View {
     var alignment: HorizontalAlignment = .center
-    var spacing: CGFloat = 12
-    var padding: CGFloat = 12
+    var spacing: CGFloat = MotionaryDesign.Spacing.lg
+    var padding: CGFloat = MotionaryDesign.Spacing.lg
     var backgroundOpacity = 0.05
-    var cornerRadius: CGFloat = 15
+    var cornerRadius: CGFloat = MotionaryDesign.Radius.card
     private let content: Content
 
     init(
         alignment: HorizontalAlignment = .center,
-        spacing: CGFloat = 12,
-        padding: CGFloat = 12,
+        spacing: CGFloat = MotionaryDesign.Spacing.lg,
+        padding: CGFloat = MotionaryDesign.Spacing.lg,
         backgroundOpacity: Double = 0.05,
-        cornerRadius: CGFloat = 15,
+        cornerRadius: CGFloat = MotionaryDesign.Radius.card,
         @ViewBuilder content: () -> Content
     ) {
         self.alignment = alignment
@@ -192,7 +192,7 @@ struct EditorWorkspaceColorRow: View {
                     Text(title)
                 }
             }
-                .font(.callout.weight(titleWeight))
+            .font(.callout.weight(titleWeight))
             Spacer()
             ColorPicker(
                 title,
@@ -204,6 +204,94 @@ struct EditorWorkspaceColorRow: View {
     }
 }
 
+enum EditorWorkspaceControlStyle {
+    static let height = MotionaryDesign.Control.height
+    static let cornerRadius = MotionaryDesign.Radius.control
+    static let horizontalSpacing = MotionaryDesign.Control.horizontalSpacing
+    static let horizontalPadding = MotionaryDesign.Control.horizontalPadding
+
+    static func backgroundColor(isActive: Bool = false) -> Color {
+        MotionaryDesign.Surface.control(isActive: isActive)
+    }
+}
+
+struct EditorWorkspaceOnOffControl<Accessory: View>: View {
+    let title: String
+    let isOn: Bool
+    var isEnabled = true
+    let onChange: (Bool) -> Void
+    private let accessory: Accessory
+
+    init(
+        title: String,
+        isOn: Bool,
+        isEnabled: Bool = true,
+        onChange: @escaping (Bool) -> Void,
+        @ViewBuilder accessory: () -> Accessory
+    ) {
+        self.title = title
+        self.isOn = isOn
+        self.isEnabled = isEnabled
+        self.onChange = onChange
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        HStack(spacing: EditorWorkspaceControlStyle.horizontalSpacing) {
+            Button {
+                onChange(!isOn)
+                EditorHaptics.tap()
+            } label: {
+                HStack(spacing: EditorWorkspaceControlStyle.horizontalSpacing) {
+                    Text(title)
+                        .font(MotionaryDesign.Typography.controlTitleStrong)
+
+                    Spacer()
+
+                    Text(isOn ? "On" : "Off")
+                        .font(MotionaryDesign.Typography.pillLabel)
+                        .foregroundStyle(isOn ? MotionaryTheme.accent : MotionaryTheme.textSecondary)
+                }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .disabled(!isEnabled)
+            .accessibilityLabel(title)
+            .accessibilityValue(isOn ? "On" : "Off")
+
+            accessory
+        }
+        .padding(.horizontal, EditorWorkspaceControlStyle.horizontalPadding)
+        .frame(maxWidth: .infinity)
+        .frame(height: EditorWorkspaceControlStyle.height)
+        .background(
+            EditorWorkspaceControlStyle.backgroundColor(),
+            in: RoundedRectangle(
+                cornerRadius: EditorWorkspaceControlStyle.cornerRadius,
+                style: .continuous
+            )
+        )
+    }
+}
+
+extension EditorWorkspaceOnOffControl where Accessory == EmptyView {
+    init(
+        title: String,
+        isOn: Bool,
+        isEnabled: Bool = true,
+        onChange: @escaping (Bool) -> Void
+    ) {
+        self.init(
+            title: title,
+            isOn: isOn,
+            isEnabled: isEnabled,
+            onChange: onChange,
+            accessory: { EmptyView() }
+        )
+    }
+}
+
 struct EditorWorkspaceSelectionButton: View {
     let title: String
     let systemImage: String?
@@ -212,28 +300,13 @@ struct EditorWorkspaceSelectionButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button {
-            EditorHaptics.tap()
-            action()
-        } label: {
-            Group {
-                if let systemImage {
-                    Label(title, systemImage: systemImage)
-                } else {
-                    Text(title)
-                }
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 38)
-            .background(
-                isSelected ? MotionaryTheme.accent : MotionaryTheme.surface,
-                in: Capsule()
-            )
-        }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
+        EditorWorkspacePillButton(
+            title: title,
+            systemImage: systemImage,
+            isSelected: isSelected,
+            isEnabled: isEnabled,
+            action: action
+        )
     }
 }
 
@@ -247,7 +320,7 @@ struct EditorWorkspaceIconButton: View {
     var body: some View {
         Button(role: role, action: action) {
             Image(systemName: systemName)
-                .font(.caption.weight(.semibold))
+                .font(MotionaryDesign.Typography.compactIcon)
                 .frame(width: 25, height: 25)
         }
         .buttonStyle(.plain)
@@ -266,7 +339,10 @@ struct EditorWorkspaceCapsuleIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .frame(width: 42, height: 38)
+                .frame(
+                    width: MotionaryDesign.Control.iconButtonSize.width,
+                    height: MotionaryDesign.Control.iconButtonSize.height
+                )
                 .background(MotionaryTheme.surface, in: Capsule())
         }
         .buttonStyle(.plain)
