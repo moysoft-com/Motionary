@@ -100,118 +100,145 @@ struct ProjectEditorView: View {
         .onChange(of: selectedMediaItems) { _, items in
             guard !items.isEmpty else { return }
             viewModel.importPhotosItems(items)
-            selectedMediaItems = []
+            DispatchQueue.main.async {
+                selectedMediaItems = []
+            }
         }
         .onChange(of: selectedAudioVideoItem) { _, item in
             guard let item else { return }
             viewModel.importAudioFromPhotosItem(item)
-            selectedAudioVideoItem = nil
+            DispatchQueue.main.async {
+                selectedAudioVideoItem = nil
+            }
         }
         .onChange(of: selectedReplacementItem) { _, item in
             guard let item else { return }
             viewModel.replaceSelectedMedia(with: item)
-            selectedReplacementItem = nil
+            DispatchQueue.main.async {
+                selectedReplacementItem = nil
+            }
         }
         .onChange(of: viewModel.selectedClipID) { _, clipID in
-            activeEffectWorkspaceID = nil
-            if let clipID {
-                if activePanel.isPropertyPanel || activePanel == .graph {
-                    propertyContextClipID = clipID
-                    if activePanel == .graph,
-                        let section = graphReturnPanel.keyframeSection
-                    {
-                        viewModel.selectGraphSegment(atPlayheadIn: section)
-                    }
-                }
-
-                if let clip = viewModel.project.clip(id: clipID) {
-                    let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
-                    var isSupported = true
-                    switch panelToCheck {
-                    case .text, .textType, .textStyle, .textMotion, .textMotionGraph:
-                        isSupported = false
-                    case .shape:
-                        isSupported = clip.shape != nil
-                    case .transform, .adjust, .effects:
-                        isSupported = clip.mediaType != .audio
-                    case .audio:
-                        isSupported = clip.mediaType == .audio || clip.mediaType == .video
-                    case .speed:
-                        if case .media(let media) = viewModel.project.item(id: clipID) {
-                            isSupported = media.mediaType == .video || media.mediaType == .audio
-                        } else {
-                            isSupported = false
+            DispatchQueue.main.async {
+                activeEffectWorkspaceID = nil
+                if let clipID {
+                    if activePanel.isPropertyPanel || activePanel == .graph {
+                        propertyContextClipID = clipID
+                        if activePanel == .graph,
+                            let section = graphReturnPanel.keyframeSection
+                        {
+                            viewModel.selectGraphSegment(atPlayheadIn: section)
                         }
-                    case .mask:
-                        isSupported = clip.mediaType != .audio
-                    case .removeBackground:
-                        isSupported = clip.mediaType == .image || clip.mediaType == .video
-                    case .blend:
-                        isSupported = clip.mediaType != .audio
-                    case .autoBeats:
-                        isSupported = clip.mediaType == .audio
-                    default:
-                        isSupported = true
                     }
-                    if !isSupported {
-                        activePanel = .timeline
+
+                    if let clip = viewModel.project.clip(id: clipID) {
+                        let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
+                        var isSupported = true
+                        switch panelToCheck {
+                        case .text, .textType, .textStyle, .textMotion, .textMotionGraph:
+                            isSupported = false
+                        case .shape:
+                            isSupported = clip.shape != nil
+                        case .transform, .adjust, .effects:
+                            isSupported = clip.mediaType != .audio
+                        case .audio:
+                            isSupported = clip.mediaType == .audio || clip.mediaType == .video
+                        case .speed:
+                            if case .media(let media) = viewModel.project.item(id: clipID) {
+                                isSupported = media.mediaType == .video || media.mediaType == .audio
+                            } else {
+                                isSupported = false
+                            }
+                        case .mask:
+                            isSupported = clip.mediaType != .audio
+                        case .removeBackground:
+                            isSupported = clip.mediaType == .image || clip.mediaType == .video
+                        case .blend:
+                            isSupported = clip.mediaType != .audio
+                        case .autoBeats:
+                            isSupported = clip.mediaType == .audio
+                        default:
+                            isSupported = true
+                        }
+                        if !isSupported {
+                            activePanel = .timeline
+                        }
+                    } else if case .adjustment = viewModel.project.item(id: clipID) {
+                        let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
+                        switch panelToCheck {
+                        case .timeline, .transform, .adjust, .effects, .mask, .blend:
+                            break
+                        default:
+                            activePanel = .timeline
+                        }
+                    } else if case .text = viewModel.project.item(id: clipID) {
+                        let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
+                        if !panelToCheck.isTextPanel
+                            && panelToCheck != .transform
+                            && panelToCheck != .mask
+                            && panelToCheck != .blend
+                            && panelToCheck != .timeline
+                        {
+                            activePanel = .timeline
+                        }
                     }
-                } else if case .text = viewModel.project.item(id: clipID) {
-                    let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
-                    if !panelToCheck.isTextPanel
-                        && panelToCheck != .transform
-                        && panelToCheck != .mask
-                        && panelToCheck != .blend
-                        && panelToCheck != .timeline
-                    {
-                        activePanel = .timeline
-                    }
+                } else if activePanel != .canvas {
+                    activePanel = .timeline
                 }
-            } else if activePanel != .canvas {
-                activePanel = .timeline
             }
         }
         .onChange(of: activePanel) { previousPanel, panel in
-            if previousPanel == .graph, panel != .graph {
-                viewModel.graphSegment = nil
-                viewModel.displayedGraphSegment = nil
-                viewModel.activeKeyframeTarget = nil
-                viewModel.selectedKeyframeID = nil
-            }
-            if previousPanel.isPropertyPanel, panel == .timeline {
-                propertyContextClipID = nil
-                viewModel.activeKeyframeTarget = nil
-            }
-            if panel != .effects && panel != .graph {
-                activeEffectWorkspaceID = nil
+            DispatchQueue.main.async {
+                if previousPanel == .graph, panel != .graph {
+                    viewModel.graphSegment = nil
+                    viewModel.displayedGraphSegment = nil
+                    viewModel.activeKeyframeTarget = nil
+                    viewModel.selectedKeyframeID = nil
+                }
+                if previousPanel.isPropertyPanel, panel == .timeline {
+                    propertyContextClipID = nil
+                    viewModel.activeKeyframeTarget = nil
+                }
+                if panel != .effects && panel != .graph {
+                    activeEffectWorkspaceID = nil
+                }
             }
         }
         .onChange(of: viewModel.project) { _, project in
             if let contextID = propertyContextClipID,
                 project.item(id: contextID) == nil
             {
-                propertyContextClipID = nil
-                activeEffectWorkspaceID = nil
-                viewModel.graphSegment = nil
-                viewModel.displayedGraphSegment = nil
-                activePanel = .timeline
+                DispatchQueue.main.async {
+                    propertyContextClipID = nil
+                    activeEffectWorkspaceID = nil
+                    viewModel.graphSegment = nil
+                    viewModel.displayedGraphSegment = nil
+                    activePanel = .timeline
+                }
             } else if let activeEffectWorkspaceID,
-                project.clip(id: propertyContextClipID ?? UUID())?
+                project.item(id: propertyContextClipID ?? UUID())?
+                    .visualEditingClip()?
                     .effectStack.effects.contains(where: { $0.id == activeEffectWorkspaceID }) != true
             {
-                self.activeEffectWorkspaceID = nil
+                DispatchQueue.main.async {
+                    self.activeEffectWorkspaceID = nil
+                }
             } else if activePanel == .graph {
-                viewModel.refreshGraphSegment()
+                DispatchQueue.main.async {
+                    viewModel.refreshGraphSegment()
+                }
             }
         }
         .onReceive(viewModel.playbackState.$currentTime) { _ in
             guard activePanel == .graph,
                 let section = graphReturnPanel.keyframeSection
             else { return }
-            viewModel.selectGraphSegment(
-                atPlayheadIn: section,
-                effectID: graphReturnPanel == .effects ? activeEffectWorkspaceID : nil
-            )
+            DispatchQueue.main.async {
+                viewModel.selectGraphSegment(
+                    atPlayheadIn: section,
+                    effectID: graphReturnPanel == .effects ? activeEffectWorkspaceID : nil
+                )
+            }
         }
         .alert(
             "Error",
@@ -356,7 +383,9 @@ struct ProjectEditorView: View {
         .animation(.spring(response: 0.24, dampingFraction: 0.86), value: cancelTaskConfirmationLocation)
         .onChange(of: viewModel.shouldPresentBusyOverlay) { _, isBusy in
             if !isBusy {
-                cancelTaskConfirmationLocation = nil
+                DispatchQueue.main.async {
+                    cancelTaskConfirmationLocation = nil
+                }
             }
         }
     }
@@ -475,7 +504,7 @@ struct ProjectEditorView: View {
 
     private var propertyContextClip: TimelineClip? {
         guard let propertyContextClipID else { return nil }
-        return viewModel.project.clip(id: propertyContextClipID)
+        return viewModel.project.item(id: propertyContextClipID)?.visualEditingClip()
     }
 
     private var propertyContextText: TextTimelineItem? {

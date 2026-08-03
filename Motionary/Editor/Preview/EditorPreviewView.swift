@@ -26,6 +26,18 @@ struct CorePreviewSection: View {
                     ZStack {
                         viewModel.project.renderSettings.backgroundColor.swiftUIColor
 
+                        // Keep the AVPlayerLayer mounted behind the opening
+                        // poster while the first custom-compositor frame is
+                        // acknowledged. Gating the layer on contentRevision
+                        // deadlocks that acknowledgement because AVFoundation
+                        // has no video output surface to render into.
+                        if let player = viewModel.player {
+                            PreviewRendererView(player: player)
+                                .id(viewModel.previewRendererIdentity)
+                                .frame(width: canvasRect.width, height: canvasRect.height)
+                                .allowsHitTesting(false)
+                        }
+
                         if shouldShowOpeningPlaceholder {
                             openingPlaceholder
                         }
@@ -35,14 +47,6 @@ struct CorePreviewSection: View {
                             .onTapGesture {
                                 viewModel.deselectTimeline()
                             }
-
-                        if let player = viewModel.player,
-                            viewModel.previewContentRevision > 0 || !viewModel.isRenderingPreview
-                        {
-                            PreviewRendererView(player: player)
-                                .frame(width: canvasRect.width, height: canvasRect.height)
-                                .allowsHitTesting(false)
-                        }
                     }
                     .frame(width: canvasRect.width, height: canvasRect.height)
                     .clipped()

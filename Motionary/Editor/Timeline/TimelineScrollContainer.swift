@@ -1,5 +1,7 @@
 // UIKit-backed timeline scrolling, scrubbing, and pull-to-add behavior.
 
+import AVFoundation
+import Combine
 import SwiftUI
 import UIKit
 
@@ -28,6 +30,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     let autoScrollTarget: CGPoint?
     let onAutoScroll: (CGSize) -> Void
     let allowsVerticalScrolling: Bool
+    let playbackState: PlaybackState?
+    let playerProvider: (() -> AVPlayer?)?
+    let viewportState: TimelineViewportState?
+    let scrollPresentationState: TimelineScrollPresentationState?
+    let virtualizationConfiguration: TimelineVirtualizationConfiguration?
     let onScrubStart: () -> Void
     let onScrubChanged: (Double) -> Void
     let onScrubEnd: (Double) -> Void
@@ -47,6 +54,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         autoScrollTarget: CGPoint? = nil,
         onAutoScroll: @escaping (CGSize) -> Void = { _ in },
         allowsVerticalScrolling: Bool = true,
+        playbackState: PlaybackState? = nil,
+        playerProvider: (() -> AVPlayer?)? = nil,
+        viewportState: TimelineViewportState? = nil,
+        scrollPresentationState: TimelineScrollPresentationState? = nil,
+        virtualizationConfiguration: TimelineVirtualizationConfiguration? = nil,
         onScrubStart: @escaping () -> Void,
         onScrubChanged: @escaping (Double) -> Void,
         onScrubEnd: @escaping (Double) -> Void,
@@ -65,6 +77,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         self.autoScrollTarget = autoScrollTarget
         self.onAutoScroll = onAutoScroll
         self.allowsVerticalScrolling = allowsVerticalScrolling
+        self.playbackState = playbackState
+        self.playerProvider = playerProvider
+        self.viewportState = viewportState
+        self.scrollPresentationState = scrollPresentationState
+        self.virtualizationConfiguration = virtualizationConfiguration
         self.onScrubStart = onScrubStart
         self.onScrubChanged = onScrubChanged
         self.onScrubEnd = onScrubEnd
@@ -104,12 +121,16 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             guard let scrollView, let coordinator else { return }
             coordinator.synchronizeToCurrentTime(in: scrollView)
         }
+        context.coordinator.attach(to: scrollView)
 
         return scrollView
     }
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.isUpdatingUIView = true
+        defer { context.coordinator.isUpdatingUIView = false }
+        context.coordinator.updatePlaybackObservationIfNeeded()
         context.coordinator.updateAutoScroll(in: scrollView)
         context.coordinator.clampZoom(in: scrollView)
         let hostedContentChanged = context.coordinator.updateHostedContentIfNeeded(
@@ -122,6 +143,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             in: scrollView
         )
         scrollView.layoutIfNeeded()
+        context.coordinator.updateViewport(in: scrollView, force: hostedContentChanged)
         scrollView.isScrollEnabled = !isScrollDisabled
         scrollView.alwaysBounceVertical = allowsVerticalScrolling
         scrollView.isDirectionalLockEnabled = !allowsVerticalScrolling
@@ -131,7 +153,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
         let activePixelsPerSecond = context.coordinator.parent.pixelsPerSecond
         let maxX = max(scrollView.contentSize.width - scrollView.bounds.width, 0)
-        let targetX = min(max(CGFloat(currentTime) * activePixelsPerSecond, 0), maxX)
+        let resolvedCurrentTime = playbackState?.currentTime ?? currentTime
+        let targetX = min(max(CGFloat(resolvedCurrentTime) * activePixelsPerSecond, 0), maxX)
         let targetY = allowsVerticalScrolling
             ? min(
                 scrollView.contentOffset.y,
@@ -146,7 +169,9 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             }
         }
 
-        guard !context.coordinator.isUserInteracting else { return }
+        guard !context.coordinator.isUserInteracting,
+            playbackState?.isPlaying != true
+        else { return }
         guard abs(scrollView.contentOffset.x - targetX) > 0.01 || abs(scrollView.contentOffset.y - targetY) > 0.01 else {
             return
         }
@@ -154,6 +179,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         context.coordinator.isProgrammaticScroll = true
         scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
         context.coordinator.isProgrammaticScroll = false
+        context.coordinator.publishHorizontalScrollOffset(targetX, immediately: true)
+        context.coordinator.updateViewport(in: scrollView, deferIfUpdatingUIView: true)
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
@@ -178,6 +205,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private var lastAutoScrollTimestamp: CFTimeInterval?
         private var scrubDisplayLink: CADisplayLink?
         private var pendingScrubTime: Double?
+        private var playbackDisplayLink: CADisplayLink?
+        private weak var observedPlaybackState: PlaybackState?
+        private var playbackCancellables: Set<AnyCancellable> = []
+        private var isPlaybackSynchronizationScheduled = false
+        var isUpdatingUIView = false
 
         init(parent: TimelineScrollContainer) {
             self.parent = parent
@@ -185,11 +217,114 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             self.hostedContentRevision = parent.contentRevision
             self.hostedContentSize = parent.contentSize
             self.hostedPixelsPerSecond = parent.pixelsPerSecond
+            super.init()
+            installPlaybackObservation(parent.playbackState)
         }
 
         deinit {
             autoScrollDisplayLink?.invalidate()
             scrubDisplayLink?.invalidate()
+            playbackDisplayLink?.invalidate()
+        }
+
+        func attach(to scrollView: UIScrollView) {
+            self.scrollView = scrollView
+            updatePlaybackTransport()
+            updateViewport(in: scrollView, force: true)
+        }
+
+        func updatePlaybackObservationIfNeeded() {
+            guard observedPlaybackState !== parent.playbackState else {
+                updatePlaybackTransport()
+                return
+            }
+            installPlaybackObservation(parent.playbackState)
+        }
+
+        private func installPlaybackObservation(_ playbackState: PlaybackState?) {
+            playbackCancellables.removeAll()
+            observedPlaybackState = playbackState
+            guard let playbackState else {
+                stopPlaybackDisplayLink()
+                return
+            }
+            playbackState.$currentTime
+                .removeDuplicates()
+                .sink { [weak self] _ in
+                    guard let self,
+                        playbackState.isPlaying == false,
+                        let scrollView = self.scrollView
+                    else { return }
+                    self.schedulePlaybackSynchronization(in: scrollView)
+                }
+                .store(in: &playbackCancellables)
+            playbackState.$isPlaying
+                .removeDuplicates()
+                .sink { [weak self] _ in
+                    self?.updatePlaybackTransport()
+                }
+                .store(in: &playbackCancellables)
+        }
+
+        private func updatePlaybackTransport() {
+            guard parent.playbackState?.isPlaying == true else {
+                stopPlaybackDisplayLink()
+                if let scrollView {
+                    schedulePlaybackSynchronization(in: scrollView)
+                }
+                return
+            }
+            if let playbackDisplayLink {
+                configurePlaybackDisplayLink(playbackDisplayLink)
+                return
+            }
+            let link = CADisplayLink(
+                target: self,
+                selector: #selector(handlePlaybackFrame)
+            )
+            configurePlaybackDisplayLink(link)
+            link.add(to: .main, forMode: .common)
+            playbackDisplayLink = link
+        }
+
+        private func stopPlaybackDisplayLink() {
+            playbackDisplayLink?.invalidate()
+            playbackDisplayLink = nil
+        }
+
+        private func schedulePlaybackSynchronization(in scrollView: UIScrollView) {
+            guard !isPlaybackSynchronizationScheduled else { return }
+            isPlaybackSynchronizationScheduled = true
+            DispatchQueue.main.async { [weak self, weak scrollView] in
+                guard let self else { return }
+                self.isPlaybackSynchronizationScheduled = false
+                guard let scrollView else { return }
+                self.synchronizeToCurrentTime(in: scrollView)
+            }
+        }
+
+        private func configurePlaybackDisplayLink(_ link: CADisplayLink) {
+            let native = scrollView?.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+            let preferred = min(max(native, 1), 60)
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: Float(min(preferred, 30)),
+                maximum: Float(preferred),
+                preferred: Float(preferred)
+            )
+        }
+
+        @objc private func handlePlaybackFrame() {
+            guard parent.playbackState?.isPlaying == true,
+                !isUserInteracting,
+                let scrollView,
+                let player = parent.playerProvider?()
+            else { return }
+            let seconds = CMTimeGetSeconds(player.currentTime())
+            guard seconds.isFinite else { return }
+            scroll(
+                to: min(max(seconds, 0), parent.maximumTimelineTime),
+                in: scrollView
+            )
         }
 
         func updateAutoScroll(in scrollView: UIScrollView) {
@@ -267,7 +402,10 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func synchronizeToCurrentTime(in scrollView: UIScrollView) {
-            guard !isUserInteracting else { return }
+            guard TimelineScrollSynchronizationPolicy.shouldSynchronizeOnLayout(
+                isPlaying: parent.playbackState?.isPlaying == true,
+                isUserInteracting: isUserInteracting
+            ) else { return }
             let resolvedContentSize = scrollContentSize(
                 for: parent.contentSize,
                 in: scrollView
@@ -277,21 +415,30 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             {
                 scrollView.contentSize = resolvedContentSize
             }
+            let currentTime = parent.playbackState?.currentTime ?? parent.currentTime
+            scroll(to: currentTime, in: scrollView)
+        }
+
+        private func scroll(to time: Double, in scrollView: UIScrollView) {
             let maxX = max(scrollView.contentSize.width - scrollView.bounds.width, 0)
-            let targetX = min(
-                max(CGFloat(parent.currentTime) * parent.pixelsPerSecond, 0),
-                maxX
-            )
+            let targetX = min(max(CGFloat(time) * parent.pixelsPerSecond, 0), maxX)
             let targetY = parent.allowsVerticalScrolling
-                ? min(scrollView.contentOffset.y, max(scrollView.contentSize.height - scrollView.bounds.height, 0))
+                ? min(
+                    scrollView.contentOffset.y,
+                    max(scrollView.contentSize.height - scrollView.bounds.height, 0)
+                )
                 : 0
             guard abs(scrollView.contentOffset.x - targetX) > 0.01
-                || abs(scrollView.contentOffset.y - targetY) > 0.01
-            else { return }
+                    || abs(scrollView.contentOffset.y - targetY) > 0.01
+            else {
+                updateViewport(in: scrollView, deferIfUpdatingUIView: true)
+                return
+            }
             isProgrammaticScroll = true
             scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
             isProgrammaticScroll = false
             publishHorizontalScrollOffset(targetX, immediately: true)
+            updateViewport(in: scrollView, deferIfUpdatingUIView: true)
         }
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -303,7 +450,10 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             if !isApplyingPinchScale {
                 publishHorizontalScrollOffset(
                     scrollView.contentOffset.x,
-                    immediately: pinchRecognizer?.state == .began || pinchRecognizer?.state == .changed
+                    immediately: scrollView.isDragging
+                        || scrollView.isDecelerating
+                        || pinchRecognizer?.state == .began
+                        || pinchRecognizer?.state == .changed
                 )
             }
 
@@ -332,6 +482,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             } else if pullDistance <= 0.5 {
                 parent.onPullToAddChanged(0)
             }
+            updateViewport(in: scrollView)
 
             guard !isPinching else { return }
             guard !isProgrammaticScroll, isUserInteracting || scrollView.isDragging || scrollView.isDecelerating else {
@@ -344,18 +495,33 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             emitScrubTime(time)
         }
 
-        private func publishHorizontalScrollOffset(_ offset: CGFloat, immediately: Bool = false) {
+        func publishHorizontalScrollOffset(_ offset: CGFloat, immediately: Bool = false) {
+            if isUpdatingUIView {
+                DispatchQueue.main.async { [weak state = parent.scrollPresentationState] in
+                    state?.update(horizontalOffset: offset)
+                }
+            } else {
+                parent.scrollPresentationState?.update(horizontalOffset: offset)
+            }
             if immediately {
                 pendingHorizontalScrollOffset = nil
                 guard abs(parent.horizontalScrollOffset - offset) > 0.01 else { return }
+                if isUpdatingUIView {
+                    pendingHorizontalScrollOffset = offset
+                    scheduleDeferredHorizontalScrollOffsetPublish()
+                    return
+                }
                 parent.horizontalScrollOffset = offset
                 return
             }
 
             pendingHorizontalScrollOffset = offset
+            scheduleDeferredHorizontalScrollOffsetPublish()
+        }
+
+        private func scheduleDeferredHorizontalScrollOffsetPublish() {
             guard !isHorizontalScrollOffsetUpdateScheduled else { return }
             isHorizontalScrollOffsetUpdateScheduled = true
-
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 isHorizontalScrollOffsetUpdateScheduled = false
@@ -364,6 +530,40 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 guard abs(parent.horizontalScrollOffset - offset) > 0.01 else { return }
                 parent.horizontalScrollOffset = offset
             }
+        }
+
+        func updateViewport(
+            in scrollView: UIScrollView,
+            force: Bool = false,
+            deferIfUpdatingUIView: Bool = false
+        ) {
+            guard let viewportState = parent.viewportState,
+                let configuration = parent.virtualizationConfiguration,
+                scrollView.bounds.width > 0,
+                scrollView.bounds.height > 0
+            else { return }
+            if deferIfUpdatingUIView, isUpdatingUIView {
+                let contentOffset = scrollView.contentOffset
+                let viewportSize = scrollView.bounds.size
+                let pixelsPerSecond = parent.pixelsPerSecond
+                DispatchQueue.main.async { [weak viewportState] in
+                    viewportState?.update(
+                        contentOffset: contentOffset,
+                        viewportSize: viewportSize,
+                        pixelsPerSecond: pixelsPerSecond,
+                        configuration: configuration,
+                        force: force
+                    )
+                }
+                return
+            }
+            viewportState.update(
+                contentOffset: scrollView.contentOffset,
+                viewportSize: scrollView.bounds.size,
+                pixelsPerSecond: parent.pixelsPerSecond,
+                configuration: configuration,
+                force: force
+            )
         }
 
         private func emitScrubTime(_ time: Double) {
@@ -427,7 +627,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
         private func preferredScrubFrameRate() -> Int {
             let native = scrollView?.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
-            return max(native, 1)
+            return min(max(native, 1), 60)
         }
 
         @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
@@ -516,6 +716,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             )
             isProgrammaticScroll = false
             publishHorizontalScrollOffset(clampedX, immediately: true)
+            updateViewport(in: scrollView, force: true)
         }
 
         func gestureRecognizer(

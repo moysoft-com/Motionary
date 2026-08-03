@@ -167,6 +167,46 @@ extension EditorViewModel {
         )
     }
 
+    @discardableResult
+    func addAdjustmentLayer() -> UUID? {
+        guard !isPerformingLongTask else { return nil }
+        let insertionTime = visibleInsertionTime(at: currentTime)
+        let adjustmentDuration = max(duration - insertionTime, 5)
+        let before = project
+        var after = project
+        let trackIndex =
+            after.topAvailableAdjustmentTrackIndex(
+                start: insertionTime,
+                duration: adjustmentDuration
+            )
+            ?? after.insertFreshTrack(kind: .visual)
+        let item = AdjustmentTimelineItem(
+            name: "Adjustment",
+            timelineStart: insertionTime,
+            duration: adjustmentDuration
+        )
+        after.tracks[trackIndex].items.append(.adjustment(item))
+        after.tracks[trackIndex].sortItems()
+        after.renumberTracks()
+        selectedTrackID = after.tracks[trackIndex].id
+        selectedClipID = item.id
+        commit(
+            EditorCommandFactory.importMedia(
+                before: before,
+                after: after,
+                invalidation: [
+                    .previewFrame,
+                    .compositionTopology,
+                    .timelineLayout,
+                    .userInterface,
+                    .persistence,
+                ]
+            ),
+            seekTo: insertionTime
+        )
+        return item.id
+    }
+
     func addImportedMediaBatch(
         _ importedMedia: [ImportedMedia],
         sequentialVisual: Bool

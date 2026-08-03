@@ -415,13 +415,7 @@ extension EditorViewModel {
             }
 
             if let artifact, artifact != storedArtifact {
-                mutateProject(
-                    rebuild: false,
-                    recordHistory: false,
-                    persistChanges: true,
-                    touchUpdatedAt: false,
-                    refreshTimeline: false
-                ) { project in
+                mutateDerivedProjectData { project in
                     project.mediaLibrary[requirement.mediaID]?.backgroundRemovalArtifact = artifact
                 }
             }

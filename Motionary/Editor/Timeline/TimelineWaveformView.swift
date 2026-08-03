@@ -53,12 +53,15 @@ struct TimelineWaveformView: View {
 
 actor TimelineAudioWaveformCache {
     static let shared = TimelineAudioWaveformCache()
-    private let cache = NSCache<NSString, TimelineWaveformBox>()
+    private let sourceCache = NSCache<NSString, TimelineWaveformBox>()
+    private let retimedCache = NSCache<NSString, TimelineWaveformBox>()
     private var inFlight: [String: Task<[CGFloat], Never>] = [:]
 
     init() {
-        cache.countLimit = 120
-        cache.totalCostLimit = 16 * 1_024 * 1_024
+        sourceCache.countLimit = 120
+        sourceCache.totalCostLimit = 12 * 1_024 * 1_024
+        retimedCache.countLimit = 160
+        retimedCache.totalCostLimit = 20 * 1_024 * 1_024
     }
 
     func samples(
@@ -68,24 +71,31 @@ actor TimelineAudioWaveformCache {
         targetCount: Int
     ) async -> [CGFloat] {
         let quantizedCount = max(32, Int((Double(targetCount) / 32).rounded(.up)) * 32)
-        let key = [
+        let sourceKey = [
             media.mediaID.rawValue.uuidString,
             String(format: "%.3f", clip.sourceRange.start),
             String(format: "%.3f", clip.sourceRange.duration),
             "\(quantizedCount)"
         ].joined(separator: "|")
+        let retimedKey = "\(sourceKey)|speed:\(speedMap.topologySignature)"
 
-        if let cached = cache.object(forKey: key as NSString) {
-            return TimelineAudioWaveformLoader.retimedSamples(
+        if let cached = retimedCache.object(forKey: retimedKey as NSString) {
+            return cached.samples
+        }
+
+        if let cached = sourceCache.object(forKey: sourceKey as NSString) {
+            return cacheRetimedSamples(
                 cached.samples,
+                key: retimedKey,
                 speedMap: speedMap,
                 sourceDuration: clip.sourceRange.duration
             )
         }
 
-        if let task = inFlight[key] {
-            return TimelineAudioWaveformLoader.retimedSamples(
+        if let task = inFlight[sourceKey] {
+            return cacheRetimedSamples(
                 await task.value,
+                key: retimedKey,
                 speedMap: speedMap,
                 sourceDuration: clip.sourceRange.duration
             )
@@ -98,16 +108,17 @@ actor TimelineAudioWaveformCache {
                 targetCount: quantizedCount
             )
         }
-        inFlight[key] = task
+        inFlight[sourceKey] = task
         let sourceSamples = await task.value
-        inFlight[key] = nil
-        cache.setObject(
+        inFlight[sourceKey] = nil
+        sourceCache.setObject(
             TimelineWaveformBox(sourceSamples),
-            forKey: key as NSString,
+            forKey: sourceKey as NSString,
             cost: max(sourceSamples.count * MemoryLayout<CGFloat>.stride, 1)
         )
-        return TimelineAudioWaveformLoader.retimedSamples(
+        return cacheRetimedSamples(
             sourceSamples,
+            key: retimedKey,
             speedMap: speedMap,
             sourceDuration: clip.sourceRange.duration
         )
@@ -116,13 +127,34 @@ actor TimelineAudioWaveformCache {
     func removeAll() {
         inFlight.values.forEach { $0.cancel() }
         inFlight.removeAll()
-        cache.removeAllObjects()
+        sourceCache.removeAllObjects()
+        retimedCache.removeAllObjects()
     }
 
     func trimForMemoryPressure() {
         inFlight.values.forEach { $0.cancel() }
         inFlight.removeAll()
-        cache.removeAllObjects()
+        sourceCache.removeAllObjects()
+        retimedCache.removeAllObjects()
+    }
+
+    private func cacheRetimedSamples(
+        _ sourceSamples: [CGFloat],
+        key: String,
+        speedMap: SpeedMap,
+        sourceDuration: Double
+    ) -> [CGFloat] {
+        let samples = TimelineAudioWaveformLoader.retimedSamples(
+            sourceSamples,
+            speedMap: speedMap,
+            sourceDuration: sourceDuration
+        )
+        retimedCache.setObject(
+            TimelineWaveformBox(samples),
+            forKey: key as NSString,
+            cost: max(samples.count * MemoryLayout<CGFloat>.stride, 1)
+        )
+        return samples
     }
 }
 

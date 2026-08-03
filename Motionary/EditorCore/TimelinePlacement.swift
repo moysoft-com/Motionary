@@ -2,6 +2,356 @@
 
 import Foundation
 
+/// Immutable indexes for one timeline-item drag. Building this once at gesture
+/// start keeps project copying, item sorting, snap-anchor scans, and gap
+/// construction out of the per-frame drag path.
+struct TimelinePlacementDragSession {
+    let itemID: UUID
+    let sourceTrackIndex: Int
+
+    private enum SnappedEdge: Int {
+        case start
+        case end
+    }
+
+    private struct SnapAnchor {
+        let value: Double
+        let ordinal: Int
+    }
+
+    private struct SnapCandidate {
+        let anchor: SnapAnchor
+        let edge: SnappedEdge
+        let distance: Double
+        let start: Double
+    }
+
+    private struct FreeRange {
+        let start: Double
+        let end: Double
+    }
+
+    private let duration: Double
+    private let trackCount: Int
+    private let compatibleTrackIndices: [Int]
+    private let snapAnchors: [SnapAnchor]
+    private let freeRangesByTrack: [[FreeRange]]
+    private let snapTargetTracks: [Int64: [Int]]
+
+    init?(
+        project: EditorProject,
+        itemID: UUID,
+        currentTime: Double
+    ) {
+        guard let location = project.itemLocation(id: itemID) else { return nil }
+
+        var tracks = project.tracks
+        guard tracks.indices.contains(location.track),
+            tracks[location.track].items.indices.contains(location.item)
+        else { return nil }
+        let item = tracks[location.track].items.remove(at: location.item)
+        let safeDuration = max(item.placementDuration, 0.001)
+
+        self.itemID = itemID
+        sourceTrackIndex = location.track
+        duration = safeDuration
+        trackCount = tracks.count
+        compatibleTrackIndices = tracks.indices.filter {
+            tracks[$0].canAcceptItem(item)
+        }
+        freeRangesByTrack = tracks.map {
+            Self.freeRanges(duration: safeDuration, items: $0.items)
+        }
+
+        var valuesWithOrdinal: [(value: Double, ordinal: Int)] = []
+        valuesWithOrdinal.reserveCapacity(
+            1 + project.tracks.reduce(0) { $0 + $1.items.count * 2 }
+        )
+        var ordinal = 0
+        func appendAnchor(_ value: Double) {
+            guard value.isFinite else { return }
+            valuesWithOrdinal.append((value, ordinal))
+            ordinal += 1
+        }
+
+        appendAnchor(currentTime)
+        for beat in project.beatSnapAnchors(excluding: itemID) {
+            appendAnchor(beat)
+        }
+
+        var targetTracks: [Int64: Set<Int>] = [:]
+        for (trackIndex, track) in tracks.enumerated() {
+            for remainingItem in track.items {
+                appendAnchor(remainingItem.timelineStart)
+                appendAnchor(remainingItem.timelineEnd)
+                targetTracks[
+                    Self.quantizedTime(remainingItem.timelineStart),
+                    default: []
+                ].insert(trackIndex)
+                targetTracks[
+                    Self.quantizedTime(remainingItem.timelineEnd),
+                    default: []
+                ].insert(trackIndex)
+            }
+        }
+
+        var earliestOrdinalByValue: [Double: Int] = [:]
+        for entry in valuesWithOrdinal {
+            earliestOrdinalByValue[entry.value] = min(
+                earliestOrdinalByValue[entry.value] ?? entry.ordinal,
+                entry.ordinal
+            )
+        }
+        snapAnchors = earliestOrdinalByValue
+            .map { SnapAnchor(value: $0.key, ordinal: $0.value) }
+            .sorted {
+                if $0.value != $1.value {
+                    return $0.value < $1.value
+                }
+                return $0.ordinal < $1.ordinal
+            }
+        snapTargetTracks = targetTracks.mapValues { $0.sorted() }
+    }
+
+    func resolve(
+        proposedStart: Double,
+        proposedTrackIndex: Int,
+        snapThreshold: Double = 0.16
+    ) -> TimelinePlacementResult {
+        let destinationTrackIndex = compatibleTrackIndex(
+            proposedIndex: proposedTrackIndex
+        )
+        let baseStart = max(0, proposedStart)
+        let baseEnd = baseStart + duration
+        let snapCandidate = bestSnapCandidate(
+            baseStart: baseStart,
+            baseEnd: baseEnd,
+            threshold: snapThreshold
+        )
+        let candidateStart = snapCandidate?.start ?? baseStart
+        let nonOverlappingStart = nearestAvailableStart(
+            proposedStart: candidateStart,
+            trackIndex: destinationTrackIndex
+        )
+        let alignedSnapTime = snapCandidate.flatMap { candidate -> Double? in
+            let finalEnd = nonOverlappingStart + duration
+            return abs(nonOverlappingStart - candidate.anchor.value) < 0.001
+                    || abs(finalEnd - candidate.anchor.value) < 0.001
+                ? candidate.anchor.value
+                : nil
+        }
+
+        return TimelinePlacementResult(
+            start: nonOverlappingStart,
+            trackIndex: destinationTrackIndex,
+            snapped: alignedSnapTime != nil
+                || abs(nonOverlappingStart - candidateStart) > 0.001,
+            snapTime: alignedSnapTime
+        )
+    }
+
+    func trackIndices(alignedAt time: Double) -> [Int] {
+        snapTargetTracks[Self.quantizedTime(time)] ?? []
+    }
+
+    private func compatibleTrackIndex(proposedIndex: Int) -> Int {
+        guard !compatibleTrackIndices.isEmpty else {
+            return min(max(proposedIndex, 0), max(trackCount - 1, 0))
+        }
+        if compatibleTrackIndices.binarySearch(proposedIndex) != nil {
+            return proposedIndex
+        }
+
+        let insertion = compatibleTrackIndices.lowerBoundIndex(for: proposedIndex)
+        var candidates: [Int] = []
+        if compatibleTrackIndices.indices.contains(insertion) {
+            candidates.append(compatibleTrackIndices[insertion])
+        }
+        if insertion > compatibleTrackIndices.startIndex {
+            candidates.append(compatibleTrackIndices[insertion - 1])
+        }
+        return candidates.min { left, right in
+            let leftDistance = abs(left - proposedIndex)
+            let rightDistance = abs(right - proposedIndex)
+            guard leftDistance == rightDistance else {
+                return leftDistance < rightDistance
+            }
+
+            let direction = proposedIndex - sourceTrackIndex
+            if direction > 0 {
+                if (left > sourceTrackIndex) != (right > sourceTrackIndex) {
+                    return left > sourceTrackIndex
+                }
+            } else if direction < 0 {
+                if (left < sourceTrackIndex) != (right < sourceTrackIndex) {
+                    return left < sourceTrackIndex
+                }
+            }
+            return abs(left - sourceTrackIndex) < abs(right - sourceTrackIndex)
+        } ?? min(max(proposedIndex, 0), max(trackCount - 1, 0))
+    }
+
+    private func bestSnapCandidate(
+        baseStart: Double,
+        baseEnd: Double,
+        threshold: Double
+    ) -> SnapCandidate? {
+        let candidates = [
+            nearestAnchor(to: baseStart).map {
+                SnapCandidate(
+                    anchor: $0,
+                    edge: .start,
+                    distance: abs(baseStart - $0.value),
+                    start: max(0, $0.value)
+                )
+            },
+            nearestAnchor(to: baseEnd).map {
+                SnapCandidate(
+                    anchor: $0,
+                    edge: .end,
+                    distance: abs(baseEnd - $0.value),
+                    start: max(0, $0.value - duration)
+                )
+            },
+        ]
+        .compactMap { $0 }
+        .filter { $0.distance < threshold }
+
+        return candidates.min {
+            if $0.distance != $1.distance {
+                return $0.distance < $1.distance
+            }
+            if $0.anchor.ordinal != $1.anchor.ordinal {
+                return $0.anchor.ordinal < $1.anchor.ordinal
+            }
+            return $0.edge.rawValue < $1.edge.rawValue
+        }
+    }
+
+    private func nearestAnchor(to value: Double) -> SnapAnchor? {
+        guard !snapAnchors.isEmpty else { return nil }
+        let insertion = snapAnchors.lowerBoundIndex(for: value, by: \.value)
+        var candidates: [SnapAnchor] = []
+        if snapAnchors.indices.contains(insertion) {
+            candidates.append(snapAnchors[insertion])
+        }
+        if insertion > snapAnchors.startIndex {
+            candidates.append(snapAnchors[insertion - 1])
+        }
+        return candidates.min {
+            let leftDistance = abs($0.value - value)
+            let rightDistance = abs($1.value - value)
+            if leftDistance != rightDistance {
+                return leftDistance < rightDistance
+            }
+            return $0.ordinal < $1.ordinal
+        }
+    }
+
+    private func nearestAvailableStart(
+        proposedStart: Double,
+        trackIndex: Int
+    ) -> Double {
+        guard freeRangesByTrack.indices.contains(trackIndex),
+            !freeRangesByTrack[trackIndex].isEmpty
+        else { return max(0, proposedStart) }
+
+        let ranges = freeRangesByTrack[trackIndex]
+        let boundedStart = max(0, proposedStart)
+        let insertion = ranges.lowerBoundIndex(for: boundedStart, by: \.end)
+        guard ranges.indices.contains(insertion) else {
+            return boundedStart
+        }
+        let next = ranges[insertion]
+        if boundedStart >= next.start {
+            return boundedStart
+        }
+        guard insertion > ranges.startIndex else {
+            return next.start
+        }
+        let previous = ranges[insertion - 1]
+        return abs(previous.end - boundedStart) <= abs(next.start - boundedStart)
+            ? previous.end
+            : next.start
+    }
+
+    private static func freeRanges(
+        duration: Double,
+        items: [TimelineItem]
+    ) -> [FreeRange] {
+        guard !items.isEmpty else {
+            return [FreeRange(start: 0, end: Double.greatestFiniteMagnitude / 4)]
+        }
+
+        var result: [FreeRange] = []
+        result.reserveCapacity(items.count + 1)
+        var cursor = 0.0
+        for item in items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+            if item.timelineStart - cursor >= duration {
+                result.append(
+                    FreeRange(
+                        start: cursor,
+                        end: item.timelineStart - duration
+                    )
+                )
+            }
+            cursor = max(cursor, item.timelineEnd)
+        }
+        result.append(
+            FreeRange(
+                start: cursor,
+                end: Double.greatestFiniteMagnitude / 4
+            )
+        )
+        return result
+    }
+
+    private static func quantizedTime(_ value: Double) -> Int64 {
+        Int64((value * 1_000_000).rounded())
+    }
+}
+
+private extension RandomAccessCollection where Element == Int, Index == Int {
+    func binarySearch(_ value: Int) -> Int? {
+        let index = lowerBoundIndex(for: value)
+        guard indices.contains(index), self[index] == value else { return nil }
+        return index
+    }
+
+    func lowerBoundIndex(for value: Int) -> Int {
+        var lower = startIndex
+        var upper = endIndex
+        while lower < upper {
+            let middle = lower + distance(from: lower, to: upper) / 2
+            if self[middle] < value {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        return lower
+    }
+}
+
+private extension RandomAccessCollection where Index == Int {
+    func lowerBoundIndex<Value: Comparable>(
+        for value: Value,
+        by keyPath: KeyPath<Element, Value>
+    ) -> Int {
+        var lower = startIndex
+        var upper = endIndex
+        while lower < upper {
+            let middle = lower + distance(from: lower, to: upper) / 2
+            if self[middle][keyPath: keyPath] < value {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        return lower
+    }
+}
+
 extension EditorProject {
     func clip(id: UUID) -> TimelineClip? {
         item(id: id)?.legacyClip()
@@ -24,7 +374,7 @@ extension EditorProject {
         let requiredKind = item.requiredTrackKind
         let destinationIndex = compatibleTrackIndex(
             proposedIndex: proposedTrackIndex,
-            requiredKind: requiredKind,
+            item: item,
             sourceIndex: location.track
         )
         adoptTrackKindIfNeeded(at: destinationIndex, requiredKind: requiredKind)
@@ -53,7 +403,7 @@ extension EditorProject {
         let requiredKind = item.requiredTrackKind
         let destinationIndex = compatibleTrackIndex(
             proposedIndex: placement.trackIndex,
-            requiredKind: requiredKind,
+            item: item,
             sourceIndex: location.track
         )
         adoptTrackKindIfNeeded(at: destinationIndex, requiredKind: requiredKind)
@@ -123,6 +473,25 @@ extension EditorProject {
 
         return tracks.firstIndex { track in
             guard track.kind == kind else { return false }
+            if kind == .visual, track.items.contains(where: \.isAdjustmentLayer) {
+                return false
+            }
+            return track.items.allSatisfy { item in
+                item.timelineEnd <= rangeStart || item.timelineStart >= rangeEnd
+            }
+        }
+    }
+
+    func topAvailableAdjustmentTrackIndex(
+        start: Double,
+        duration: Double
+    ) -> Int? {
+        let rangeStart = max(0, start)
+        let rangeEnd = rangeStart + max(duration, 0.001)
+        return tracks.firstIndex { track in
+            guard track.kind == .visual,
+                track.items.allSatisfy(\.isAdjustmentLayer)
+            else { return false }
             return track.items.allSatisfy { item in
                 item.timelineEnd <= rangeStart || item.timelineStart >= rangeEnd
             }
@@ -131,16 +500,16 @@ extension EditorProject {
 
     mutating func compatibleTrackIndex(
         proposedIndex: Int,
-        requiredKind: TrackKind,
+        item: TimelineItem,
         sourceIndex: Int? = nil
     ) -> Int {
         if tracks.indices.contains(proposedIndex),
-            tracks[proposedIndex].canAcceptClipKind(requiredKind)
+            tracks[proposedIndex].canAcceptItem(item)
         {
             return proposedIndex
         }
 
-        let matching = tracks.indices.filter { tracks[$0].canAcceptClipKind(requiredKind) }
+        let matching = tracks.indices.filter { tracks[$0].canAcceptItem(item) }
         if let nearest = matching.min(by: { left, right in
             let leftDistance = abs(left - proposedIndex)
             let rightDistance = abs(right - proposedIndex)
@@ -181,6 +550,7 @@ extension EditorProject {
 
     mutating func renumberTracks() {
         var visualIndex = 1
+        var adjustmentIndex = 1
         var shapeIndex = 1
         var textIndex = 1
         var audioIndex = 1
@@ -189,8 +559,15 @@ extension EditorProject {
             case .undefined:
                 tracks[index].name = "Layer"
             case .visual:
-                tracks[index].name = "Layer \(visualIndex)"
-                visualIndex += 1
+                if !tracks[index].items.isEmpty,
+                    tracks[index].items.allSatisfy(\.isAdjustmentLayer)
+                {
+                    tracks[index].name = "Adjustment \(adjustmentIndex)"
+                    adjustmentIndex += 1
+                } else {
+                    tracks[index].name = "Layer \(visualIndex)"
+                    visualIndex += 1
+                }
             case .shape:
                 tracks[index].name = "Shape \(shapeIndex)"
                 shapeIndex += 1

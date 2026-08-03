@@ -2,6 +2,7 @@
 
 import AVFoundation
 import Foundation
+import os
 
 extension EditorViewModel {
     func updateScrub(to time: Double) {
@@ -16,15 +17,30 @@ extension EditorViewModel {
         scheduleLatestScrubSeek()
     }
 
-    func flushDeferredPreviewRebuild(seekTo time: Double) {
-        guard !deferredPreviewInvalidation.isEmpty else { return }
-        let invalidation = deferredPreviewInvalidation
+    /// Restores the canonical preview graph with one rebuild after scrubbing.
+    /// Generated layers need a balanced-quality frame, but that request must
+    /// be unioned with any deferred topology/audio work instead of cancelling
+    /// it with a second descriptor-only task.
+    @discardableResult
+    func flushDeferredPreviewRebuild(
+        seekTo time: Double,
+        includeGeneratedLayerQualityRestore: Bool = false
+    ) -> EditorInvalidation {
+        let hadDeferredWork = !deferredPreviewInvalidation.isEmpty
+        var invalidation = deferredPreviewInvalidation
         deferredPreviewInvalidation = []
+        if includeGeneratedLayerQualityRestore,
+            project.containsGeneratedPreviewLayer
+        {
+            invalidation.insert(.previewFrame)
+        }
+        guard !invalidation.isEmpty else { return [] }
         schedulePreviewRebuild(
             seekTo: time,
-            delay: false,
+            delay: !hadDeferredWork,
             invalidation: invalidation
         )
+        return invalidation
     }
 
     private func scheduleLatestScrubSeek() {
@@ -65,20 +81,46 @@ extension EditorViewModel {
         scrubSeekGeneration &+= 1
         let seekGeneration = scrubSeekGeneration
         let issuedAt = CFAbsoluteTimeGetCurrent()
-        player.seek(
-            to: CMTime(seconds: target, preferredTimescale: 600),
-            toleranceBefore: scrubSeekTolerance(for: target),
-            toleranceAfter: scrubSeekTolerance(for: target)
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
-                guard self.scrubSeekGeneration == seekGeneration else { return }
-                self.isScrubSeekInFlight = false
-                guard self.isScrubbing else { return }
-                if self.pendingScrubSeekTime != nil {
-                    self.scheduleLatestScrubSeek()
+        let signpostID = OSSignpostID(log: TimelinePerformanceSignposts.log)
+        os_signpost(
+            .begin,
+            log: TimelinePerformanceSignposts.log,
+            name: "Scrub Seek",
+            signpostID: signpostID,
+            "target=%.3f",
+            target
+        )
+        let tolerance = scrubSeekTolerance(for: target)
+        Task { [weak self, weak player] in
+            guard let self, let player else { return }
+            let didSeek = await self.boundedSeek(
+                player: player,
+                to: target,
+                toleranceBefore: tolerance,
+                toleranceAfter: tolerance,
+                timeoutNanoseconds: 700_000_000
+            )
+            os_signpost(
+                .end,
+                log: TimelinePerformanceSignposts.log,
+                name: "Scrub Seek",
+                signpostID: signpostID
+            )
+            guard self.scrubSeekGeneration == seekGeneration else { return }
+            self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
+            self.isScrubSeekInFlight = false
+            guard didSeek else {
+                if self.player === player {
+                    self.schedulePreviewRecovery(
+                        reason: .seekTimeout,
+                        resumePlayback: false
+                    )
                 }
+                return
+            }
+            guard self.isScrubbing else { return }
+            if self.pendingScrubSeekTime != nil {
+                self.scheduleLatestScrubSeek()
             }
         }
     }
@@ -133,28 +175,6 @@ extension EditorViewModel {
     }
 
     private func activeGeneratedLayerCost(at target: Double) -> Int {
-        project.tracks.reduce(0) { score, track in
-            guard !track.isMuted,
-                track.kind == .visual || track.kind == .shape || track.kind == .text
-            else { return score }
-            return score + track.items.reduce(0) { itemScore, item in
-                guard item.timelineStart <= target && item.timelineEnd > target else {
-                    return itemScore
-                }
-                switch item {
-                case .shape:
-                    return itemScore + 3
-                case .text(let text):
-                    var animatedTextCost = 0
-                    if text.animations.entrance != nil { animatedTextCost += 2 }
-                    if text.animations.loop != nil { animatedTextCost += 2 }
-                    if text.animations.exit != nil { animatedTextCost += 2 }
-                    let keyframeCost = min(text.allKeyframeTimes.count, 6)
-                    return itemScore + 3 + animatedTextCost + keyframeCost
-                default:
-                    return itemScore
-                }
-            }
-        }
+        cachedTimelineEvaluationIndex().generatedLayerCost(at: target)
     }
 }

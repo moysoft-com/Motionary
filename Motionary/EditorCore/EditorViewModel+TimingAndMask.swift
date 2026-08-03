@@ -108,7 +108,7 @@ extension EditorViewModel {
         updatedItem.speedMap = .constant(speed: speedMap(currentItem).speed(at: 0))
         let durationDelta = updatedItem.timelineDuration - currentItem.timelineDuration
         guard abs(durationDelta) > 0.000_001 || updatedItem.speedMap != currentItem.speedMap else {
-            errorMessage = nil
+            clearSpeedEditErrorIfNeeded()
             return true
         }
 
@@ -119,9 +119,12 @@ extension EditorViewModel {
                 .min(),
             updatedItem.timelineEnd > nextStart + 0.000_001
         {
-            errorMessage = interactive
-                ? nil
-                : "This speed would overlap the next clip. Enable ripple editing or leave more room."
+            if interactive {
+                clearSpeedEditErrorIfNeeded()
+            } else {
+                errorMessage =
+                    "This speed would overlap the next clip. Enable ripple editing or leave more room."
+            }
             return false
         }
 
@@ -163,8 +166,13 @@ extension EditorViewModel {
         if graphSegment?.section == .speed {
             refreshGraphSegment()
         }
-        errorMessage = nil
+        clearSpeedEditErrorIfNeeded()
         return true
+    }
+
+    private func clearSpeedEditErrorIfNeeded() {
+        guard errorMessage != nil else { return }
+        errorMessage = nil
     }
 
     func setSelectedMask(_ mask: ItemMask?) {
@@ -201,7 +209,7 @@ extension EditorViewModel {
                 mask.roundnessScale = min(max(roundnessScale, 0), 1)
             }
             if let rotationDegrees, rotationDegrees.isFinite {
-                mask.rotationDegrees = min(max(rotationDegrees, -180), 180)
+                mask.rotationDegrees = rotationDegrees
             }
             if let offsetScale, offsetScale.isFinite {
                 mask.offsetScale = min(max(offsetScale, -1), 1)

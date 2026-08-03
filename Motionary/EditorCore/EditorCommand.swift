@@ -336,7 +336,20 @@ extension EditorProject {
                         shape: nil,
                         text: text
                     )
-                case .caption, .adjustment, .compound:
+                case .adjustment(let adjustment):
+                    RenderItemVisual(
+                        id: adjustment.id,
+                        transform: adjustment.visuals.transform,
+                        adjustments: adjustment.visuals.adjustments,
+                        effects: adjustment.visuals.effectStack,
+                        mask: adjustment.visuals.mask,
+                        backgroundRemoval: nil,
+                        blendMode: adjustment.visuals.blendMode,
+                        blendIntensity: adjustment.visuals.blendIntensity,
+                        shape: nil,
+                        text: nil
+                    )
+                case .caption, .compound:
                     nil
                 }
             }

@@ -1,11 +1,33 @@
 // Timeline trimming and selection-visibility tests.
 
+import Combine
 import Foundation
 import Testing
 
 @testable import Motionary
 
 struct TimelineEditingTests {
+    @MainActor
+    @Test func timelineViewportOverscanClampsToProjectDuration() async throws {
+        let state = TimelineViewportState()
+        state.update(
+            contentOffset: CGPoint(x: 200, y: 0),
+            viewportSize: CGSize(width: 390, height: 180),
+            pixelsPerSecond: 100,
+            configuration: TimelineVirtualizationConfiguration(
+                centerPadding: 195,
+                trackOriginY: 38,
+                rowStride: 51,
+                trackCount: 3,
+                duration: 2
+            ),
+            force: true
+        )
+
+        #expect(state.window.timeRange.lowerBound >= 0)
+        #expect(state.window.timeRange.upperBound == 2)
+    }
+
     @MainActor
     @Test func timelineItemEditingPreservesRichPropertiesThroughUndo() async throws {
         let itemID = UUID()
@@ -325,6 +347,49 @@ struct TimelineEditingTests {
     }
 
     @MainActor
+    @Test func repeatedInteractiveSpeedSamplesClearAStaleErrorOnlyOnce() throws {
+        let itemID = UUID()
+        let item = TimelineItem.media(
+            MediaTimelineItem(
+                id: itemID,
+                name: "Static speed",
+                mediaID: MediaID(),
+                mediaType: .video,
+                timelineStart: 0,
+                sourceRange: TimeRangeValue(start: 0, duration: 4)
+            )
+        )
+        let project = EditorProject(
+            title: "Speed error publication",
+            tracks: [TimelineTrack(name: "Layer 1", kind: .visual, items: [item])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.selectTimelineItem(itemID, trackID: project.tracks[0].id)
+        viewModel.errorMessage = "Stale error"
+        let session = try #require(viewModel.beginSelectedSpeedEditAtPlayhead())
+
+        var errorPublicationCount = 0
+        let cancellable = viewModel.$errorMessage
+            .dropFirst()
+            .sink { _ in errorPublicationCount += 1 }
+
+        let firstResult = viewModel.setSelectedSpeed(1, in: session, interactive: true)
+        let secondResult = viewModel.setSelectedSpeed(1, in: session, interactive: true)
+
+        #expect(firstResult)
+        #expect(secondResult)
+        #expect(viewModel.errorMessage == nil)
+        #expect(errorPublicationCount == 1)
+
+        viewModel.finishInteractiveEdit(rebuild: false)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    @MainActor
     @Test func interactiveSpeedAlwaysRemainsStatic() async throws {
         let itemID = UUID()
         let item = TimelineItem.media(
@@ -532,5 +597,746 @@ struct TimelineEditingTests {
 
         #expect(viewModel.selectedClipID == clipID)
         #expect(viewModel.selectedClipIsActiveAtPlayhead == false)
+    }
+
+    @Test func selectedItemNavigationSharesBeatStorageWithoutCartesianDuplication() throws {
+        let selectedID = UUID()
+        let visualItems: [TimelineItem] = (0..<40).map { index in
+            .media(
+                MediaTimelineItem(
+                    id: index == 0 ? selectedID : UUID(),
+                    name: "Visual \(index)",
+                    mediaID: MediaID(),
+                    mediaType: .video,
+                    timelineStart: Double(index * 2),
+                    sourceRange: TimeRangeValue(start: 0, duration: 1)
+                )
+            )
+        }
+        let beatMarkers = (1...80).map { index in
+            AudioBeatMarker(sourceTime: Double(index) * 0.25, strength: 1)
+        }
+        let audioItem = TimelineItem.media(
+            MediaTimelineItem(
+                name: "Beat source",
+                mediaID: MediaID(),
+                mediaType: .audio,
+                timelineStart: 0,
+                sourceRange: TimeRangeValue(start: 0, duration: 100),
+                beatAnalysis: AudioBeatAnalysis(
+                    bpm: 240,
+                    confidence: 1,
+                    markers: beatMarkers,
+                    sourceFingerprint: "shared-beat-storage"
+                )
+            )
+        )
+        let project = EditorProject(
+            title: "Shared beats",
+            tracks: [
+                TimelineTrack(name: "Visual", kind: .visual, items: visualItems),
+                TimelineTrack(name: "Audio", kind: .audio, items: [audioItem])
+            ]
+        )
+
+        let index = TimelineEvaluationIndex(project: project)
+        let selectedPoints = index.navigationPoints(for: selectedID)
+
+        #expect(selectedPoints.contains(0.25))
+        #expect(selectedPoints.contains(1))
+        #expect(index.storedNavigationPointCount < 500)
+        #expect(
+            index.previousNavigationPoint(
+                before: 0.76,
+                tolerance: 0,
+                selectedItemID: selectedID
+            ) == 0.75
+        )
+        #expect(
+            index.nextNavigationPoint(
+                after: 0.76,
+                tolerance: 0,
+                selectedItemID: selectedID
+            ) == 1
+        )
+    }
+
+    @Test func generatedLayerCostUsesOnlyActiveVisualTracks() {
+        let video = TimelineItem.media(
+            MediaTimelineItem(
+                name: "Video",
+                mediaID: MediaID(),
+                mediaType: .video,
+                timelineStart: 0,
+                sourceRange: TimeRangeValue(start: 0, duration: 2)
+            )
+        )
+        let shape = TimelineItem.shape(
+            ShapeTimelineItem(
+                name: "Shape",
+                mediaID: MediaID(),
+                shape: ClipShape(kind: .rectangle, color: .white, width: 100, height: 100),
+                timelineStart: 0,
+                sourceRange: TimeRangeValue(start: 0, duration: 2)
+            )
+        )
+        let audio = TimelineItem.media(
+            MediaTimelineItem(
+                name: "Audio",
+                mediaID: MediaID(),
+                mediaType: .audio,
+                timelineStart: 0,
+                sourceRange: TimeRangeValue(start: 0, duration: 20),
+                visuals: TimelineItemVisuals(
+                    transform: ClipTransform(
+                        positionX: AnimatableProperty(
+                            baseValue: 0,
+                            keyframes: (0..<20).map {
+                                Keyframe(time: Double($0), value: Double($0))
+                            }
+                        )
+                    )
+                )
+            )
+        )
+        let project = EditorProject(
+            title: "Layer cost",
+            tracks: [
+                TimelineTrack(name: "Video", kind: .visual, items: [video]),
+                TimelineTrack(name: "Shape", kind: .shape, items: [shape]),
+                TimelineTrack(name: "Audio", kind: .audio, items: [audio])
+            ]
+        )
+
+        let index = TimelineEvaluationIndex(project: project)
+
+        #expect(index.generatedLayerCost(at: 0.5) == 4)
+        #expect(index.generatedLayerCost(at: 2) == 0)
+        #expect(index.generatedLayerCost(at: 10) == 0)
+    }
+
+    @Test func timelineSnapshotFindsLongOverlapsBehindEndedItems() {
+        let longItem = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                name: "Long",
+                timelineStart: 0,
+                duration: 100
+            )
+        )
+        let endedItem = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                name: "Ended",
+                timelineStart: 50,
+                duration: 1
+            )
+        )
+        let track = TimelineTrack(
+            name: "Overlaps",
+            kind: .visual,
+            items: [longItem, endedItem]
+        )
+        let trackSnapshot = TimelineRenderTrackSnapshot(track: track)
+        let snapshot = TimelineRenderSnapshot(
+            revision: 0,
+            tracks: [track],
+            trackSnapshotsByID: [track.id: trackSnapshot],
+            selectedClipID: nil,
+            duration: 100,
+            keyframeTolerance: 0.001
+        )
+
+        let visible = snapshot.items(in: track.id, intersecting: 70...71)
+
+        #expect(visible.map(\.id) == [longItem.id])
+    }
+
+    @Test func timelineSnapshotRetainsOffscreenItemsThroughTrackIndex() {
+        let visibleItem = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                name: "Visible",
+                timelineStart: 0,
+                duration: 1
+            )
+        )
+        let retainedItem = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                name: "Retained",
+                timelineStart: 100,
+                duration: 1
+            )
+        )
+        let foreignItem = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                name: "Foreign",
+                timelineStart: 200,
+                duration: 1
+            )
+        )
+        let track = TimelineTrack(
+            name: "Indexed",
+            kind: .visual,
+            items: [retainedItem, visibleItem]
+        )
+        let foreignTrack = TimelineTrack(
+            name: "Foreign",
+            kind: .visual,
+            items: [foreignItem]
+        )
+        let trackSnapshot = TimelineRenderTrackSnapshot(track: track)
+        let foreignTrackSnapshot = TimelineRenderTrackSnapshot(track: foreignTrack)
+        let snapshot = TimelineRenderSnapshot(
+            revision: 0,
+            tracks: [track, foreignTrack],
+            trackSnapshotsByID: [
+                track.id: trackSnapshot,
+                foreignTrack.id: foreignTrackSnapshot
+            ],
+            selectedClipID: retainedItem.id,
+            duration: 201,
+            keyframeTolerance: 0.001
+        )
+
+        #expect(trackSnapshot.item(withID: retainedItem.id)?.id == retainedItem.id)
+        #expect(trackSnapshot.item(withID: foreignItem.id) == nil)
+
+        let visible = snapshot.items(
+            in: track.id,
+            intersecting: 0...1,
+            retaining: [visibleItem.id, retainedItem.id, foreignItem.id]
+        )
+
+        #expect(visible.map(\.id) == [visibleItem.id, retainedItem.id])
+    }
+
+    @Test func timelineInvalidationRangeCoversOnlyChangedItems() {
+        let changed = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                timelineStart: 0,
+                duration: 1
+            )
+        )
+        let untouched = TimelineItem.adjustment(
+            AdjustmentTimelineItem(
+                timelineStart: 100,
+                duration: 10
+            )
+        )
+        let previousTrack = TimelineTrack(
+            name: "Adjustment",
+            kind: .visual,
+            items: [changed, untouched]
+        )
+        var currentTrack = previousTrack
+        currentTrack.items[0].timelineStart = 2
+
+        let scope = TimelineInvalidationScope.comparing(
+            previous: [previousTrack],
+            current: [currentTrack]
+        )
+
+        #expect(scope.affectedTrackIDs == [previousTrack.id])
+        #expect(scope.affectedTimeRange == 0...3)
+        #expect(!scope.isStructural)
+    }
+
+    @Test func layoutSynchronizationNeverOverridesPlaybackOrGestures() {
+        #expect(
+            TimelineScrollSynchronizationPolicy.shouldSynchronizeOnLayout(
+                isPlaying: false,
+                isUserInteracting: false
+            )
+        )
+        #expect(
+            !TimelineScrollSynchronizationPolicy.shouldSynchronizeOnLayout(
+                isPlaying: true,
+                isUserInteracting: false
+            )
+        )
+        #expect(
+            !TimelineScrollSynchronizationPolicy.shouldSynchronizeOnLayout(
+                isPlaying: false,
+                isUserInteracting: true
+            )
+        )
+    }
+
+    @MainActor
+    @Test func unchangedKeyframeSelectionDoesNotRepublishRootEditorState() {
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(
+                editorProject: EditorProject.empty(title: "State fan-out")
+            )
+        )
+        var publicationCount = 0
+        let cancellable = viewModel.objectWillChange.sink {
+            publicationCount += 1
+        }
+
+        viewModel.activeKeyframeTarget = .positionX
+        let afterTargetSelection = publicationCount
+        viewModel.activeKeyframeTarget = .positionX
+        #expect(publicationCount == afterTargetSelection)
+
+        let keyframeID = UUID()
+        viewModel.selectedKeyframeID = keyframeID
+        let afterKeyframeSelection = publicationCount
+        viewModel.selectedKeyframeID = keyframeID
+        #expect(publicationCount == afterKeyframeSelection)
+
+        let segment = KeyframeSegment(
+            clipID: UUID(),
+            section: .transform,
+            effectID: nil,
+            startTime: 0,
+            endTime: 1,
+            interpolation: .linear
+        )
+        viewModel.graphSegment = segment
+        let afterGraphSelection = publicationCount
+        viewModel.graphSegment = segment
+        #expect(publicationCount == afterGraphSelection)
+
+        viewModel.displayedGraphSegment = segment
+        let afterDisplayedGraphSelection = publicationCount
+        viewModel.displayedGraphSegment = segment
+        #expect(publicationCount == afterDisplayedGraphSelection)
+
+        withExtendedLifetime(cancellable) {}
+    }
+
+    @MainActor
+    @Test func interactiveTrimInvalidatesNavigationIndexAndTimelineSnapshot() throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Interactive trim",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/interactive-trim.mov"),
+                mediaType: .video,
+                originalDuration: 8
+            ),
+            timelineStart: 2,
+            sourceRange: TimeRangeValue(start: 0, duration: 4)
+        )
+        let project = EditorProject(
+            title: "Interactive trim invalidation",
+            tracks: [TimelineTrack(name: "Layer 1", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.selectClip(clipID, trackID: project.tracks[0].id)
+        let initialRevision = viewModel.timelineRenderSnapshot.revision
+        #expect(viewModel.navigationPoints == [2, 6])
+
+        let result = viewModel.trimClipStart(
+            clipID,
+            by: 1,
+            rebuild: false,
+            interactive: true
+        )
+        viewModel.finishInteractiveEdit(rebuild: false)
+
+        #expect(result?.edgeTime == 3)
+        #expect(viewModel.navigationPoints == [3, 6])
+        #expect(viewModel.timelineRenderSnapshot.revision > initialRevision)
+        let committedTimelineStart = viewModel.timelineRenderSnapshot
+            .trackSnapshotsByID[project.tracks[0].id]?
+            .items.first?.timelineStart
+        #expect(committedTimelineStart == 3)
+    }
+
+    @MainActor
+    @Test func inspectorSamplesPublishOnlyPreviewCanvasLeafState() {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Canvas leaf",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/canvas-leaf.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Canvas leaf",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        defer {
+            viewModel.cancelInteractivePreviewRebuild()
+            viewModel.finishInteractiveEdit(rebuild: false)
+        }
+        viewModel.selectClip(clipID, trackID: project.tracks[0].id)
+        viewModel.activeKeyframeTarget = .opacity
+
+        var rootPublicationCount = 0
+        var canvasPublicationCount = 0
+        let rootCancellable = viewModel.objectWillChange.sink {
+            rootPublicationCount += 1
+        }
+        let canvasCancellable = viewModel.previewCanvasState.objectWillChange.sink {
+            canvasPublicationCount += 1
+        }
+        let initialCanvasRevision = viewModel.previewCanvasState.visualRevision
+
+        viewModel.setSelectedKeyframeValue(
+            0.7,
+            target: .opacity,
+            interactive: true
+        )
+        viewModel.setSelectedKeyframeValue(
+            0.4,
+            target: .opacity,
+            interactive: true
+        )
+
+        #expect(rootPublicationCount == 0)
+        #expect(canvasPublicationCount == 2)
+        #expect(viewModel.previewCanvasState.visualRevision == initialCanvasRevision + 2)
+        withExtendedLifetime((rootCancellable, canvasCancellable)) {}
+    }
+
+    @MainActor
+    @Test func silentInspectorMutationStillRefreshesTimelineValueSnapshot() throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Silent snapshot",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/silent-snapshot.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Silent snapshot",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        let timelineRevision = viewModel.timelineContentRevision
+        _ = viewModel.timelineRenderSnapshot
+
+        viewModel.mutateProject(
+            rebuild: false,
+            recordHistory: false,
+            persistChanges: false,
+            touchUpdatedAt: false,
+            refreshTimeline: false
+        ) { project in
+            var item = project.item(id: clipID)
+            var visuals = item?.editableVisuals
+            visuals?.blendIntensity = 0.23
+            item?.editableVisuals = visuals
+            if let item {
+                project.replaceItem(id: clipID, with: item)
+            }
+        }
+
+        let refreshedItem = try #require(
+            viewModel.timelineRenderSnapshot.tracks.first?.items.first
+        )
+        #expect(refreshedItem.editableVisuals?.blendIntensity == 0.23)
+        #expect(viewModel.timelineContentRevision == timelineRevision)
+    }
+
+    @MainActor
+    @Test func transientTrackMutationInvalidatesOnceAndRepeatedSampleIsANoOp() throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Scoped dirty track",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/scoped-dirty-track.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Scoped dirty track",
+            tracks: [TimelineTrack(name: "Layer 1", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        defer { viewModel.stop() }
+        viewModel.selectClip(clipID, trackID: project.tracks[0].id)
+        viewModel.beginInteractiveEdit()
+
+        var rootPublicationCount = 0
+        var canvasPublicationCount = 0
+        let rootCancellable = viewModel.objectWillChange.sink {
+            rootPublicationCount += 1
+        }
+        let canvasCancellable = viewModel.previewCanvasState.objectWillChange.sink {
+            canvasPublicationCount += 1
+        }
+
+        func applyBlendIntensitySample() {
+            viewModel.mutateProject(
+                rebuild: false,
+                recordHistory: false,
+                persistChanges: false,
+                touchUpdatedAt: false,
+                refreshTimeline: false
+            ) { project in
+                guard var item = project.item(id: clipID),
+                    var visuals = item.editableVisuals
+                else { return }
+                visuals.blendIntensity = 0.4
+                item.editableVisuals = visuals
+                project.replaceItem(id: clipID, with: item)
+            }
+        }
+
+        applyBlendIntensitySample()
+        applyBlendIntensitySample()
+
+        #expect(rootPublicationCount == 0)
+        #expect(canvasPublicationCount == 1)
+        #expect(
+            viewModel.project.item(id: clipID)?.editableVisuals?.blendIntensity
+                == 0.4
+        )
+
+        viewModel.finishInteractiveEdit(rebuild: false)
+        #expect(viewModel.undoStack.count == 1)
+        withExtendedLifetime((rootCancellable, canvasCancellable)) {}
+    }
+
+    @MainActor
+    @Test func transientMetadataOnlyMutationPreservesDirtyAndUndoSemantics() {
+        let originalTitle = "Metadata before"
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(
+                editorProject: EditorProject.empty(title: originalTitle)
+            )
+        )
+        defer { viewModel.stop() }
+        viewModel.beginInteractiveEdit()
+        let initialCanvasRevision = viewModel.previewCanvasState.visualRevision
+
+        var rootPublicationCount = 0
+        let cancellable = viewModel.objectWillChange.sink {
+            rootPublicationCount += 1
+        }
+
+        viewModel.mutateProject(
+            rebuild: false,
+            recordHistory: false,
+            persistChanges: false,
+            touchUpdatedAt: false,
+            refreshTimeline: false
+        ) { project in
+            project.title = "Metadata after"
+        }
+
+        #expect(viewModel.project.title == "Metadata after")
+        #expect(rootPublicationCount == 0)
+        #expect(viewModel.previewCanvasState.visualRevision == initialCanvasRevision)
+
+        viewModel.finishInteractiveEdit(rebuild: false)
+        #expect(viewModel.undoStack.count == 1)
+        viewModel.undo()
+        #expect(viewModel.project.title == originalTitle)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    @MainActor
+    @Test func externalCommandClosesInteractiveUndoBoundary() throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Undo boundary",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/undo-boundary.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let originalTitle = "Undo boundary"
+        let project = EditorProject(
+            title: originalTitle,
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        defer {
+            viewModel.rebuildTask?.cancel()
+            viewModel.stop()
+        }
+        viewModel.selectClip(clipID, trackID: project.tracks[0].id)
+
+        viewModel.setSelectedKeyframeValue(
+            0.35,
+            target: .opacity,
+            interactive: true
+        )
+        viewModel.mutateProject(rebuild: false) {
+            $0.title = "External command"
+        }
+
+        #expect(viewModel.undoStack.count == 2)
+        viewModel.undo()
+        #expect(viewModel.project.title == originalTitle)
+        #expect(viewModel.project.item(id: clipID)?.editableVisuals?.transform.opacity.baseValue == 0.35)
+
+        viewModel.undo()
+        #expect(viewModel.project.item(id: clipID)?.editableVisuals?.transform.opacity.baseValue == 1)
+    }
+
+    @MainActor
+    @Test func undoDuringGestureCommitsThenRevertsOnlyThatGesture() {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Gesture undo",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/gesture-undo.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Gesture undo",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        defer {
+            viewModel.rebuildTask?.cancel()
+            viewModel.stop()
+        }
+        viewModel.selectClip(clipID, trackID: project.tracks[0].id)
+        viewModel.setSelectedKeyframeValue(
+            0.3,
+            target: .opacity,
+            interactive: true
+        )
+
+        viewModel.undo()
+
+        #expect(viewModel.interactiveEditSnapshot == nil)
+        #expect(viewModel.project.item(id: clipID)?.editableVisuals?.transform.opacity.baseValue == 1)
+        #expect(viewModel.undoStack.isEmpty)
+        #expect(viewModel.redoStack.count == 1)
+
+        viewModel.finishInteractiveEdit(rebuild: false)
+        #expect(viewModel.redoStack.count == 1)
+    }
+
+    @MainActor
+    @Test func derivedDataRebasesInteractiveUndoSnapshot() {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Derived rebase",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/derived-rebase.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Before derived data",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        defer {
+            viewModel.rebuildTask?.cancel()
+            viewModel.stop()
+        }
+        viewModel.selectClip(clipID, trackID: project.tracks[0].id)
+        viewModel.setSelectedKeyframeValue(
+            0.45,
+            target: .opacity,
+            interactive: true
+        )
+
+        viewModel.mutateDerivedProjectData(persistChanges: false) {
+            $0.title = "Derived data"
+        }
+        viewModel.finishInteractiveEdit(rebuild: false)
+        viewModel.undo()
+
+        #expect(viewModel.project.title == "Derived data")
+        #expect(viewModel.project.item(id: clipID)?.editableVisuals?.transform.opacity.baseValue == 1)
+    }
+
+    @MainActor
+    @Test func undoClampsPlayheadSynchronouslyToRestoredDuration() {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Duration",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/duration.mov"),
+                mediaType: .video,
+                originalDuration: 10
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let project = EditorProject(
+            title: "Duration clamp",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        defer { viewModel.stop() }
+
+        viewModel.mutateProject(rebuild: false) { project in
+            guard case .media(var item) = project.item(id: clipID) else { return }
+            item.sourceRange.duration = 8
+            project.replaceItem(id: clipID, with: .media(item))
+        }
+        viewModel.seek(to: 7)
+        #expect(viewModel.currentTime == 7)
+
+        viewModel.undo()
+
+        #expect(viewModel.duration == 2)
+        #expect(viewModel.currentTime == 2)
     }
 }

@@ -150,8 +150,12 @@ struct KeyframePropertyMetadata {
     let range: ClosedRange<Double>
     let step: Double
     let fractionDigits: Int
+    var isAngle = false
 
     func formattedValue(_ value: Double) -> String {
+        if isAngle {
+            return AngleScrubberFormat.string(for: value)
+        }
         switch group {
         case .shape:
             return "\(Int(value.rounded())) px"
@@ -162,6 +166,21 @@ struct KeyframePropertyMetadata {
                 .number.precision(.fractionLength(fractionDigits))
             )
         }
+    }
+}
+
+enum AngleScrubberFormat {
+    static func string(for value: Double) -> String {
+        let rounded = Int(value.rounded())
+        let turns = rounded / 360
+        let degrees = rounded % 360
+        if turns == 0 {
+            return "\(degrees)°"
+        }
+        if degrees == 0 {
+            return "\(turns)x"
+        }
+        return "\(turns)x \(abs(degrees))°"
     }
 }
 

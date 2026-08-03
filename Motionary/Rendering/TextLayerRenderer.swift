@@ -13,6 +13,20 @@ struct TextLayerGeometry: Equatable {
 struct TextLayerRenderResult {
     let image: CIImage
     let geometry: TextLayerGeometry
+    /// Stable for the lifetime of one cached raster and never derived from a
+    /// recyclable heap address. GPU caches use this to avoid aliasing a newer
+    /// text raster after the CPU cache evicts the old `CIImage`.
+    let cacheIdentity: UUID
+
+    init(
+        image: CIImage,
+        geometry: TextLayerGeometry,
+        cacheIdentity: UUID = UUID()
+    ) {
+        self.image = image
+        self.geometry = geometry
+        self.cacheIdentity = cacheIdentity
+    }
 }
 
 /// Produces the exact same text pixels for the editor player and final export.
@@ -26,32 +40,185 @@ final class TextLayerRenderer {
         }
     }
 
-    private struct RasterCacheKey: Encodable {
+    private final class CachedPreparedLayer: NSObject {
+        let prepared: PreparedLayer
+
+        init(prepared: PreparedLayer) {
+            self.prepared = prepared
+        }
+    }
+
+    fileprivate struct TextStrokeSignature: Hashable {
+        let color: RGBAColor
+        let width: Double
+
+        init?(_ stroke: TextStrokeStyle?) {
+            guard let stroke else { return nil }
+            color = stroke.color
+            width = stroke.width
+        }
+    }
+
+    fileprivate struct TextShadowSignature: Hashable {
+        let color: RGBAColor
+        let offsetX: Double
+        let offsetY: Double
+        let blur: Double
+
+        init?(_ shadow: TextShadowStyle?) {
+            guard let shadow else { return nil }
+            color = shadow.color
+            offsetX = shadow.offsetX
+            offsetY = shadow.offsetY
+            blur = shadow.blur
+        }
+    }
+
+    fileprivate struct TextBackgroundSignature: Hashable {
+        let color: RGBAColor
+        let padding: Double
+        let cornerRadius: Double
+
+        init?(_ background: TextBackgroundStyle?) {
+            guard let background else { return nil }
+            color = background.color
+            padding = background.padding
+            cornerRadius = background.cornerRadius
+        }
+    }
+
+    fileprivate struct TextStyleSignature: Hashable {
+        let fontName: String
+        let fontSize: Double
+        let color: RGBAColor
+        let alignment: String
+        let letterSpacing: Double
+        let lineSpacing: Double
+        let stroke: TextStrokeSignature?
+        let shadow: TextShadowSignature?
+        let background: TextBackgroundSignature?
+
+        init(_ style: TextStyle) {
+            fontName = style.fontName
+            fontSize = style.fontSize
+            color = style.color
+            alignment = style.alignment.rawValue
+            letterSpacing = style.letterSpacing
+            lineSpacing = style.lineSpacing
+            stroke = TextStrokeSignature(style.stroke)
+            shadow = TextShadowSignature(style.shadow)
+            background = TextBackgroundSignature(style.background)
+        }
+    }
+
+    fileprivate struct LayoutSignature: Hashable {
         let text: String
-        let style: TextStyle
-        let layout: TextLayout
+        let style: TextStyleSignature
+        let widthFraction: Double
         let renderWidth: Double
         let renderHeight: Double
         let renderScale: Double
-        let rasterScaleX: Double
-        let rasterScaleY: Double
         let visibleUTF16Length: Int
+
+        init(
+            item: TextTimelineItem,
+            renderSize: CGSize,
+            renderScale: CGFloat,
+            visibleUTF16Length: Int
+        ) {
+            text = item.text
+            style = TextStyleSignature(item.style)
+            widthFraction = item.layout.widthFraction
+            renderWidth = Double(renderSize.width)
+            renderHeight = Double(renderSize.height)
+            self.renderScale = Double(renderScale)
+            self.visibleUTF16Length = visibleUTF16Length
+        }
     }
 
-    private struct PreparedLayer {
+    private struct RasterSignature: Hashable {
+        let layout: LayoutSignature
+        let rasterScaleX: Double
+        let rasterScaleY: Double
+    }
+
+    private final class LayoutCacheKey: NSObject {
+        let signature: LayoutSignature
+
+        init(_ signature: LayoutSignature) {
+            self.signature = signature
+        }
+
+        override var hash: Int { signature.hashValue }
+
+        override func isEqual(_ object: Any?) -> Bool {
+            guard let other = object as? LayoutCacheKey else { return false }
+            return signature == other.signature
+        }
+    }
+
+    private final class RasterCacheKey: NSObject {
+        let signature: RasterSignature
+
+        init(_ signature: RasterSignature) {
+            self.signature = signature
+        }
+
+        override var hash: Int { signature.hashValue }
+
+        override func isEqual(_ object: Any?) -> Bool {
+            guard let other = object as? RasterCacheKey else { return false }
+            return signature == other.signature
+        }
+    }
+
+    fileprivate struct PreparedLayer {
         let attributedText: NSMutableAttributedString
         let geometry: TextLayerGeometry
     }
 
-    private let cache: NSCache<NSString, CachedLayer> = {
-        let cache = NSCache<NSString, CachedLayer>()
+    final class PreparedSample {
+        let geometry: TextLayerGeometry
+        fileprivate let item: TextTimelineItem
+        fileprivate let visibleUTF16Length: Int
+        fileprivate let layoutSignature: LayoutSignature
+        fileprivate let prepared: PreparedLayer
+
+        fileprivate init(
+            item: TextTimelineItem,
+            visibleUTF16Length: Int,
+            layoutSignature: LayoutSignature,
+            prepared: PreparedLayer
+        ) {
+            self.item = item
+            self.visibleUTF16Length = visibleUTF16Length
+            self.layoutSignature = layoutSignature
+            self.prepared = prepared
+            geometry = prepared.geometry
+        }
+    }
+
+    private let cache: NSCache<RasterCacheKey, CachedLayer> = {
+        let cache = NSCache<RasterCacheKey, CachedLayer>()
         cache.countLimit = 64
         cache.totalCostLimit = GeneratedRasterPolicy.textCacheBytes
         return cache
     }()
 
+    private let layoutCache: NSCache<LayoutCacheKey, CachedPreparedLayer> = {
+        let cache = NSCache<LayoutCacheKey, CachedPreparedLayer>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    private(set) var layoutPreparationCount = 0
+    private(set) var layoutKeyCreationCount = 0
+    private(set) var rasterKeyCreationCount = 0
+    private(set) var itemResolutionCount = 0
+
     func removeAllObjects() {
         cache.removeAllObjects()
+        layoutCache.removeAllObjects()
     }
 
     func render(
@@ -63,29 +230,82 @@ final class TextLayerRenderer {
         at localTime: Double? = nil,
         glyphReveal: Double = 1
     ) -> TextLayerRenderResult {
-        let item = localTime.map { item.resolved(at: $0) } ?? item
+        let sample = prepareSample(
+            item: item,
+            renderSize: renderSize,
+            renderScale: renderScale,
+            at: localTime,
+            glyphReveal: glyphReveal
+        )
+        return render(
+            sample,
+            rasterScaleMultiplier: rasterScaleMultiplier,
+            rasterScale: requestedRasterScale
+        )
+    }
+
+    /// Resolves animated text data, derives its layout signature, and performs
+    /// at most one layout-cache lookup for a frame's culling+raster path.
+    func prepareSample(
+        item: TextTimelineItem,
+        renderSize: CGSize,
+        renderScale: CGFloat,
+        at localTime: Double? = nil,
+        glyphReveal: Double = 1
+    ) -> PreparedSample {
+        let resolvedItem: TextTimelineItem
+        if let localTime {
+            resolvedItem = item.resolved(at: localTime)
+            itemResolutionCount += 1
+        } else {
+            resolvedItem = item
+        }
         let visibleUTF16Length = Self.visibleUTF16Length(
-            in: item.text,
+            in: resolvedItem.text,
             progress: glyphReveal
         )
-        let prepared = Self.prepare(
-            item: item,
+        let signature = LayoutSignature(
+            item: resolvedItem,
             renderSize: renderSize,
             renderScale: renderScale,
             visibleUTF16Length: visibleUTF16Length
         )
+        layoutKeyCreationCount += 1
+        let prepared = preparedLayer(
+            item: resolvedItem,
+            signature: signature
+        )
+        return PreparedSample(
+            item: resolvedItem,
+            visibleUTF16Length: visibleUTF16Length,
+            layoutSignature: signature,
+            prepared: prepared
+        )
+    }
+
+    /// Renders an already prepared frame sample. Reusing this sample after
+    /// culling avoids a second animation resolution and layout-key allocation.
+    func render(
+        _ sample: PreparedSample,
+        rasterScaleMultiplier: CGFloat = 1,
+        rasterScale requestedRasterScale: CGSize? = nil
+    ) -> TextLayerRenderResult {
+        let item = sample.item
+        let prepared = sample.prepared
+        let renderScale = CGFloat(sample.layoutSignature.renderScale)
         let requestedRasterScale = requestedRasterScale
             ?? CGSize(width: rasterScaleMultiplier, height: rasterScaleMultiplier)
         let rasterScale = GeneratedRasterPolicy.boundedRasterScale(
             requestedRasterScale,
             logicalSize: prepared.geometry.layerSize
         )
-        let key = cacheKey(
-            item: item,
-            renderSize: renderSize,
-            renderScale: renderScale,
-            rasterScale: rasterScale,
-            visibleUTF16Length: visibleUTF16Length
+        rasterKeyCreationCount += 1
+        let key = RasterCacheKey(
+            RasterSignature(
+                layout: sample.layoutSignature,
+                rasterScaleX: Double(rasterScale.width),
+                rasterScaleY: Double(rasterScale.height)
+            )
         )
         if let cached = cache.object(forKey: key) {
             return cached.result
@@ -152,6 +372,26 @@ final class TextLayerRenderer {
         return result
     }
 
+    /// Renderer-facing geometry lookup. Unlike the static UI helper this shares
+    /// the prepared attributed-string/layout cache with `render`, so culling,
+    /// raster-scale calculation and rasterization never lay out the same text
+    /// repeatedly on adjacent frames.
+    func cachedGeometry(
+        for item: TextTimelineItem,
+        renderSize: CGSize,
+        renderScale: CGFloat,
+        at localTime: Double? = nil,
+        glyphReveal: Double = 1
+    ) -> TextLayerGeometry {
+        prepareSample(
+            item: item,
+            renderSize: renderSize,
+            renderScale: renderScale,
+            at: localTime,
+            glyphReveal: glyphReveal
+        ).geometry
+    }
+
     static func geometry(
         for item: TextTimelineItem,
         renderSize: CGSize,
@@ -176,28 +416,30 @@ final class TextLayerRenderer {
             ?? UIFont.systemFont(ofSize: fontSize, weight: .semibold)
     }
 
-    private func cacheKey(
+    private func preparedLayer(
         item: TextTimelineItem,
-        renderSize: CGSize,
-        renderScale: CGFloat,
-        rasterScale: CGSize,
-        visibleUTF16Length: Int
-    ) -> NSString {
-        let value = RasterCacheKey(
-            text: item.text,
-            style: item.style,
-            layout: item.layout,
-            renderWidth: renderSize.width,
-            renderHeight: renderSize.height,
-            renderScale: renderScale,
-            rasterScaleX: rasterScale.width,
-            rasterScaleY: rasterScale.height,
-            visibleUTF16Length: visibleUTF16Length
+        signature: LayoutSignature
+    ) -> PreparedLayer {
+        let key = LayoutCacheKey(signature)
+        if let cached = layoutCache.object(forKey: key) {
+            return cached.prepared
+        }
+        let prepared = Self.prepare(
+            item: item,
+            renderSize: CGSize(
+                width: signature.renderWidth,
+                height: signature.renderHeight
+            ),
+            renderScale: CGFloat(signature.renderScale),
+            visibleUTF16Length: signature.visibleUTF16Length
         )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let encoded = (try? encoder.encode(value)) ?? Data()
-        return encoded.base64EncodedString() as NSString
+        layoutPreparationCount += 1
+        layoutCache.setObject(
+            CachedPreparedLayer(prepared: prepared),
+            forKey: key,
+            cost: max(item.text.utf16.count * 8, 1)
+        )
+        return prepared
     }
 
     private static func prepare(

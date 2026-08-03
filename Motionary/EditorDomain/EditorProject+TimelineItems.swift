@@ -66,15 +66,19 @@ extension EditorProject {
             timelineStart: timelineStart,
             duration: duration
         )
+        let timelineItem = TimelineItem.compound(item)
         let destinationIndex: Int
-        if let trackIndex, tracks.indices.contains(trackIndex) {
+        if let trackIndex,
+            tracks.indices.contains(trackIndex),
+            tracks[trackIndex].canAcceptItem(timelineItem)
+        {
             destinationIndex = trackIndex
-        } else if let existing = tracks.firstIndex(where: { $0.canAcceptClipKind(.visual) }) {
+        } else if let existing = tracks.firstIndex(where: { $0.canAcceptItem(timelineItem) }) {
             destinationIndex = existing
         } else {
             destinationIndex = insertFreshTrack(kind: .visual)
         }
-        tracks[destinationIndex].items.append(.compound(item))
+        tracks[destinationIndex].items.append(timelineItem)
         tracks[destinationIndex].sortItems()
         return item
     }

@@ -335,7 +335,7 @@ struct ItemMask: Codable, Equatable, Sendable {
             roundnessScale ?? (shape == .roundedRectangle ? 0.36 : 0),
             to: 0...1
         )
-        self.rotationDegrees = Self.bounded(rotationDegrees, to: -180...180)
+        self.rotationDegrees = rotationDegrees.isFinite ? rotationDegrees : 0
         self.offsetScale = Self.bounded(offsetScale, to: -1...1)
         self.isInverted = isInverted
     }

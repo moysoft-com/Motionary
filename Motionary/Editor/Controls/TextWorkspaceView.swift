@@ -38,6 +38,7 @@ enum TextWorkspaceMode: Equatable {
 
 struct TextWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let item: TextTimelineItem?
     let mode: TextWorkspaceMode
     @Binding var activeMotionPhase: TextAnimationPhase
@@ -46,6 +47,21 @@ struct TextWorkspaceView: View {
     @State private var fontPickerRequest: TextFontPickerRequest?
     @State private var hasActiveEditingSession = false
     @FocusState private var isTextFocused: Bool
+
+    init(
+        viewModel: EditorViewModel,
+        item: TextTimelineItem?,
+        mode: TextWorkspaceMode,
+        activeMotionPhase: Binding<TextAnimationPhase>,
+        isKeyboardVisible: Binding<Bool>
+    ) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.item = item
+        self.mode = mode
+        _activeMotionPhase = activeMotionPhase
+        _isKeyboardVisible = isKeyboardVisible
+    }
 
     var body: some View {
         let isEnabled = currentItem.map(isWorkspaceEnabled(for:)) ?? false
@@ -92,33 +108,43 @@ struct TextWorkspaceView: View {
             }
         }
         .onChange(of: isTextFocused) { wasFocused, focused in
-            isKeyboardVisible = focused && mode == .content
-            if focused, !wasFocused {
-                beginEditingSession()
-            } else if wasFocused, !focused {
-                finishEditingSession()
+            DispatchQueue.main.async {
+                isKeyboardVisible = focused && mode == .content
+                if focused, !wasFocused {
+                    beginEditingSession()
+                } else if wasFocused, !focused {
+                    finishEditingSession()
+                }
             }
         }
         .onChange(of: item?.id) { previousID, currentID in
             guard previousID != currentID else { return }
-            dismissKeyboardAndCommit()
-            focusEditorIfNeeded(itemID: currentID)
+            DispatchQueue.main.async {
+                dismissKeyboardAndCommit()
+                focusEditorIfNeeded(itemID: currentID)
+            }
         }
         .onChange(of: mode) { _, newMode in
-            if newMode == .content {
-                focusEditorIfNeeded(itemID: item?.id)
-            } else {
-                dismissKeyboardAndCommit()
+            DispatchQueue.main.async {
+                if newMode == .content {
+                    focusEditorIfNeeded(itemID: item?.id)
+                } else {
+                    dismissKeyboardAndCommit()
+                }
             }
         }
         .onChange(of: currentItemIsEnabled) { _, isEnabled in
             if !isEnabled {
-                dismissKeyboardAndCommit()
+                DispatchQueue.main.async {
+                    dismissKeyboardAndCommit()
+                }
             }
         }
         .onDisappear {
-            isKeyboardVisible = false
-            dismissKeyboardAndCommit()
+            DispatchQueue.main.async {
+                isKeyboardVisible = false
+                dismissKeyboardAndCommit()
+            }
         }
     }
 
@@ -433,7 +459,7 @@ struct TextWorkspaceView: View {
     }
 
     private func localTime(for item: TextTimelineItem) -> Double {
-        min(max(viewModel.currentTime - item.timelineStart, 0), item.duration)
+        min(max(playbackState.currentTime - item.timelineStart, 0), item.duration)
     }
 
     private func styleSection<Content: View>(
@@ -484,8 +510,8 @@ struct TextWorkspaceView: View {
 
     private func isWorkspaceEnabled(for item: TextTimelineItem) -> Bool {
         viewModel.selectedTimelineItemID == item.id
-            && viewModel.currentTime >= item.timelineStart
-            && viewModel.currentTime < item.timelineEnd
+            && playbackState.currentTime >= item.timelineStart
+            && playbackState.currentTime < item.timelineEnd
     }
 
     private func beginEditingSession() {

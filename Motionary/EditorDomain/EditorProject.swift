@@ -116,6 +116,7 @@ struct EditorProject: Identifiable, Codable, Equatable {
 
     mutating func synchronizeMediaLibrary() {
         separateTextTracks()
+        separateAdjustmentTracks()
 
         var referencedIDs = Set<MediaID>()
         for trackIndex in tracks.indices {
@@ -204,6 +205,49 @@ struct EditorProject: Identifiable, Codable, Equatable {
                 isLocked: originalTrack.isLocked
             )
             return [textTrack, track]
+        }
+    }
+
+    /// Adjustment layers sample the composite below their stack position and
+    /// therefore cannot coexist with ordinary content on one timeline track.
+    /// Normalize projects produced before dedicated adjustment handling.
+    private mutating func separateAdjustmentTracks() {
+        let normalized = Self.tracksWithSeparatedAdjustments(from: tracks)
+        if normalized != tracks {
+            tracks = normalized
+            renumberTracks()
+        }
+
+        for sequenceID in Array(sequences.keys) {
+            guard var sequence = sequences[sequenceID] else { continue }
+            sequence.tracks = Self.tracksWithSeparatedAdjustments(from: sequence.tracks)
+            sequences[sequenceID] = sequence
+        }
+    }
+
+    private static func tracksWithSeparatedAdjustments(
+        from tracks: [TimelineTrack]
+    ) -> [TimelineTrack] {
+        tracks.flatMap { originalTrack -> [TimelineTrack] in
+            var contentTrack = originalTrack
+            let adjustmentItems = contentTrack.items.filter(\.isAdjustmentLayer)
+            guard !adjustmentItems.isEmpty else { return [contentTrack] }
+
+            let contentItems = contentTrack.items.filter { !$0.isAdjustmentLayer }
+            if contentItems.isEmpty {
+                contentTrack.kind = .visual
+                return [contentTrack]
+            }
+
+            contentTrack.items = contentItems
+            let adjustmentTrack = TimelineTrack(
+                name: "Adjustment",
+                kind: .visual,
+                items: adjustmentItems,
+                isMuted: originalTrack.isMuted,
+                isLocked: originalTrack.isLocked
+            )
+            return [adjustmentTrack, contentTrack]
         }
     }
 

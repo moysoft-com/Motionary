@@ -5,7 +5,23 @@ import AVFoundation
 import UIKit
 
 struct CoreTimelineView: View {
-    @ObservedObject var viewModel: EditorViewModel
+    let viewModel: EditorViewModel
+    @Binding var pixelsPerSecond: CGFloat
+
+    var body: some View {
+        CoreTimelineObservationBoundary(
+            viewModel: viewModel,
+            pixelsPerSecond: $pixelsPerSecond
+        )
+        .equatable()
+    }
+}
+
+private struct CoreTimelineObservationBoundary: View, Equatable {
+    let viewModel: EditorViewModel
+    @ObservedObject private var timelineState: TimelineState
+    @ObservedObject private var selectionState: SelectionState
+    @ObservedObject private var playbackState: PlaybackState
     @Binding var pixelsPerSecond: CGFloat
     @State private var activeClipDrag: TimelineClipDragState?
     @State private var activeTrackDrag: TimelineTrackDragState?
@@ -14,11 +30,25 @@ struct CoreTimelineView: View {
     private let trackHeight: CGFloat = 45
     private let rowSpacing: CGFloat = 6
 
+    init(viewModel: EditorViewModel, pixelsPerSecond: Binding<CGFloat>) {
+        self.viewModel = viewModel
+        _timelineState = ObservedObject(wrappedValue: viewModel.timelineState)
+        _selectionState = ObservedObject(wrappedValue: viewModel.selectionState)
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        _pixelsPerSecond = pixelsPerSecond
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.viewModel === rhs.viewModel
+            && lhs.pixelsPerSecond == rhs.pixelsPerSecond
+    }
+
     var body: some View {
         GeometryReader { geometry in
             CoreTimelineLayout(
                 viewModel: viewModel,
-                playbackState: viewModel.playbackState,
+                playbackState: playbackState,
+                snapshot: viewModel.timelineRenderSnapshot,
                 pixelsPerSecond: $pixelsPerSecond,
                 activeClipDrag: $activeClipDrag,
                 activeTrackDrag: $activeTrackDrag,
@@ -33,8 +63,9 @@ struct CoreTimelineView: View {
 }
 
 struct CoreTimelineLayout: View {
-    @ObservedObject var viewModel: EditorViewModel
+    let viewModel: EditorViewModel
     @ObservedObject var playbackState: PlaybackState
+    let snapshot: TimelineRenderSnapshot
     @Binding var pixelsPerSecond: CGFloat
     @Binding var activeClipDrag: TimelineClipDragState?
     @Binding var activeTrackDrag: TimelineTrackDragState?
@@ -43,8 +74,10 @@ struct CoreTimelineLayout: View {
     @State private var pullToAddDistance: CGFloat = 0
     @State private var pullToAddBounceTrigger = false
     @State private var displayTime: Double = 0
-    @State private var clipDragScrollOffset: CGSize = .zero
     @State private var horizontalScrollOffset: CGFloat = 0
+    @State private var clipDragScrollOffset: CGSize = .zero
+    @StateObject private var viewportState = TimelineViewportState()
+    @StateObject private var scrollPresentationState = TimelineScrollPresentationState()
     let size: CGSize
     let trackHeight: CGFloat
     let rowSpacing: CGFloat
@@ -61,26 +94,33 @@ struct CoreTimelineLayout: View {
         .background {
             TimelineDisplayLink(
                 player: viewModel.player,
-                isPlaying: viewModel.isPlaying
+                isPlaying: playbackState.isPlaying
             ) { time in
-                displayTime = min(max(time, 0), max(viewModel.duration, 0))
+                let resolvedTime = min(max(time, 0), max(viewModel.lastPlayableTime, 0))
+                displayTime = resolvedTime
             }
             .allowsHitTesting(false)
         }
         .onAppear {
             displayTime = viewModel.currentTime
         }
-        .onChange(of: playbackState.currentTime) { _, time in
-            guard !viewModel.isPlaying else { return }
+        .onChange(of: viewModel.playbackState.currentTime) { _, time in
+            guard !playbackState.isPlaying else { return }
             displayTime = time
         }
     }
 
     private var centerPadding: CGFloat { size.width / 2 }
-    private var visibleTime: Double {
-        viewModel.isPlaying ? displayTime : playbackState.currentTime
-    }
     private var duration: Double { max(viewModel.duration, 0.1) }
+    private var visibleTime: Double {
+        playbackState.isPlaying ? displayTime : playbackState.currentTime
+    }
+    private var scrollVisibleTime: Double {
+        min(
+            max(Double(horizontalScrollOffset / max(pixelsPerSecond, 1)), 0),
+            max(viewModel.lastPlayableTime, 0)
+        )
+    }
     private var contentWidth: CGFloat { max(CGFloat(viewModel.duration) * pixelsPerSecond, 0) + centerPadding * 2 }
     private var rowCount: Int { max(viewModel.project.tracks.count, 1) }
     // Increased contentHeight to make room for the ruler inside the scroll view.
@@ -101,6 +141,17 @@ struct CoreTimelineLayout: View {
                 clipDragScrollOffset.width += delta.width
                 clipDragScrollOffset.height += delta.height
             },
+            playbackState: playbackState,
+            playerProvider: { [weak viewModel] in viewModel?.player },
+            viewportState: viewportState,
+            scrollPresentationState: scrollPresentationState,
+            virtualizationConfiguration: TimelineVirtualizationConfiguration(
+                centerPadding: centerPadding,
+                trackOriginY: 38,
+                rowStride: trackHeight + rowSpacing,
+                trackCount: snapshot.tracks.count,
+                duration: snapshot.duration
+            ),
             onScrubStart: { viewModel.beginScrub() },
             onScrubChanged: { viewModel.updateScrub(to: $0) },
             onScrubEnd: { viewModel.endScrub(at: $0) },
@@ -113,13 +164,14 @@ struct CoreTimelineLayout: View {
             }
         ) {
             TimelineTracksContent(
-                snapshot: viewModel.timelineRenderSnapshot,
+                snapshot: snapshot,
                 viewModel: viewModel,
                 activeClipDrag: $activeClipDrag,
                 activeTrackDrag: $activeTrackDrag,
                 activeTrimSnapTime: $activeTrimSnapTime,
                 activeClipSnapKey: $activeClipSnapKey,
-                horizontalScrollOffset: $horizontalScrollOffset,
+                viewportState: viewportState,
+                scrollPresentationState: scrollPresentationState,
                 contentWidth: contentWidth,
                 contentHeight: contentHeight,
                 containerHeight: size.height,
@@ -127,7 +179,7 @@ struct CoreTimelineLayout: View {
                 pixelsPerSecond: pixelsPerSecond,
                 trackHeight: trackHeight,
                 rowSpacing: rowSpacing,
-                clipDragScrollOffset: clipDragScrollOffset
+                clipDragScrollOffset: $clipDragScrollOffset
             )
         }
         .onChange(of: activeClipDrag?.clipID) { _, _ in
@@ -141,8 +193,8 @@ struct CoreTimelineLayout: View {
 
     private var rulerOverlay: some View {
         TimelineRulerOverlay(
-            duration: viewModel.duration,
-            currentTime: visibleTime,
+            duration: snapshot.duration,
+            currentTime: scrollVisibleTime,
             maximumTimelineTime: viewModel.lastPlayableTime,
             pixelsPerSecond: pixelsPerSecond,
             centerPadding: centerPadding,
@@ -151,12 +203,7 @@ struct CoreTimelineLayout: View {
     }
 
     private var timelineContentRevision: Int {
-        guard let drag = activeClipDrag else { return viewModel.timelineHostingRevision }
-        var hasher = Hasher()
-        hasher.combine(viewModel.timelineHostingRevision)
-        hasher.combine(drag.resolvedPlacement.start)
-        hasher.combine(drag.resolvedPlacement.trackIndex)
-        return hasher.finalize()
+        viewModel.timelineHostingRevision
     }
 
     private var clipAutoScrollTarget: CGPoint? {
@@ -166,7 +213,7 @@ struct CoreTimelineLayout: View {
     private var playhead: some View {
         Rectangle()
             .fill(MotionaryTheme.selected)
-            .frame(width: 2, height: size.height - 22)
+            .frame(width: 2, height: max(size.height - 22, 0))
             .position(x: size.width / 2, y: size.height / 2 + 8)
             .shadow(color: .black.opacity(0.45), radius: 6)
             .allowsHitTesting(false)
@@ -193,7 +240,9 @@ struct CoreTimelineLayout: View {
             .animation(.interactiveSpring(response: 0.2, dampingFraction: 0.82), value: progress)
             .onChange(of: progress >= 1) { wasReady, isReady in
                 guard !wasReady, isReady else { return }
-                pullToAddBounceTrigger.toggle()
+                DispatchQueue.main.async {
+                    pullToAddBounceTrigger.toggle()
+                }
             }
     }
 

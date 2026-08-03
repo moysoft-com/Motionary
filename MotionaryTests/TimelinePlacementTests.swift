@@ -369,4 +369,97 @@ struct TimelinePlacementTests {
         #expect(committed == preview)
         #expect(viewModel.project.tracks[1].clips.contains { $0.id == movingID && $0.timelineStart == preview.start })
     }
+
+    @Test func dragPlacementSessionMatchesProjectResolutionAcrossSamples() throws {
+        let movingID = UUID()
+        let movingClip = TimelineClip(
+            id: movingID,
+            name: "Moving",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/session-moving.mov"),
+                mediaType: .video,
+                originalDuration: 1
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let sourceAnchor = TimelineClip(
+            name: "Source Anchor",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/session-source.mov"),
+                mediaType: .video,
+                originalDuration: 1
+            ),
+            timelineStart: 5,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let destinationAnchor = TimelineClip(
+            name: "Destination Anchor",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/session-destination.mov"),
+                mediaType: .video,
+                originalDuration: 1
+            ),
+            timelineStart: 6,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let audio = TimelineClip(
+            name: "Audio",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/session-audio.m4a"),
+                mediaType: .audio,
+                originalDuration: 1
+            ),
+            timelineStart: 2,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let project = EditorProject(
+            title: "Indexed drag placement",
+            tracks: [
+                TimelineTrack(
+                    name: "Layer 1",
+                    kind: .visual,
+                    clips: [movingClip, sourceAnchor]
+                ),
+                TimelineTrack(
+                    name: "Layer 2",
+                    kind: .visual,
+                    clips: [destinationAnchor]
+                ),
+                TimelineTrack(name: "Audio", kind: .audio, clips: [audio]),
+            ]
+        )
+        let session = try #require(
+            TimelinePlacementDragSession(
+                project: project,
+                itemID: movingID,
+                currentTime: 3.25
+            )
+        )
+
+        for (start, trackIndex) in [
+            (2.0, 0),
+            (4.88, 0),
+            (5.08, 1),
+            (6.15, 1),
+            (8.0, 2),
+        ] {
+            var legacyProject = project
+            let legacyResolution = legacyProject.resolveClipPlacement(
+                movingID,
+                proposedStart: start,
+                proposedTrackIndex: trackIndex,
+                currentTime: 3.25
+            )
+            let legacy = try #require(legacyResolution)
+            let indexed = session.resolve(
+                proposedStart: start,
+                proposedTrackIndex: trackIndex
+            )
+            #expect(indexed == legacy)
+        }
+
+        #expect(session.trackIndices(alignedAt: 5) == [0])
+        #expect(session.trackIndices(alignedAt: 6) == [0, 1])
+    }
 }

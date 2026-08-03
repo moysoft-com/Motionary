@@ -3,9 +3,13 @@
 import Foundation
 
 extension EditorViewModel {
+    var selectedKeyframeEditingClip: TimelineClip? {
+        selectedTimelineItem?.visualEditingClip()
+    }
+
     var selectedClipLocalTime: Double {
-        guard let clip = selectedClip else { return 0 }
-        return timelineLocalTime(for: clip)
+        guard let clip = selectedKeyframeEditingClip else { return 0 }
+        return snappedKeyframeTime(currentTime - clip.timelineStart, clip: clip)
     }
 
     var keyframeTimeTolerance: Double {
@@ -15,17 +19,32 @@ extension EditorViewModel {
     func snappedKeyframeTime(_ time: Double, clip: TimelineClip? = nil) -> Double {
         let frameRate = Double(max(project.renderSettings.frameRate, 1))
         let snapped = max((time * frameRate).rounded() / frameRate, 0)
-        guard let clip = clip ?? selectedClip else {
+        guard let clip = clip ?? selectedKeyframeEditingClip else {
             return snapped
         }
         return min(snapped, timelinePlacementDuration(for: clip))
+    }
+
+    func snappedTimelineKeyframeTime(for item: TimelineItem) -> Double {
+        switch item {
+        case .text(let text):
+            return item.timelineStart + snappedTextKeyframeTime(
+                currentTime - item.timelineStart,
+                item: text
+            )
+        default:
+            return item.timelineStart + snappedKeyframeTime(
+                currentTime - item.timelineStart,
+                clip: item.visualEditingClip()
+            )
+        }
     }
 
     func displayedValue(for target: KeyframeTarget) -> Double {
         if selectedTextItem != nil {
             return textDisplayedValue(for: target)
         }
-        guard let clip = selectedClip else { return 0 }
+        guard let clip = selectedKeyframeEditingClip else { return 0 }
         if target.isScaleTarget {
             let scale = clip.transform.scale.value(at: selectedClipLocalTime)
             return target == .scaleY ? scale.y : scale.x
@@ -40,7 +59,9 @@ extension EditorViewModel {
         if selectedTextItem != nil {
             return textHasKeyframe(atPlayhead: target)
         }
-        guard let property = selectedClip?.animatableProperty(for: target) else { return false }
+        guard let property = selectedKeyframeEditingClip?.animatableProperty(for: target) else {
+            return false
+        }
         return property.keyframeIndex(
             at: snappedKeyframeTime(selectedClipLocalTime),
             tolerance: keyframeTimeTolerance
@@ -51,9 +72,10 @@ extension EditorViewModel {
         if selectedTextItem != nil {
             return textHasKeyframe(atPlayhead: section)
         }
-        guard let clip = selectedClip else { return false }
+        guard let clip = selectedKeyframeEditingClip else { return false }
         let time = snappedKeyframeTime(selectedClipLocalTime, clip: clip)
-        return clip.keyframeTargets(in: section).contains { target in
+        let effectID = section == .effects ? activeKeyframeTarget?.effectID : nil
+        return clip.keyframeTargets(in: section, effectID: effectID).contains { target in
             clip.animatableProperty(for: target)?.keyframeIndex(
                 at: time,
                 tolerance: keyframeTimeTolerance
@@ -69,7 +91,7 @@ extension EditorViewModel {
         if clip == nil, selectedTextItem != nil {
             return textHasKeyframes(in: section)
         }
-        guard let clip = clip ?? selectedClip else { return false }
+        guard let clip = clip ?? selectedKeyframeEditingClip else { return false }
         let duration = timelinePlacementDuration(for: clip)
         return clip.keyframeTimes(in: section, effectID: effectID).contains {
             $0 >= -0.000_001 && $0 <= duration + 0.000_001
@@ -83,7 +105,7 @@ extension EditorViewModel {
         if clip == nil, selectedTextItem != nil {
             return textPropertyRange(for: target)
         }
-        guard let clip = clip ?? selectedClip else {
+        guard let clip = clip ?? selectedKeyframeEditingClip else {
             return target == .rotation
                 ? -Double.greatestFiniteMagnitude...Double.greatestFiniteMagnitude
                 : -1...1
@@ -116,7 +138,10 @@ extension EditorViewModel {
         case .rotation:
             return -Double.greatestFiniteMagnitude...Double.greatestFiniteMagnitude
         default:
-            return clip.keyframeMetadata(for: target).range
+            let metadata = clip.keyframeMetadata(for: target)
+            return metadata.isAngle
+                ? -Double.greatestFiniteMagnitude...Double.greatestFiniteMagnitude
+                : metadata.range
         }
     }
 
@@ -135,7 +160,7 @@ extension EditorViewModel {
                 localTime: currentTime - item.timelineStart
             )
         }
-        guard let clip = selectedClip, isTimeInside(clip) else { return nil }
+        guard let clip = selectedKeyframeEditingClip, isTimeInside(clip) else { return nil }
         return graphSegmentCandidate(
             in: section,
             clip: clip,
@@ -205,10 +230,7 @@ extension EditorViewModel {
     }
 
     func refreshGraphSegment() {
-        guard let segment = graphSegment else {
-            graphSegment = nil
-            return
-        }
+        guard let segment = graphSegment else { return }
         if case .text(let item) = project.item(id: segment.clipID) {
             graphSegment = textGraphSegmentCandidate(
                 in: segment.section,
@@ -218,7 +240,7 @@ extension EditorViewModel {
             if let graphSegment { displayedGraphSegment = graphSegment }
             return
         }
-        guard let clip = project.clip(id: segment.clipID) else {
+        guard let clip = project.item(id: segment.clipID)?.visualEditingClip() else {
             graphSegment = nil
             return
         }
@@ -537,7 +559,7 @@ extension EditorViewModel {
             selectAdjacentTextKeyframe(target: target, direction: direction)
             return
         }
-        guard let clip = selectedClip,
+        guard let clip = selectedKeyframeEditingClip,
             let property = clip.animatableProperty(for: target),
             !property.keyframes.isEmpty
         else { return }

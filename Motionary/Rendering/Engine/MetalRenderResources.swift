@@ -289,6 +289,23 @@ final class MetalRenderResources: @unchecked Sendable {
 
     func beginFrame() throws -> MetalFrameResources {
         inFlightSemaphore.wait()
+        return try makeFrameAfterAcquiringPermit()
+    }
+
+    func beginFrame(isCancelled: () -> Bool) throws -> MetalFrameResources {
+        let deadline = CFAbsoluteTimeGetCurrent() + 0.25
+        while true {
+            guard !isCancelled() else { throw MetalRenderingError.cancelled }
+            if inFlightSemaphore.wait(timeout: .now() + .milliseconds(2)) == .success {
+                return try makeFrameAfterAcquiringPermit()
+            }
+            guard CFAbsoluteTimeGetCurrent() < deadline else {
+                throw MetalRenderingError.cancelled
+            }
+        }
+    }
+
+    private func makeFrameAfterAcquiringPermit() throws -> MetalFrameResources {
         guard let slot = uniformRing.acquire() else {
             inFlightSemaphore.signal()
             throw MetalRenderingError.commandBufferUnavailable
@@ -331,9 +348,13 @@ final class MetalRenderResources: @unchecked Sendable {
     }
 
     func purgeCaches() {
+        purgeTransientResources()
+        ciContext.clearCaches()
+    }
+
+    func purgeTransientResources() {
         texturePool.removeAll()
         CVMetalTextureCacheFlush(textureCache, 0)
-        ciContext.clearCaches()
     }
 
     fileprivate func makePixelBufferTexture(
@@ -417,6 +438,8 @@ final class MetalRenderResources: @unchecked Sendable {
 }
 
 final class MetalFrameResources {
+    typealias CompletionHandler = (MTLCommandBuffer) -> Void
+
     let commandBuffer: MTLCommandBuffer
     unowned let owner: MetalRenderResources
 
@@ -427,6 +450,7 @@ final class MetalFrameResources {
     private var reusableScratchTextures: [ScratchTextureKey: [MTLTexture]] = [:]
     private var reusableScratchTextureIDs = Set<ObjectIdentifier>()
     private var retainedCVTextures: [CVMetalTexture] = []
+    private var completionHandlers: [CompletionHandler] = []
     private var didFinish = false
 
     fileprivate init(
@@ -484,6 +508,14 @@ final class MetalFrameResources {
             pixelFormat: texture.pixelFormat
         )
         reusableScratchTextures[key, default: []].append(texture)
+    }
+
+    /// Runs after this frame's command buffer has reached a terminal state.
+    /// Abandoned, uncommitted frames discard these handlers, so callers cannot
+    /// accidentally publish GPU resources whose upload never executed.
+    func addCompletionHandler(_ handler: @escaping CompletionHandler) {
+        guard !didFinish else { return }
+        completionHandlers.append(handler)
     }
 
     func writeUniforms<T>(_ value: T) throws -> (buffer: MTLBuffer, offset: Int) {
@@ -616,6 +648,7 @@ final class MetalFrameResources {
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
         didFinish = true
+        runCompletionHandlers()
         owner.finishFrame(slot: uniformSlot, textures: scratchTextures)
         scratchTextures.removeAll(keepingCapacity: false)
         scratchTextureIDs.removeAll(keepingCapacity: false)
@@ -637,7 +670,9 @@ final class MetalFrameResources {
         let slot = uniformSlot
         let textures = scratchTextures
         let retainedTextureReferences = retainedCVTextures
+        let completionHandlers = completionHandlers
         commandBuffer.addCompletedHandler { commandBuffer in
+            completionHandlers.forEach { $0(commandBuffer) }
             owner.finishFrame(slot: slot, textures: textures)
             _ = retainedTextureReferences.count
             guard commandBuffer.status == .completed else {
@@ -652,6 +687,7 @@ final class MetalFrameResources {
         reusableScratchTextures.removeAll(keepingCapacity: false)
         reusableScratchTextureIDs.removeAll(keepingCapacity: false)
         retainedCVTextures.removeAll(keepingCapacity: false)
+        self.completionHandlers.removeAll(keepingCapacity: false)
     }
 
     func abandon() {
@@ -663,5 +699,12 @@ final class MetalFrameResources {
         reusableScratchTextures.removeAll(keepingCapacity: false)
         reusableScratchTextureIDs.removeAll(keepingCapacity: false)
         retainedCVTextures.removeAll(keepingCapacity: false)
+        completionHandlers.removeAll(keepingCapacity: false)
+    }
+
+    private func runCompletionHandlers() {
+        let handlers = completionHandlers
+        completionHandlers.removeAll(keepingCapacity: false)
+        handlers.forEach { $0(commandBuffer) }
     }
 }

@@ -6,7 +6,7 @@ import FirebaseCore
 
 private final class MotionaryAppAttestProviderFactory: NSObject, AppCheckProviderFactory {
     func createProvider(with app: FirebaseApp) -> AppCheckProvider? {
-        return AppAttestProvider(app: app)
+        return AppAttestProvider(app: app)  
     }
 }
 

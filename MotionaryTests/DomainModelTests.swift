@@ -454,9 +454,18 @@ struct DomainModelTests {
         #expect(decoded.heightScale == 1)
         #expect(decoded.featherScale == 1)
         #expect(decoded.roundnessScale == 1)
-        #expect(decoded.rotationDegrees == 180)
+        #expect(decoded.rotationDegrees == 240)
         #expect(decoded.offsetScale == -1)
         #expect(decoded.isInverted)
+    }
+
+    @Test func angleScrubberFormatCountsCompleteTurns() throws {
+        #expect(AngleScrubberFormat.string(for: -359) == "-359°")
+        #expect(AngleScrubberFormat.string(for: 359) == "359°")
+        #expect(AngleScrubberFormat.string(for: 360) == "1x")
+        #expect(AngleScrubberFormat.string(for: 361) == "1x 1°")
+        #expect(AngleScrubberFormat.string(for: 720) == "2x")
+        #expect(AngleScrubberFormat.string(for: -361) == "-1x 1°")
     }
 
     @Test func schemaNineProjectLoadsWithNewAnalysisDefaults() throws {

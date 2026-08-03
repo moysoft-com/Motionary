@@ -6,6 +6,36 @@ import Testing
 @testable import Motionary
 
 struct KeyframeEditingTests {
+    @Test func cubicBezierSamplingMatchesHighPrecisionReference() {
+        let curves: [(Double, Double, Double, Double)] = [
+            (0.42, 0, 0.58, 1),
+            (0.2, 0, 0.2, 1),
+            (0.6, 0, 0.4, 1),
+            (0.34, 0, 0.64, 1.18),
+            (0.36, -0.18, 0.66, 1),
+            (0.001, -1.5, 0.999, 2.5),
+        ]
+
+        for curve in curves {
+            let interpolation = KeyframeInterpolation.cubicBezier(
+                control1: KeyframeControlPoint(x: curve.0, y: curve.1),
+                control2: KeyframeControlPoint(x: curve.2, y: curve.3)
+            )
+            for step in 0...200 {
+                let progress = Double(step) / 200
+                let expected = referenceBezierProgress(
+                    progress,
+                    control1: KeyframeControlPoint(x: curve.0, y: curve.1),
+                    control2: KeyframeControlPoint(x: curve.2, y: curve.3)
+                )
+                #expect(
+                    abs(interpolation.progress(at: progress) - expected) < 0.000_01,
+                    "Curve \(curve) diverged at \(progress)"
+                )
+            }
+        }
+    }
+
     @Test func interpolationSupportsLinearHoldAndCubicBezier() async throws {
         let linear = AnimatableProperty(
             baseValue: 0.0,
@@ -348,7 +378,7 @@ struct KeyframeEditingTests {
         #expect(abs(trimmed.transform.positionX.value(at: 1) - 0.25) < 0.0001)
     }
 
-    @Test func audioEnvelopeSamplerApproximatesBezierAndHoldCurves() async throws {
+    @Test func audioEnvelopeSamplerApproximatesBezierAndKeepsHoldAsExactStep() async throws {
         let eased = AnimatableProperty(
             baseValue: 0.0,
             keyframes: [
@@ -370,12 +400,74 @@ struct KeyframeEditingTests {
 
         let easedPoints = AudioEnvelopeSampler.points(for: eased, duration: 2, frameRate: 30)
         let heldPoints = AudioEnvelopeSampler.points(for: held, duration: 2, frameRate: 30)
+        let heldCommands = AudioEnvelopeSampler.commands(from: heldPoints)
 
         #expect(easedPoints.count > 2)
-        #expect(heldPoints.count > 2)
-        #expect(heldPoints.last?.value == 1)
-        #expect(heldPoints.dropLast().last?.value == 0)
-        #expect((heldPoints.dropLast().last?.time ?? 0) > 1.9)
+        #expect(easedPoints.allSatisfy { $0.transitionFromPrevious == .ramp })
+        #expect(
+            heldPoints == [
+                AudioEnvelopePoint(time: 0, value: 0),
+                AudioEnvelopePoint(
+                    time: 2,
+                    value: 1,
+                    transitionFromPrevious: .step
+                ),
+            ]
+        )
+        #expect(
+            heldCommands == [
+                .set(time: 0, value: 0),
+                .set(time: 2, value: 1),
+            ]
+        )
+    }
+
+    @Test func longHoldEnvelopesUseLinearStorageAndNoRamps() {
+        let longHold = AnimatableProperty(
+            baseValue: 0.0,
+            keyframes: [
+                Keyframe(time: 0, value: 0.2, interpolation: .hold),
+                Keyframe(time: 3_600, value: 0.8),
+            ]
+        )
+        let longPoints = AudioEnvelopeSampler.points(
+            for: longHold,
+            duration: 3_600,
+            frameRate: 120
+        )
+        let longCommands = AudioEnvelopeSampler.commands(from: longPoints)
+        #expect(longPoints.count == 2)
+        #expect(longCommands.count == 2)
+        #expect(
+            longCommands.allSatisfy {
+                if case .set = $0 { return true }
+                return false
+            }
+        )
+
+        let keyframes = (0...120).map { index in
+            Keyframe(
+                time: Double(index) * 30,
+                value: index.isMultiple(of: 2) ? 0.25 : 0.75,
+                interpolation: .hold
+            )
+        }
+        let denseHold = AnimatableProperty(baseValue: 0.25, keyframes: keyframes)
+        let densePoints = AudioEnvelopeSampler.points(
+            for: denseHold,
+            duration: 3_600,
+            frameRate: 120
+        )
+        let denseCommands = AudioEnvelopeSampler.commands(from: densePoints)
+        let rampCount = denseCommands.reduce(into: 0) { count, command in
+            if case .ramp = command {
+                count += 1
+            }
+        }
+
+        #expect(densePoints.count == keyframes.count)
+        #expect(denseCommands.count == keyframes.count)
+        #expect(rampCount == 0)
     }
 
     @Test func resolvedTransformUsesCurrentInterpolatedValues() async throws {
@@ -672,6 +764,77 @@ struct KeyframeEditingTests {
     }
 
     @MainActor
+    @Test func playheadKeyframeDetectionUsesSnappedTimelinePosition() async throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Snapped detection",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/snapped-detection.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2),
+            transform: ClipTransform(
+                positionX: AnimatableProperty(
+                    baseValue: 0,
+                    keyframes: [
+                        Keyframe(time: 2.0 / 30.0, value: 1.0)
+                    ]
+                )
+            )
+        )
+        let viewModel = makeViewModel(clip: clip)
+        viewModel.project.renderSettings.frameRate = 30
+        viewModel.selectClip(clipID, trackID: viewModel.project.tracks[0].id)
+        viewModel.seek(to: 0.051)
+
+        #expect(viewModel.hasKeyframe(atPlayhead: .positionX))
+        #expect(viewModel.hasKeyframe(atPlayhead: .transform))
+        #expect(abs(viewModel.displayedValue(for: .positionX) - 1.0) < 0.0001)
+
+        viewModel.toggleKeyframe(.positionX)
+
+        #expect(!viewModel.hasKeyframe(atPlayhead: .positionX))
+        #expect(viewModel.selectedClip?.transform.positionX.keyframes.isEmpty == true)
+    }
+
+    @MainActor
+    @Test func propertyScrubberDisplaysValueAtSnappedKeyframeTime() async throws {
+        let clipID = UUID()
+        let clip = TimelineClip(
+            id: clipID,
+            name: "Scrubber snap",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/scrubber-snap.mov"),
+                mediaType: .video,
+                originalDuration: 2
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2),
+            transform: ClipTransform(
+                positionX: AnimatableProperty(
+                    baseValue: 0,
+                    keyframes: [
+                        Keyframe(time: 0, value: 0)
+                    ]
+                )
+            )
+        )
+        let viewModel = makeViewModel(clip: clip)
+        viewModel.project.renderSettings.frameRate = 30
+        viewModel.selectClip(clipID, trackID: viewModel.project.tracks[0].id)
+        viewModel.seek(to: 0.051)
+
+        viewModel.setSelectedKeyframeValue(1.0, target: .positionX)
+
+        let edited = try #require(viewModel.selectedClip?.transform.positionX)
+        #expect(edited.keyframes.contains { abs($0.time - 2.0 / 30.0) < 0.0001 })
+        #expect(abs(viewModel.displayedValue(for: .positionX) - 1.0) < 0.0001)
+    }
+
+    @MainActor
     @Test func graphSelectionFollowsPlayheadWithinActiveSection() async throws {
         let clipID = UUID()
         let clip = TimelineClip(
@@ -756,6 +919,32 @@ struct KeyframeEditingTests {
             )
             #expect(interpolation == KeyframeCurvePreset.easeInOut.interpolation)
         }
+    }
+
+    private func referenceBezierProgress(
+        _ progress: Double,
+        control1: KeyframeControlPoint,
+        control2: KeyframeControlPoint
+    ) -> Double {
+        func value(_ parameter: Double, _ first: Double, _ second: Double) -> Double {
+            let inverse = 1 - parameter
+            return 3 * inverse * inverse * parameter * first
+                + 3 * inverse * parameter * parameter * second
+                + parameter * parameter * parameter
+        }
+
+        let target = min(max(progress, 0), 1)
+        var lower = 0.0
+        var upper = 1.0
+        for _ in 0..<52 {
+            let midpoint = (lower + upper) * 0.5
+            if value(midpoint, control1.x, control2.x) < target {
+                lower = midpoint
+            } else {
+                upper = midpoint
+            }
+        }
+        return value((lower + upper) * 0.5, control1.y, control2.y)
     }
 
     @MainActor

@@ -107,7 +107,14 @@ struct SpeedWorkspaceView: View {
 
 struct MaskWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let item: TimelineItem?
+
+    init(viewModel: EditorViewModel, item: TimelineItem?) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.item = item
+    }
 
     var body: some View {
         TimelineItemWorkspaceShell(
@@ -197,9 +204,9 @@ struct MaskWorkspaceView: View {
                         maskScrubber(
                             title: "Rotation",
                             value: mask.rotationDegrees,
-                            range: -180...180,
+                            range: -10_000...10_000,
                             systemImage: "rotate.right",
-                            format: { "\(Int($0.rounded()))°" },
+                            format: AngleScrubberFormat.string,
                             update: {
                                 viewModel.setSelectedMaskGeometry(
                                     rotationDegrees: $0,
@@ -231,7 +238,7 @@ struct MaskWorkspaceView: View {
                 }
             } else {
                 EditorWorkspaceMessage(
-                    text: "Masks are available for visual media, shapes, and text.",
+                    text: "Masks are available for visual media, shapes, text, and adjustment layers.",
                     systemImage: "circle.dashed"
                 )
             }
@@ -289,7 +296,7 @@ struct MaskWorkspaceView: View {
                 size = canvasSize
             }
         case .shape(let shape):
-            let localTime = max(viewModel.currentTime - shape.timelineStart, 0)
+            let localTime = max(playbackState.currentTime - shape.timelineStart, 0)
             size = CGSize(
                 width: CGFloat(shape.shape.width.value(at: localTime)),
                 height: CGFloat(shape.shape.height.value(at: localTime))
@@ -300,7 +307,7 @@ struct MaskWorkspaceView: View {
                     for: text,
                     renderSize: canvasSize,
                     renderScale: 1,
-                    at: max(viewModel.currentTime - text.timelineStart, 0)
+                    at: max(playbackState.currentTime - text.timelineStart, 0)
                 ).layerSize
         case .caption, .adjustment, .compound:
             size = canvasSize
@@ -431,7 +438,7 @@ private struct TimelineItemWorkspaceShell<Content: View>: View {
 private func supportsMask(_ item: TimelineItem) -> Bool {
     switch item {
     case .media(let item): item.mediaType != .audio
-    case .shape, .text: true
-    case .caption, .adjustment, .compound: false
+    case .shape, .text, .adjustment: true
+    case .caption, .compound: false
     }
 }

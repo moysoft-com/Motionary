@@ -6,6 +6,48 @@ import Metal
 import os
 import UIKit
 
+enum ShapeRasterizationPolicy {
+    static func requiresFrameLocalEncoding(
+        shape: ClipShape,
+        transform: ClipTransform,
+        hasTransientScaleOverride: Bool
+    ) -> Bool {
+        shape.hasAnimatedRasterProperties
+            || !transform.scale.keyframes.isEmpty
+            || hasTransientScaleOverride
+    }
+}
+
+enum GeneratedLayerSamplingPolicy {
+    /// Interactive text rasterization is capped at 30 distinct samples per
+    /// second on higher-frame-rate projects. It never drops below the native
+    /// project cadence for 30 fps and slower timelines, avoiding the visibly
+    /// stepped 12 fps animation cadence of the previous policy.
+    static func sourceTime(
+        _ localTime: Double,
+        frameDuration: Double,
+        quality: RenderQualityProfile
+    ) -> Double {
+        guard quality == .interactive else { return localTime }
+        let safeTime = localTime.isFinite ? max(localTime, 0) : 0
+        let safeFrameDuration =
+            frameDuration.isFinite && frameDuration > 0
+            ? frameDuration
+            : 1 / 30
+        let step = max(safeFrameDuration, 1 / 30)
+        return ((safeTime / step) + 1e-9).rounded(.down) * step
+    }
+}
+
+struct TextFramePreparationMetrics: Equatable {
+    let itemResolutions: Int
+    let layoutKeyCreations: Int
+    let layoutPreparations: Int
+    let rasterKeyCreations: Int
+    let inFrameTextureUploads: Int
+    let standaloneTextureUploadSubmissions: Int
+}
+
 /// Owns the complete GPU frame graph. The AVFoundation compositor only adapts
 /// asynchronous requests into this synchronous, bounded render operation.
 final class MetalFrameRenderer: @unchecked Sendable {
@@ -15,6 +57,9 @@ final class MetalFrameRenderer: @unchecked Sendable {
     private let effectRegistry: EffectRenderRegistry
     private let textLayerRenderer = TextLayerRenderer()
     private let rasterizationLock = NSLock()
+    private var gpuImageCacheGeneration: UInt64 = 0
+    private var inFrameTextTextureUploadCount = 0
+    private var standaloneTextureUploadSubmissionCount = 0
     private let signpostLog = OSLog(
         subsystem: "com.moysoft.motionary",
         category: .pointsOfInterest
@@ -77,7 +122,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
             compositionTime: compositionTime,
             sourceFrame: sourceFrame,
             destination: destination,
-            isCancelled: isCancelled
+            isCancelled: isCancelled,
+            usesResponsiveFrameAcquire: false
         )
         try frameResources.commitAndWait()
         guard !isCancelled() else { throw MetalRenderingError.cancelled }
@@ -97,7 +143,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 compositionTime: compositionTime,
                 sourceFrame: sourceFrame,
                 destination: destination,
-                isCancelled: isCancelled
+                isCancelled: isCancelled,
+                usesResponsiveFrameAcquire: true
             )
             frameResources.commit { result in
                 switch result {
@@ -121,10 +168,13 @@ final class MetalFrameRenderer: @unchecked Sendable {
         compositionTime: CMTime,
         sourceFrame: SourceFrameProvider,
         destination: CVPixelBuffer,
-        isCancelled: () -> Bool
+        isCancelled: () -> Bool,
+        usesResponsiveFrameAcquire: Bool
     ) throws -> MetalFrameResources {
         guard !isCancelled() else { throw MetalRenderingError.cancelled }
-        let frameResources = try resources.beginFrame()
+        let frameResources = try usesResponsiveFrameAcquire
+            ? resources.beginFrame(isCancelled: isCancelled)
+            : resources.beginFrame()
         let signpostID = OSSignpostID(log: signpostLog)
         os_signpost(.begin, log: signpostLog, name: "Render Frame", signpostID: signpostID)
         defer {
@@ -149,13 +199,34 @@ final class MetalFrameRenderer: @unchecked Sendable {
             for clip in activeClips(in: plan, at: safeTime) {
                 guard !isCancelled() else { throw MetalRenderingError.cancelled }
                 let localTime = max(0, safeTime - clip.timelineStart)
+                if clip.isAdjustmentLayer {
+                    output = try measured("Adjustment Layer", id: signpostID) {
+                        try applyAdjustmentLayer(
+                            clip,
+                            to: output,
+                            canvasRect: canvasRect,
+                            at: localTime,
+                            compositionTime: safeTime,
+                            frameIndex: frameIndex,
+                            plan: plan,
+                            resources: frameResources
+                        )
+                    }
+                    continue
+                }
                 let isGeneratedLayer = clip.shape != nil || clip.text != nil
+                let generatedPreparation = prepareGeneratedLayer(
+                    for: clip,
+                    at: localTime,
+                    plan: plan
+                )
                 let cullingMargin = max(plan.renderSize.width, plan.renderSize.height) * 0.25
                 if isGeneratedLayer,
                     let estimatedBounds = estimatedGeneratedPlacementBounds(
                         for: clip,
                         at: localTime,
-                        plan: plan
+                        plan: plan,
+                        preparation: generatedPreparation
                     ),
                     !estimatedBounds.insetBy(dx: -cullingMargin, dy: -cullingMargin)
                         .intersects(plan.viewport.overscanRect)
@@ -167,6 +238,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                         for: clip,
                         localTime: localTime,
                         plan: plan,
+                        generatedPreparation: generatedPreparation,
                         sourceFrame: sourceFrame,
                         resources: frameResources
                     )
@@ -327,11 +399,32 @@ final class MetalFrameRenderer: @unchecked Sendable {
 
     func purgeCaches() {
         rasterizationLock.lock()
+        gpuImageCacheGeneration &+= 1
         maskImageCache.removeAllObjects()
         gpuImageCache.removeAllObjects()
         textLayerRenderer.removeAllObjects()
         rasterizationLock.unlock()
         resources.purgeCaches()
+    }
+
+    func textPreparationMetrics() -> TextFramePreparationMetrics {
+        rasterizationLock.lock()
+        defer { rasterizationLock.unlock() }
+        return TextFramePreparationMetrics(
+            itemResolutions: textLayerRenderer.itemResolutionCount,
+            layoutKeyCreations: textLayerRenderer.layoutKeyCreationCount,
+            layoutPreparations: textLayerRenderer.layoutPreparationCount,
+            rasterKeyCreations: textLayerRenderer.rasterKeyCreationCount,
+            inFrameTextureUploads: inFrameTextTextureUploadCount,
+            standaloneTextureUploadSubmissions: standaloneTextureUploadSubmissionCount
+        )
+    }
+
+    /// A render-size transition invalidates reusable scratch and Core Video
+    /// wrappers, while content-addressed shape/text/still/mask entries remain
+    /// valid and are naturally bounded by their individual NSCache budgets.
+    func renderContextDidChange() {
+        resources.purgeTransientResources()
     }
 
     func renderShapeLayer(
@@ -366,6 +459,47 @@ final class MetalFrameRenderer: @unchecked Sendable {
         let image: CIImage?
         let textAnimationSample: TextAnimationSample?
         let rasterScaleCorrection: CGSize
+    }
+
+    private struct GeneratedLayerPreparation {
+        let sourceTime: Double
+        let textAnimationSample: TextAnimationSample?
+        let textSample: TextLayerRenderer.PreparedSample?
+    }
+
+    private func prepareGeneratedLayer(
+        for clip: RenderClipDescriptor,
+        at localTime: Double,
+        plan: FrameRenderPlan
+    ) -> GeneratedLayerPreparation? {
+        if clip.shape != nil {
+            return GeneratedLayerPreparation(
+                sourceTime: localTime,
+                textAnimationSample: nil,
+                textSample: nil
+            )
+        }
+        guard let text = clip.text else { return nil }
+        let sourceTime = generatedLayerSourceSampleTime(localTime, plan: plan)
+        let animationSample = TextAnimationEvaluator.sample(
+            animations: text.animations,
+            at: sourceTime,
+            clipDuration: text.duration
+        )
+        rasterizationLock.lock()
+        defer { rasterizationLock.unlock() }
+        let textSample = textLayerRenderer.prepareSample(
+            item: text,
+            renderSize: plan.renderSize,
+            renderScale: plan.renderScale,
+            at: sourceTime,
+            glyphReveal: animationSample.glyphReveal
+        )
+        return GeneratedLayerPreparation(
+            sourceTime: sourceTime,
+            textAnimationSample: animationSample,
+            textSample: textSample
+        )
     }
 
     private func generatedLayerRasterScale(
@@ -409,7 +543,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
     private func estimatedGeneratedPlacementBounds(
         for clip: RenderClipDescriptor,
         at localTime: Double,
-        plan: FrameRenderPlan
+        plan: FrameRenderPlan,
+        preparation: GeneratedLayerPreparation?
     ) -> CGRect? {
         if let shape = clip.shape {
             let layout = ShapeRasterLayout(
@@ -429,18 +564,10 @@ final class MetalFrameRenderer: @unchecked Sendable {
             )
         }
 
-        if let text = clip.text {
-            let sample = TextAnimationEvaluator.sample(
-                animations: text.animations,
-                at: localTime,
-                clipDuration: text.duration
-            )
-            let geometry = TextLayerRenderer.geometry(
-                for: text,
-                renderSize: plan.renderSize,
-                renderScale: plan.renderScale,
-                at: localTime
-            )
+        if clip.text != nil,
+            let sample = preparation?.textAnimationSample,
+            let geometry = preparation?.textSample?.geometry
+        {
             return projectedPlacementBounds(
                 placementExtent: CGRect(origin: .zero, size: geometry.layerSize),
                 clip: clip,
@@ -459,10 +586,14 @@ final class MetalFrameRenderer: @unchecked Sendable {
         for clip: RenderClipDescriptor,
         localTime: Double,
         plan: FrameRenderPlan,
+        generatedPreparation: GeneratedLayerPreparation?,
         sourceFrame: SourceFrameProvider,
         resources frameResources: MetalFrameResources
     ) throws -> SourceResult {
-        let generatedSourceTime = generatedLayerSourceSampleTime(localTime, plan: plan)
+        // Shape geometry is a cheap Metal kernel and must follow keyframes at
+        // the actual frame time. Text rasterization remains quantized only in
+        // interactive quality because glyph layout is substantially heavier.
+        let generatedSourceTime = generatedPreparation?.sourceTime ?? localTime
         if let shape = clip.shape {
             let baseLayout = ShapeRasterLayout(
                 shape: shape,
@@ -480,58 +611,69 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 width: 1 / max(generatedRasterScale.width, 0.000_001),
                 height: 1 / max(generatedRasterScale.height, 0.000_001)
             )
-            return SourceResult(
-                image: try shapeImage(
+            let shouldEncodeInCurrentFrame =
+                ShapeRasterizationPolicy.requiresFrameLocalEncoding(
+                    shape: shape,
+                    transform: clip.transform,
+                    hasTransientScaleOverride: clip.hasTransientRasterScaleOverride
+                )
+            let sourceImage: CIImage
+            if shouldEncodeInCurrentFrame {
+                sourceImage = try frameShapeImage(
                     shape,
                     at: generatedSourceTime,
                     renderScale: plan.renderScale,
-                    rasterScale: generatedRasterScale
-                ),
+                    rasterScale: generatedRasterScale,
+                    resources: frameResources
+                )
+            } else {
+                sourceImage = try shapeImage(
+                    shape,
+                    at: generatedSourceTime,
+                    renderScale: plan.renderScale,
+                    rasterScale: generatedRasterScale,
+                    resources: frameResources
+                )
+            }
+            return SourceResult(
+                image: sourceImage,
                 textAnimationSample: nil,
                 rasterScaleCorrection: generatedScaleCorrection
             )
         }
-        if let text = clip.text {
-            let sample = TextAnimationEvaluator.sample(
-                animations: text.animations,
-                at: generatedSourceTime,
-                clipDuration: text.duration
-            )
-            let baseGeometry = TextLayerRenderer.geometry(
-                for: text,
-                renderSize: plan.renderSize,
-                renderScale: plan.renderScale,
-                at: generatedSourceTime
-            )
+        if clip.text != nil {
+            guard let sample = generatedPreparation?.textAnimationSample,
+                let preparedText = generatedPreparation?.textSample
+            else {
+                return SourceResult(
+                    image: nil,
+                    textAnimationSample: nil,
+                    rasterScaleCorrection: CGSize(width: 1, height: 1)
+                )
+            }
+            rasterizationLock.lock()
+            defer { rasterizationLock.unlock() }
             let generatedRasterScale = generatedLayerRasterScale(
                 for: plan,
                 clip: clip,
                 at: generatedSourceTime,
                 textAnimationSample: sample,
-                baseSize: baseGeometry.layerSize
+                baseSize: preparedText.geometry.layerSize
             )
             let generatedScaleCorrection = CGSize(
                 width: 1 / max(generatedRasterScale.width, 0.000_001),
                 height: 1 / max(generatedRasterScale.height, 0.000_001)
             )
-            rasterizationLock.lock()
             let result = textLayerRenderer.render(
-                item: text,
-                renderSize: plan.renderSize,
-                renderScale: plan.renderScale,
-                rasterScale: generatedRasterScale,
-                at: generatedSourceTime,
-                glyphReveal: sample.glyphReveal
+                preparedText,
+                rasterScale: generatedRasterScale
             )
-            let cacheKey = "text-\(ObjectIdentifier(result.image))" as NSString
-            let image: CIImage
-            do {
-                image = try gpuCachedImageLocked(result.image, key: cacheKey)
-            } catch {
-                rasterizationLock.unlock()
-                throw error
-            }
-            rasterizationLock.unlock()
+            let cacheKey = "text-\(result.cacheIdentity.uuidString)" as NSString
+            let image = try frameCachedTextImageLocked(
+                result.image,
+                key: cacheKey,
+                resources: frameResources
+            )
             return SourceResult(
                 image: image,
                 textAnimationSample: sample,
@@ -540,7 +682,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
         }
         if let stillImageURL = clip.stillImageURL {
             return SourceResult(
-                image: try stillImage(at: stillImageURL),
+                image: try stillImage(
+                    at: stillImageURL,
+                    cacheIdentity: clip.stillImageCacheIdentity,
+                    resources: frameResources
+                ),
                 textAnimationSample: nil,
                 rasterScaleCorrection: CGSize(width: 1, height: 1)
             )
@@ -580,56 +726,181 @@ final class MetalFrameRenderer: @unchecked Sendable {
         )
     }
 
+    private func applyAdjustmentLayer(
+        _ clip: RenderClipDescriptor,
+        to background: CIImage,
+        canvasRect: CGRect,
+        at localTime: Double,
+        compositionTime: Double,
+        frameIndex: Int64,
+        plan: FrameRenderPlan,
+        resources frameResources: MetalFrameResources
+    ) throws -> CIImage {
+        if adjustmentLayerIsNoOp(clip, at: localTime) {
+            return background
+        }
+        let opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
+        guard opacity > 0.000_001 else { return background }
+        let source = background.cropped(to: canvasRect)
+        let adjusted = applyAdjustments(clip.adjustments, to: source, at: localTime)
+        var processed = try effectRegistry.render(
+            clip.effectStack,
+            to: adjusted,
+            context: EffectRenderContext(
+                compositionTime: compositionTime,
+                clipTime: localTime,
+                frameIndex: frameIndex,
+                itemID: clip.clipID,
+                renderScale: plan.renderScale,
+                quality: plan.quality
+            ),
+            resources: frameResources,
+            failurePolicy: plan.failurePolicy
+        )
+        .cropped(to: canvasRect)
+        if clip.blendMode != .normal && clip.blendIntensity > 0.000_001 {
+            processed = try MetalLayerCompositor.blend(
+                foreground: processed,
+                background: source,
+                in: canvasRect,
+                mode: clip.blendMode,
+                intensity: clip.blendIntensity,
+                resources: frameResources
+            )
+        }
+        let effectMask = adjustmentLayerMask(
+            clip,
+            canvasRect: canvasRect,
+            at: localTime,
+            renderSize: plan.renderSize,
+            opacity: opacity
+        )
+        return blend(processed, over: source, alphaMask: effectMask, in: canvasRect)
+    }
+
+    private func adjustmentLayerMask(
+        _ clip: RenderClipDescriptor,
+        canvasRect: CGRect,
+        at localTime: Double,
+        renderSize: CGSize,
+        opacity: Double
+    ) -> CIImage {
+        var mask = CIImage(color: CIColor(red: opacity, green: opacity, blue: opacity, alpha: opacity))
+            .cropped(to: canvasRect)
+        mask = applyMask(clip.mask, to: mask)
+        mask = place(
+            mask,
+            placementExtent: canvasRect,
+            clip: clip,
+            at: localTime,
+            renderSize: renderSize,
+            isGeneratedLayer: false,
+            rasterScaleCorrection: CGSize(width: 1, height: 1),
+            textAnimationSample: nil
+        )
+        return mask
+            .composited(over: transparentImage(croppedTo: canvasRect))
+            .cropped(to: canvasRect)
+    }
+
+    private func adjustmentLayerIsNoOp(
+        _ clip: RenderClipDescriptor,
+        at time: Double
+    ) -> Bool {
+        guard clip.mask == nil,
+            !clip.effectStack.effects.contains(where: \.isEnabled),
+            clip.blendMode == .normal || clip.blendIntensity <= 0.000_001,
+            !clip.transform.isFlippedHorizontally,
+            !clip.transform.isFlippedVertically
+        else { return false }
+
+        let scale = clip.transform.scale.value(at: time)
+        let rotation = clip.transform.rotationDegrees.value(at: time)
+            .truncatingRemainder(dividingBy: 360)
+        let adjustments = clip.adjustments
+        return abs(clip.transform.positionX.value(at: time)) <= 0.000_001
+            && abs(clip.transform.positionY.value(at: time)) <= 0.000_001
+            && abs(scale.x - 1) <= 0.000_001
+            && abs(scale.y - 1) <= 0.000_001
+            && abs(rotation) <= 0.000_001
+            && clip.transform.opacity.value(at: time) >= 0.999_999
+            && abs(adjustments.brightness.value(at: time)) <= 0.000_001
+            && abs(adjustments.contrast.value(at: time) - 1) <= 0.000_001
+            && abs(adjustments.saturation.value(at: time) - 1) <= 0.000_001
+            && abs(adjustments.exposure.value(at: time)) <= 0.000_001
+    }
+
     private func generatedLayerSourceSampleTime(_ localTime: Double, plan: FrameRenderPlan) -> Double {
-        guard plan.quality == .interactive else { return localTime }
-        let step = max(plan.frameDuration * 3, 1 / 12)
-        return quantize(localTime, step: step)
+        GeneratedLayerSamplingPolicy.sourceTime(
+            localTime,
+            frameDuration: plan.frameDuration,
+            quality: plan.quality
+        )
     }
 
     private func activeClips(in plan: FrameRenderPlan, at time: Double) -> [RenderClipDescriptor] {
         let active: [RenderClipDescriptor]
+        var requiresOrdering = false
         if plan.clipIntervals.isEmpty {
             active = plan.clips.filter {
                 $0.timelineStart <= time && $0.timelineStart + $0.duration > time
             }
+            requiresOrdering = true
         } else {
-            var lower = 0
-            var upper = plan.clipIntervals.count
-            while lower < upper {
-                let midpoint = (lower + upper) / 2
-                if plan.clipIntervals[midpoint].end <= time {
-                    lower = midpoint + 1
-                } else {
-                    upper = midpoint
-                }
-            }
-            if plan.clipIntervals.indices.contains(lower) {
-                let interval = plan.clipIntervals[lower]
-                active = time >= interval.start && time < interval.end ? interval.clips : []
-            } else {
-                active = []
-            }
+            active = plan.clipIntervals.activeClipIndices(at: time).map { plan.clips[$0] }
         }
 
         var resolved = active
         let frameEnd = time + plan.frameDuration
-        for clip in plan.clips where clip.text != nil
-            && clip.timelineStart > time
-            && clip.timelineStart < frameEnd
-            && clip.timelineStart + clip.duration > time
-            && !resolved.contains(where: { $0.clipID == clip.clipID })
-        {
-            resolved.append(clip)
+        var textIndex = firstTextClipIndex(after: time, in: plan.textClipsByStart)
+        while textIndex < plan.textClipsByStart.count {
+            let clip = plan.textClipsByStart[textIndex]
+            guard clip.timelineStart < frameEnd else { break }
+            if clip.timelineStart + clip.duration > time,
+                !resolved.contains(where: { $0.clipID == clip.clipID })
+            {
+                resolved.append(clip)
+                requiresOrdering = true
+            }
+            textIndex += 1
         }
-        return resolved
-            .sorted { $0.renderOrder < $1.renderOrder }
-            .map { $0.resolvingLiveOverride(from: plan.livePreviewState) }
+        if requiresOrdering {
+            resolved.sort { $0.renderOrder < $1.renderOrder }
+        }
+        guard let livePreviewSnapshot = plan.livePreviewSnapshot,
+            !livePreviewSnapshot.overrides.isEmpty
+        else {
+            return resolved
+        }
+        return resolved.map { $0.resolvingLiveOverride(from: livePreviewSnapshot) }
     }
 
-    private func stillImage(at url: URL) throws -> CIImage? {
-        let didAccess = url.startAccessingSecurityScopedResource()
-        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
-        let gpuKey = stillImageCacheKey(for: url)
+    private func firstTextClipIndex(
+        after time: Double,
+        in textClipsByStart: [RenderClipDescriptor]
+    ) -> Int {
+        var lower = 0
+        var upper = textClipsByStart.count
+        while lower < upper {
+            let midpoint = (lower + upper) / 2
+            if textClipsByStart[midpoint].timelineStart <= time {
+                lower = midpoint + 1
+            } else {
+                upper = midpoint
+            }
+        }
+        return lower
+    }
+
+    private func stillImage(
+        at url: URL,
+        cacheIdentity: String?,
+        resources frameResources: MetalFrameResources? = nil
+    ) throws -> CIImage? {
+        // Composition compilation performs file validation and identity
+        // resolution once. Cache hits in this frame path must not touch the
+        // filesystem or security-scoped resource machinery.
+        let gpuKey = "still-\(cacheIdentity ?? url.standardizedFileURL.path)" as NSString
         if let cached = gpuImageCache.object(forKey: gpuKey) {
             os_signpost(.event, log: signpostLog, name: "Still Image Cache Hit")
             return cached.image
@@ -637,30 +908,28 @@ final class MetalFrameRenderer: @unchecked Sendable {
         rasterizationLock.lock()
         defer { rasterizationLock.unlock() }
         if let cached = gpuImageCache.object(forKey: gpuKey) { return cached.image }
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
         let imageData = try Data(contentsOf: url, options: [.mappedIfSafe])
         guard let decoded = CIImage(
             data: imageData,
             options: [.applyOrientationProperty: true]
         ) else { return nil }
+        if let frameResources {
+            return try frameCachedImageLocked(
+                decoded,
+                key: gpuKey,
+                resources: frameResources,
+                textureLabel: "Motionary in-frame cached still layer",
+                signpostName: "Still Texture Upload Encoded"
+            )
+        }
         return try gpuCachedImageLocked(decoded, key: gpuKey)
     }
 
-    private func stillImageCacheKey(for url: URL) -> NSString {
-        var freshURL = url
-        freshURL.removeAllCachedResourceValues()
-        let values = try? freshURL.resourceValues(forKeys: [
-            .fileSizeKey,
-            .contentModificationDateKey,
-            .fileResourceIdentifierKey
-        ])
-        let fileSize = values?.fileSize ?? -1
-        let modifiedAt = values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? -1
-        let fileID = values?.fileResourceIdentifier.map { "\($0)" } ?? "unidentified"
-        return "still-\(url.standardizedFileURL.path)-\(fileID)-\(fileSize)-\(modifiedAt)" as NSString
-    }
-
-    /// Uploads immutable text/still pixels once into the shared linear FP16
-    /// working format. Subsequent frames reuse the GPU texture directly.
+    /// Uploads immutable still/static generated pixels once into the shared
+    /// linear FP16 working format. Frame-hot text misses use the nonblocking
+    /// in-frame path below.
     /// Caller must hold `rasterizationLock`.
     private func gpuCachedImageLocked(_ source: CIImage, key: NSString) throws -> CIImage {
         if let cached = gpuImageCache.object(forKey: key) { return cached.image }
@@ -701,6 +970,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             colorSpace: resources.workingColorSpace
         )
         commandBuffer.commit()
+        standaloneTextureUploadSubmissionCount &+= 1
         commandBuffer.waitUntilCompleted()
         guard commandBuffer.status == .completed,
             let localImage = CIImage(
@@ -726,11 +996,126 @@ final class MetalFrameRenderer: @unchecked Sendable {
         return image
     }
 
+    /// Encodes a text cache miss into the frame that will consume it. The
+    /// resulting image is frame-local until that command buffer completes, so
+    /// concurrent frames can never observe a texture before its upload has
+    /// executed. Successful uploads are published to the shared cache from the
+    /// frame completion hook; abandoned or failed frames publish nothing.
+    /// Caller must hold `rasterizationLock`.
+    private func frameCachedTextImageLocked(
+        _ source: CIImage,
+        key: NSString,
+        resources frameResources: MetalFrameResources
+    ) throws -> CIImage {
+        try frameCachedImageLocked(
+            source,
+            key: key,
+            resources: frameResources,
+            textureLabel: "Motionary in-frame cached text layer",
+            signpostName: "Text Texture Upload Encoded",
+            incrementTextUploadMetric: true
+        )
+    }
+
+    /// Encodes immutable/generated pixels into the current frame's command
+    /// buffer. This keeps AVFoundation's asynchronous compositor path free from
+    /// nested GPU submissions and blocking waits on cache misses.
+    /// Caller must hold `rasterizationLock`.
+    private func frameCachedImageLocked(
+        _ source: CIImage,
+        key: NSString,
+        resources frameResources: MetalFrameResources,
+        textureLabel: String,
+        signpostName: StaticString,
+        incrementTextUploadMetric: Bool = false
+    ) throws -> CIImage {
+        if let cached = gpuImageCache.object(forKey: key) {
+            os_signpost(.event, log: signpostLog, name: "Text Texture Cache Hit")
+            return cached.image
+        }
+        let extent = source.extent.integral
+        guard extent.width.isFinite, extent.height.isFinite,
+            extent.width > 0, extent.height > 0
+        else { throw MetalRenderingError.invalidRenderTarget }
+        let width = max(Int(extent.width.rounded(.up)), 1)
+        let height = max(Int(extent.height.rounded(.up)), 1)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        descriptor.hazardTrackingMode = .tracked
+        guard let texture = resources.device.makeTexture(descriptor: descriptor) else {
+            throw MetalRenderingError.textureAllocationFailed(width: width, height: height)
+        }
+        texture.label = textureLabel
+        let localBounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let transparentBase = transparentImage(croppedTo: localBounds)
+        let local = source.transformed(by: CGAffineTransform(
+            translationX: -extent.minX,
+            y: -extent.minY
+        ))
+        .composited(over: transparentBase)
+        .cropped(to: localBounds)
+        self.resources.ciContext.render(
+            local,
+            to: texture,
+            commandBuffer: frameResources.commandBuffer,
+            bounds: localBounds,
+            colorSpace: self.resources.workingColorSpace
+        )
+        guard let localImage = CIImage(
+            mtlTexture: texture,
+            options: [.colorSpace: resources.workingColorSpace]
+        ) else { throw MetalRenderingError.invalidRenderTarget }
+        let uprightLocalImage = localImage.transformed(
+            by: CGAffineTransform(translationX: 0, y: CGFloat(height))
+                .scaledBy(x: 1, y: -1)
+        )
+        let image = uprightLocalImage
+            .transformed(by: CGAffineTransform(
+                translationX: extent.minX,
+                y: extent.minY
+            ))
+            .cropped(to: extent)
+        let cachedImage = CachedGPUImage(image: image, texture: texture)
+        let generation = gpuImageCacheGeneration
+        frameResources.addCompletionHandler { [weak self, cachedImage] commandBuffer in
+            guard commandBuffer.status == .completed, let self else { return }
+            self.rasterizationLock.lock()
+            defer { self.rasterizationLock.unlock() }
+            guard self.gpuImageCacheGeneration == generation else { return }
+            if self.gpuImageCache.object(forKey: key) == nil {
+                self.gpuImageCache.setObject(
+                    cachedImage,
+                    forKey: key,
+                    cost: max(width * height * 8, 1)
+                )
+            }
+        }
+        if incrementTextUploadMetric {
+            inFrameTextTextureUploadCount &+= 1
+        }
+        os_signpost(
+            .event,
+            log: signpostLog,
+            name: signpostName,
+            "%d x %d",
+            width,
+            height
+        )
+        return image
+    }
+
     private func shapeImage(
         _ shape: ClipShape,
         at time: Double,
         renderScale: CGFloat,
-        rasterScale: CGSize
+        rasterScale: CGSize,
+        resources frameResources: MetalFrameResources? = nil
     ) throws -> CIImage {
         let layout = ShapeRasterLayout(
             shape: shape,
@@ -749,6 +1134,17 @@ final class MetalFrameRenderer: @unchecked Sendable {
         defer { rasterizationLock.unlock() }
         if let cached = gpuImageCache.object(forKey: cacheKey) {
             return cached.image
+        }
+
+        if let frameResources {
+            return try frameCachedShapeImageLocked(
+                shape,
+                layout: layout,
+                width: width,
+                height: height,
+                cacheKey: cacheKey,
+                resources: frameResources
+            )
         }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -830,6 +1226,154 @@ final class MetalFrameRenderer: @unchecked Sendable {
         return image
     }
 
+    /// Encodes a static shape cache miss into the frame that consumes it. This
+    /// removes the blocking standalone command-buffer wait from preview playback.
+    /// Caller must hold `rasterizationLock`.
+    private func frameCachedShapeImageLocked(
+        _ shape: ClipShape,
+        layout: ShapeRasterLayout,
+        width: Int,
+        height: Int,
+        cacheKey: NSString,
+        resources frameResources: MetalFrameResources
+    ) throws -> CIImage {
+        if let cached = gpuImageCache.object(forKey: cacheKey) {
+            return cached.image
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.storageMode = .private
+        descriptor.usage = [.shaderRead, .shaderWrite, .renderTarget]
+        descriptor.hazardTrackingMode = .tracked
+        guard let texture = resources.device.makeTexture(descriptor: descriptor) else {
+            throw MetalRenderingError.textureAllocationFailed(width: width, height: height)
+        }
+        texture.label = "Motionary in-frame cached shape layer"
+        let pipeline = try resources.pipeline(named: "motionaryShapeKernel")
+        guard let encoder = frameResources.commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalRenderingError.commandBufferUnavailable
+        }
+        let kind: UInt32
+        switch shape.kind {
+        case .rectangle: kind = 0
+        case .roundedRectangle: kind = 1
+        case .circle: kind = 2
+        }
+        encoder.label = "Metal static shape source"
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(texture, index: 0)
+        let uniforms = try frameResources.writeUniforms(MotionaryEffectUniforms(
+            size: SIMD2(UInt32(width), UInt32(height)),
+            effectKind: kind,
+            seed: 0,
+            time: Float(layout.logicalCornerRadius),
+            frameIndex: 0,
+            direction: SIMD2(Float(layout.rasterScale.width), Float(layout.rasterScale.height)),
+            parameters: SIMD4(
+                Float(shape.color.red),
+                Float(shape.color.green),
+                Float(shape.color.blue),
+                Float(shape.color.alpha)
+            )
+        ))
+        encoder.setBuffer(uniforms.buffer, offset: uniforms.offset, index: 0)
+        frameResources.dispatch(
+            encoder: encoder,
+            pipeline: pipeline,
+            width: width,
+            height: height
+        )
+        encoder.endEncoding()
+        guard let image = CIImage(
+            mtlTexture: texture,
+            options: [.colorSpace: self.resources.workingColorSpace]
+        ) else { throw MetalRenderingError.invalidRenderTarget }
+        let cachedImage = CachedGPUImage(image: image, texture: texture)
+        let generation = gpuImageCacheGeneration
+        frameResources.addCompletionHandler { [weak self, cachedImage] commandBuffer in
+            guard commandBuffer.status == .completed, let self else { return }
+            self.rasterizationLock.lock()
+            defer { self.rasterizationLock.unlock() }
+            guard self.gpuImageCacheGeneration == generation else { return }
+            if self.gpuImageCache.object(forKey: cacheKey) == nil {
+                self.gpuImageCache.setObject(
+                    cachedImage,
+                    forKey: cacheKey,
+                    cost: max(width * height * 8, 1)
+                )
+            }
+        }
+        return image
+    }
+
+    /// Encodes time-varying shape pixels into the frame's existing command
+    /// buffer. This avoids creating and synchronously waiting for a separate
+    /// GPU submission on every animated geometry/scale sample.
+    private func frameShapeImage(
+        _ shape: ClipShape,
+        at time: Double,
+        renderScale: CGFloat,
+        rasterScale: CGSize,
+        resources frameResources: MetalFrameResources
+    ) throws -> CIImage {
+        let layout = ShapeRasterLayout(
+            shape: shape,
+            at: time,
+            logicalRenderScale: renderScale,
+            rasterScale: rasterScale
+        )
+        let width = max(Int(layout.rasterSize.width.rounded(.up)), 1)
+        let height = max(Int(layout.rasterSize.height.rounded(.up)), 1)
+        let texture = try frameResources.makeScratchTexture(width: width, height: height)
+        texture.label = "Motionary frame-local animated shape"
+        let pipeline = try resources.pipeline(named: "motionaryShapeKernel")
+        guard let encoder = frameResources.commandBuffer.makeComputeCommandEncoder() else {
+            throw MetalRenderingError.commandBufferUnavailable
+        }
+        let kind: UInt32
+        switch shape.kind {
+        case .rectangle: kind = 0
+        case .roundedRectangle: kind = 1
+        case .circle: kind = 2
+        }
+        encoder.label = "Metal animated shape source"
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(texture, index: 0)
+        let uniforms = try frameResources.writeUniforms(MotionaryEffectUniforms(
+            size: SIMD2(UInt32(width), UInt32(height)),
+            effectKind: kind,
+            seed: 0,
+            time: Float(layout.logicalCornerRadius),
+            frameIndex: 0,
+            direction: SIMD2(Float(layout.rasterScale.width), Float(layout.rasterScale.height)),
+            parameters: SIMD4(
+                Float(shape.color.red),
+                Float(shape.color.green),
+                Float(shape.color.blue),
+                Float(shape.color.alpha)
+            )
+        ))
+        encoder.setBuffer(uniforms.buffer, offset: uniforms.offset, index: 0)
+        frameResources.dispatch(
+            encoder: encoder,
+            pipeline: pipeline,
+            width: width,
+            height: height
+        )
+        encoder.endEncoding()
+        guard let image = CIImage(
+            mtlTexture: texture,
+            options: [.colorSpace: resources.workingColorSpace]
+        ) else {
+            throw MetalRenderingError.invalidRenderTarget
+        }
+        return image
+    }
+
     private func shapeCacheKey(
         shape: ClipShape,
         layout: ShapeRasterLayout,
@@ -853,11 +1397,6 @@ final class MetalFrameRenderer: @unchecked Sendable {
             String(format: "%.5f", shape.color.blue),
             String(format: "%.5f", shape.color.alpha)
         ].joined(separator: "|") as NSString
-    }
-
-    private func quantize(_ value: Double, step: Double) -> Double {
-        guard step > 0 else { return value }
-        return (value / step).rounded() * step
     }
 
     private func place(
@@ -1000,8 +1539,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
         }
 
         rasterizationLock.lock()
+        defer { rasterizationLock.unlock() }
+        if let cached = maskImageCache.object(forKey: cacheKey) {
+            return blend(image, with: cached, in: extent)
+        }
         var maskImage = rasterMask(mask: mask, maskRect: maskRect, extent: extent)
-        rasterizationLock.unlock()
         if featherRadius > 0.5 {
             let blur = CIFilter.gaussianBlur()
             blur.inputImage = maskImage.clampedToExtent()
@@ -1010,7 +1552,13 @@ final class MetalFrameRenderer: @unchecked Sendable {
         } else {
             maskImage = maskImage.cropped(to: extent)
         }
-        maskImageCache.setObject(maskImage, forKey: cacheKey, cost: Int(extent.width * extent.height))
+        let byteCost = Int(
+            min(
+                extent.width * extent.height * 4,
+                CGFloat(Int.max)
+            )
+        )
+        maskImageCache.setObject(maskImage, forKey: cacheKey, cost: max(byteCost, 1))
         return blend(image, with: maskImage, in: extent)
     }
 
@@ -1018,6 +1566,19 @@ final class MetalFrameRenderer: @unchecked Sendable {
         let filter = CIFilter.blendWithMask()
         filter.inputImage = image
         filter.backgroundImage = transparentImage(croppedTo: extent)
+        filter.maskImage = maskImage
+        return (filter.outputImage ?? image).cropped(to: extent)
+    }
+
+    private func blend(
+        _ image: CIImage,
+        over background: CIImage,
+        alphaMask maskImage: CIImage,
+        in extent: CGRect
+    ) -> CIImage {
+        let filter = CIFilter.blendWithAlphaMask()
+        filter.inputImage = image
+        filter.backgroundImage = background
         filter.maskImage = maskImage
         return (filter.outputImage ?? image).cropped(to: extent)
     }
@@ -1260,5 +1821,13 @@ final class MetalFrameRenderer: @unchecked Sendable {
         os_signpost(.begin, log: signpostLog, name: name, signpostID: id)
         defer { os_signpost(.end, log: signpostLog, name: name, signpostID: id) }
         return try operation()
+    }
+}
+
+extension ClipShape {
+    var hasAnimatedRasterProperties: Bool {
+        !width.keyframes.isEmpty
+            || !height.keyframes.isEmpty
+            || !cornerRadius.keyframes.isEmpty
     }
 }

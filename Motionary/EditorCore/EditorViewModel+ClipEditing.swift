@@ -249,15 +249,17 @@ extension EditorViewModel {
             touchUpdatedAt: !interactive
         ) { project in
             let proposedIndex = insertionIndex ?? proposedTrackIndex
-            var preview = project
             guard
-                let placement = preview.resolveClipPlacement(
-                    clipID,
-                    proposedStart: timelineStart,
-                    proposedTrackIndex: proposedIndex,
+                let placementSession = TimelinePlacementDragSession(
+                    project: project,
+                    itemID: clipID,
                     currentTime: currentTime
                 )
             else { return }
+            let placement = placementSession.resolve(
+                proposedStart: timelineStart,
+                proposedTrackIndex: proposedIndex
+            )
             result = project.placeClip(clipID, using: placement)
             selectedClipID = clipID
             selectedTrackID = project.tracks.first(where: { $0.itemIndex(id: clipID) != nil })?.id
@@ -296,11 +298,18 @@ extension EditorViewModel {
         at timelineStart: Double,
         proposedTrackIndex: Int
     ) -> TimelinePlacementResult? {
-        var previewProject = project
-        return previewProject.resolveClipPlacement(
-            clipID,
+        makeClipPlacementDragSession(clipID)?.resolve(
             proposedStart: timelineStart,
-            proposedTrackIndex: proposedTrackIndex,
+            proposedTrackIndex: proposedTrackIndex
+        )
+    }
+
+    func makeClipPlacementDragSession(
+        _ clipID: UUID
+    ) -> TimelinePlacementDragSession? {
+        TimelinePlacementDragSession(
+            project: project,
+            itemID: clipID,
             currentTime: currentTime
         )
     }
@@ -359,9 +368,18 @@ extension EditorViewModel {
         )
 
         if interactive {
-            project.replaceItem(id: clipID, with: item)
-            project.tracks[location.track].sortItems()
-            incrementTimelineContentRevision()
+            mutateProject(
+                rebuild: false,
+                recordHistory: false,
+                persistChanges: false,
+                touchUpdatedAt: false,
+                refreshTimeline: true
+            ) { project in
+                project.replaceItem(id: clipID, with: item)
+                if let updatedLocation = project.itemLocation(id: clipID) {
+                    project.tracks[updatedLocation.track].sortItems()
+                }
+            }
             selectedClipID = item.id
             return result
         }
@@ -479,8 +497,15 @@ extension EditorViewModel {
         )
 
         if interactive {
-            project.replaceItem(id: clipID, with: item)
-            incrementTimelineContentRevision()
+            mutateProject(
+                rebuild: false,
+                recordHistory: false,
+                persistChanges: false,
+                touchUpdatedAt: false,
+                refreshTimeline: true
+            ) { project in
+                project.replaceItem(id: clipID, with: item)
+            }
             selectedClipID = item.id
             return result
         }

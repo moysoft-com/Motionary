@@ -6,6 +6,13 @@ import UIKit
 
 enum EffectImageRenderer {
     private static let renderer = Result { try MetalFrameRenderer() }
+    private static let fallbackDiagnosticEffectID = UUID(
+        uuidString: "8C76B92C-AF30-4B9E-889A-B296487B57D3"
+    )!
+
+    static func diagnosticEffectID(for stack: EffectStack) -> UUID {
+        stack.effects.first?.id ?? fallbackDiagnosticEffectID
+    }
 
     static func render(
         _ stack: EffectStack,
@@ -24,7 +31,7 @@ enum EffectImageRenderer {
             EffectRenderDiagnostics.shared.report(EffectRenderDiagnostic(
                 severity: .error,
                 moduleID: "standalone-preview",
-                effectID: UUID(),
+                effectID: diagnosticEffectID(for: stack),
                 message: error.localizedDescription
             ))
             return image

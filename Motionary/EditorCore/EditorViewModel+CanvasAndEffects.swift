@@ -79,11 +79,11 @@ extension EditorViewModel {
         guard let selectedClipID else { return }
         guard let location = project.clipLocation(id: selectedClipID) else { return }
         let beforeItem = project.tracks[location.track].items[location.clip]
-        guard var updatedClip = beforeItem.legacyClip() else { return }
+        guard var updatedClip = beforeItem.visualEditingClip() else { return }
         let beforeClip = updatedClip
         update(&updatedClip)
         guard updatedClip != beforeClip else { return }
-        let afterItem = beforeItem.mergingLegacyClip(updatedClip)
+        let afterItem = beforeItem.mergingVisualEditingClip(updatedClip)
         var invalidation: EditorInvalidation = [.userInterface, .persistence]
         if rebuild {
             invalidation.formUnion(EditorProject.renderInvalidation(before: beforeClip, after: updatedClip))
@@ -153,6 +153,79 @@ extension EditorViewModel {
         }
     }
 
+    func setSelectedAdjustmentTransform(
+        positionX: Double? = nil,
+        positionY: Double? = nil,
+        scale: ScaleValue? = nil,
+        rotationDegrees: Double? = nil,
+        interactive: Bool = false
+    ) {
+        guard case .adjustment = selectedTimelineItem,
+            let itemID = selectedTimelineItemID
+        else { return }
+        if interactive {
+            beginInteractiveEdit()
+        }
+
+        let frameRate = Double(max(project.renderSettings.frameRate, 1))
+        let tolerance = keyframeTimeTolerance
+        mutateProject(
+            rebuild: !interactive,
+            recordHistory: !interactive,
+            persistChanges: !interactive,
+            touchUpdatedAt: !interactive,
+            // A canvas transform can create or move an adjustment keyframe.
+            // Defer the affected-track snapshot refresh during interaction, then
+            // publish it once when the edit transaction commits.
+            refreshTimeline: true
+        ) { project in
+            guard let location = project.itemLocation(id: itemID),
+                case .adjustment(var item) = project.tracks[location.track].items[location.item]
+            else { return }
+
+            let localTime = min(
+                max(((self.currentTime - item.timelineStart) * frameRate).rounded() / frameRate, 0),
+                item.duration
+            )
+            if let positionX, positionX.isFinite {
+                item.visuals.transform.positionX.setCanvasValue(
+                    positionX,
+                    at: localTime,
+                    tolerance: tolerance
+                )
+            }
+            if let positionY, positionY.isFinite {
+                item.visuals.transform.positionY.setCanvasValue(
+                    positionY,
+                    at: localTime,
+                    tolerance: tolerance
+                )
+            }
+            if let scale {
+                let boundedScale = ScaleValue(
+                    x: min(max(scale.x.isFinite ? scale.x : 1, 0.01), 100),
+                    y: min(max(scale.y.isFinite ? scale.y : 1, 0.01), 100)
+                )
+                item.visuals.transform.scale.setCanvasValue(
+                    boundedScale,
+                    at: localTime,
+                    tolerance: tolerance
+                )
+            }
+            if let rotationDegrees, rotationDegrees.isFinite {
+                item.visuals.transform.rotationDegrees.setCanvasValue(
+                    rotationDegrees,
+                    at: localTime,
+                    tolerance: tolerance
+                )
+            }
+            project.tracks[location.track].items[location.item] = .adjustment(item)
+        }
+        if interactive {
+            scheduleInteractivePreviewRebuild(invalidation: [.previewFrame])
+        }
+    }
+
     func beginInteractiveEdit() {
         if interactiveEditSnapshot == nil {
             interactiveEditSnapshot = project
@@ -175,7 +248,17 @@ extension EditorViewModel {
         }
 
         interactiveEditSnapshot = nil
-        guard project != snapshot else { return }
+        project.renumberTracks()
+        project.synchronizeMediaLibrary()
+        guard project != snapshot else {
+            clearPendingLiveVisualOverrides()
+            pendingTimelineInvalidationScope = nil
+            refreshSelectedTimelineRange()
+            return
+        }
+        publishProjectChange()
+        refreshSelectedTimelineRange()
+        flushPendingTimelineContentInvalidation()
         let renderInvalidation = project.renderInvalidation(comparedTo: snapshot)
         let command = project.historyCommand(
             from: snapshot,
@@ -195,7 +278,11 @@ extension EditorViewModel {
         if rebuild {
             schedulePreviewRebuild(
                 seekTo: currentTime,
-                delay: delayRebuild,
+                // Audio-only commits already use a retained topology and do
+                // not seek. Apply their canonical mix immediately after the
+                // live task is cancelled so the final scrub value is audible
+                // without a debounce gap.
+                delay: delayRebuild && renderInvalidation != [.audioMix],
                 invalidation: renderInvalidation
             )
         }
@@ -226,6 +313,34 @@ extension EditorViewModel {
                 tolerance: self.keyframeTimeTolerance
             )
             clip.setAnimatableProperty(property, for: target)
+        }
+    }
+}
+
+private extension AnimatableProperty where Value == Double {
+    mutating func setCanvasValue(
+        _ value: Double,
+        at time: Double,
+        tolerance: Double
+    ) {
+        if keyframes.isEmpty {
+            baseValue = value
+        } else {
+            _ = setKeyframe(at: time, value: value, tolerance: tolerance)
+        }
+    }
+}
+
+private extension AnimatableScale {
+    mutating func setCanvasValue(
+        _ value: ScaleValue,
+        at time: Double,
+        tolerance: Double
+    ) {
+        if keyframes.isEmpty {
+            baseValue = value
+        } else {
+            _ = setKeyframe(at: time, value: value, tolerance: tolerance)
         }
     }
 }

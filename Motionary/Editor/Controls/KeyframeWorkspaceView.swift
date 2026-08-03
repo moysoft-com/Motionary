@@ -171,19 +171,25 @@ private struct SpeedKeyframeGraph: View {
             .highPriorityGesture(graphGesture(plot: plot))
         }
         .onChange(of: item.speedMap.keyframes.map(\.time)) { _, times in
-            guard let selectedSourceTime,
-                times.contains(where: { abs($0 - selectedSourceTime) <= 0.000_001 })
-            else {
-                self.selectedSourceTime = nil
-                return
+            DispatchQueue.main.async {
+                guard let selectedSourceTime,
+                    times.contains(where: { abs($0 - selectedSourceTime) <= 0.000_001 })
+                else {
+                    self.selectedSourceTime = nil
+                    return
+                }
             }
         }
         .onChange(of: item.id) { _, _ in
-            finishActiveGesture()
-            selectedSourceTime = nil
+            DispatchQueue.main.async {
+                finishActiveGesture()
+                selectedSourceTime = nil
+            }
         }
         .onDisappear {
-            finishActiveGesture()
+            DispatchQueue.main.async {
+                finishActiveGesture()
+            }
         }
     }
 

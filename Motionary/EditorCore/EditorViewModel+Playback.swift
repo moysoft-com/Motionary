@@ -12,7 +12,10 @@ extension EditorViewModel {
         }
         repairStoredMediaReferences()
         _ = prepareEnabledBackgroundRemovalArtifactsOnOpen()
-        previewQuality = .interactive
+        // Opening is not an active gesture. Build one stable balanced graph
+        // instead of installing an interactive composition and replacing it
+        // again while AVPlayer is still servicing its first frame requests.
+        previewQuality = .balanced
         schedulePreviewRebuild(
             seekTo: 0,
             delay: false,
@@ -31,9 +34,12 @@ extension EditorViewModel {
         interactivePreviewThrottleTask = nil
         livePreviewFrameRefreshTask?.cancel()
         livePreviewFrameRefreshTask = nil
-        livePreviewOverrideClearTask?.cancel()
-        livePreviewOverrideClearTask = nil
+        liveAudioPreviewTask?.cancel()
+        liveAudioPreviewTask = nil
+        pendingLiveAudioPreviewItemID = nil
+        liveAudioPreviewTaskGeneration &+= 1
         renderService.livePreviewState.removeAll()
+        pendingLiveVisualOverrideItemIDs.removeAll(keepingCapacity: true)
         autosaveTask = Task { [projectStore, projectID] in
             try? await projectStore.repository.save(content, projectID: projectID)
         }
@@ -44,6 +50,9 @@ extension EditorViewModel {
         }
         rebuildTask?.cancel()
         rebuildTask = nil
+        previewRecoveryTask?.cancel()
+        previewRecoveryTask = nil
+        stopPlaybackWatchdog()
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
         importTask?.cancel()
@@ -64,20 +73,17 @@ extension EditorViewModel {
         playbackCommandGeneration &+= 1
         lastScrubUIUpdate = 0
         lastLivePreviewFrameRefresh = 0
+        lastLiveAudioPreviewRefresh = 0
         livePreviewFrameRefreshInFlight = false
         pendingLivePreviewFrameRefresh = false
         isRenderingPreview = false
         previewProgress = 0
+        pendingPlaybackResumeAfterPreviewRebuild = false
         if let observer = timeObserver {
             player?.removeTimeObserver(observer)
             timeObserver = nil
         }
-        if let previewVideoOutput, let item = player?.currentItem {
-            item.remove(previewVideoOutput)
-        }
-        previewVideoOutput = nil
-        player?.pause()
-        player = nil
+        replacePreviewPlayer(with: nil)
         isPlaying = false
     }
 
@@ -106,6 +112,7 @@ extension EditorViewModel {
             rebuildTask = nil
             isRenderingPreview = false
             previewProgress = 0
+            pendingPlaybackResumeAfterPreviewRebuild = false
         }
     }
 
@@ -114,48 +121,185 @@ extension EditorViewModel {
         playbackCommandGeneration &+= 1
         let commandGeneration = playbackCommandGeneration
 
-        if isPlaying {
-            player.pause()
+        if pendingPlaybackResumeAfterPreviewRebuild {
+            pendingPlaybackResumeAfterPreviewRebuild = false
             isPlaying = false
+            player.pause()
             return
         }
+
+        if isPlaying {
+            pausePlaybackForUserCommand(player)
+            return
+        }
+
+        cancelPendingPreviewRebuildBeforePlaybackStart()
 
         let endTolerance = max(keyframeTimeTolerance, 0.05)
         if duration > 0, currentTime >= max(duration - endTolerance, 0) {
             player.pause()
             player.currentItem?.cancelPendingSeeks()
             updateCurrentTime(0)
-            player.seek(
-                to: .zero,
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            ) { [weak self, weak player] finished in
-                guard finished, let player else { return }
-                Task { @MainActor in
-                    guard let self,
-                        self.player === player,
-                        self.playbackCommandGeneration == commandGeneration
-                    else { return }
-                    player.play()
-                    self.isPlaying = true
+            Task { [weak self, weak player] in
+                guard let self, let player else { return }
+                let didSeek = await self.boundedSeek(
+                    player: player,
+                    to: 0,
+                    toleranceBefore: .zero,
+                    toleranceAfter: .zero,
+                    timeoutNanoseconds: 700_000_000
+                )
+                guard self.player === player,
+                    self.playbackCommandGeneration == commandGeneration
+                else { return }
+                guard didSeek else {
+                    self.schedulePreviewRecovery(
+                        reason: .seekTimeout,
+                        resumePlayback: true
+                    )
+                    return
                 }
+                player.play()
+                self.isPlaying = true
+                self.startPlaybackWatchdog()
             }
             return
         }
 
         player.play()
         isPlaying = true
+        startPlaybackWatchdog()
+    }
+
+    private func pausePlaybackForUserCommand(_ player: AVPlayer) {
+        playbackCommandGeneration &+= 1
+        scrubSessionGeneration &+= 1
+        scrubSeekGeneration &+= 1
+
+        stopPlaybackWatchdog()
+        player.pause()
+        player.currentItem?.cancelPendingSeeks()
+        isPlaying = false
+        isScrubbing = false
+        wasPlayingBeforeScrub = false
+
+        scrubSeekTask?.cancel()
+        scrubSeekTask = nil
+        pendingScrubSeekTime = nil
+        isScrubSeekInFlight = false
+        lastIssuedScrubSeekTime = nil
+        lastScrubUIUpdate = 0
+        scrubSeekLatencyEstimate = 0
+        cancelInteractivePreviewRebuild()
+
+        if rebuildTask != nil {
+            deferredPreviewInvalidation.formUnion([
+                .previewFrame,
+                .compositionTopology,
+                .audioMix,
+            ])
+            rebuildTask?.cancel()
+            rebuildTask = nil
+        }
+        let invalidation = flushDeferredPreviewRebuild(
+            seekTo: currentTime,
+            includeGeneratedLayerQualityRestore: false
+        )
+        if invalidation.isEmpty, previewState.status == .cancelled {
+            schedulePreviewRebuild(
+                seekTo: currentTime,
+                delay: false,
+                invalidation: [.previewFrame]
+            )
+        }
+        isScrubbing = false
+        wasPlayingBeforeScrub = false
+    }
+
+    func startPlaybackWatchdog() {
+        playbackWatchdogTask?.cancel()
+        let generation = playbackCommandGeneration
+        playbackWatchdogTask = Task { [weak self] in
+            var lastObservedTime: Double?
+            var lastProgressAt = ContinuousClock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(350))
+                let shouldContinue = await MainActor.run {
+                    guard let self,
+                        self.playbackCommandGeneration == generation,
+                        self.isPlaying,
+                        !self.isScrubbing,
+                        !self.isRenderingPreview,
+                        let player = self.player,
+                        self.duration > 0
+                    else { return false }
+                    let seconds = CMTimeGetSeconds(player.currentTime())
+                    guard seconds.isFinite else {
+                        self.schedulePreviewRecovery(
+                            reason: .playbackStalled,
+                            resumePlayback: true
+                        )
+                        return false
+                    }
+                    if seconds >= self.lastPlayableTime - 0.05 {
+                        return true
+                    }
+                    if let lastObservedTime,
+                        seconds > lastObservedTime + 0.015
+                    {
+                        self.updateCurrentTime(self.clampedTimelineTime(seconds))
+                        lastProgressAt = ContinuousClock.now
+                    } else if lastObservedTime == nil {
+                        lastProgressAt = ContinuousClock.now
+                    } else if lastProgressAt.duration(to: ContinuousClock.now) > .milliseconds(1400) {
+                        if self.lastPreviewRenderedFrameAt > 0 {
+                            player.pause()
+                            self.isPlaying = false
+                            self.pendingPlaybackResumeAfterPreviewRebuild = false
+                            self.stopPlaybackWatchdog()
+                            return false
+                        }
+                        self.schedulePreviewRecovery(
+                            reason: .playbackStalled,
+                            resumePlayback: true
+                        )
+                        return false
+                    }
+                    lastObservedTime = seconds
+                    return true
+                }
+                if !shouldContinue {
+                    break
+                }
+            }
+        }
+    }
+
+    func stopPlaybackWatchdog() {
+        playbackWatchdogTask?.cancel()
+        playbackWatchdogTask = nil
+    }
+
+    private func cancelPendingPreviewRebuildBeforePlaybackStart() {
+        guard rebuildTask != nil, !isRenderingPreview else { return }
+        rebuildTask?.cancel()
+        rebuildTask = nil
+        previewGeneration &+= 1
+        previewProgress = 0
+        if case .building = previewState.status {
+            previewState.status = .idle
+        }
     }
 
     func toggleGraphPlayback() {
         guard let segment = graphSegment,
-            let clip = project.clip(id: segment.clipID)
+            let item = indexedTimelineItem(id: segment.clipID)
         else {
             togglePlayback()
             return
         }
-        let start = clip.timelineStart + segment.startTime
-        let end = clip.timelineStart + segment.endTime
+        let start = item.timelineStart + segment.startTime
+        let end = item.timelineStart + segment.endTime
         if !isPlaying, currentTime >= end - keyframeTimeTolerance {
             seek(to: start)
         }
@@ -163,12 +307,32 @@ extension EditorViewModel {
     }
 
     func undo() {
+        if interactiveEditSnapshot != nil {
+            // Commit the gesture as its own history entry first. Undo then
+            // targets exactly that edit, and the later gesture onEnded callback
+            // becomes a harmless no-op instead of contaminating redo history.
+            finishInteractiveEdit(rebuild: false, delayRebuild: false)
+        }
         guard let command = undoStack.popLast() else { return }
         let retainedClipID = selectedClipID
+        let previousTracks = project.tracks
+        publishProjectChange()
         command.undo(on: &project)
+        if previousTracks != project.tracks {
+            markTimelineEvaluationChanged()
+            invalidatePreviewCanvasIfNeeded(
+                .comparing(previous: previousTracks, current: project.tracks),
+                previousTracks: previousTracks,
+                currentTracks: project.tracks
+            )
+        }
         redoStack.append(command)
         restoreSelectionIfPossible(retainedClipID)
-        incrementTimelineContentRevision()
+        refreshSelectedTimelineRange()
+        updateCurrentTime(clampedTimelineTime(currentTime))
+        invalidateTimelineContent(
+            .comparing(previous: previousTracks, current: project.tracks)
+        )
         if graphSegment != nil {
             refreshGraphSegment()
         }
@@ -181,12 +345,31 @@ extension EditorViewModel {
     }
 
     func redo() {
+        if interactiveEditSnapshot != nil {
+            // A newly committed gesture intentionally invalidates the old redo
+            // branch, matching ordinary editor history semantics.
+            finishInteractiveEdit(rebuild: true, delayRebuild: false)
+        }
         guard let command = redoStack.popLast() else { return }
         let retainedClipID = selectedClipID
+        let previousTracks = project.tracks
+        publishProjectChange()
         command.apply(to: &project)
+        if previousTracks != project.tracks {
+            markTimelineEvaluationChanged()
+            invalidatePreviewCanvasIfNeeded(
+                .comparing(previous: previousTracks, current: project.tracks),
+                previousTracks: previousTracks,
+                currentTracks: project.tracks
+            )
+        }
         undoStack.append(command)
         restoreSelectionIfPossible(retainedClipID)
-        incrementTimelineContentRevision()
+        refreshSelectedTimelineRange()
+        updateCurrentTime(clampedTimelineTime(currentTime))
+        invalidateTimelineContent(
+            .comparing(previous: previousTracks, current: project.tracks)
+        )
         if graphSegment != nil {
             refreshGraphSegment()
         }
@@ -208,11 +391,22 @@ extension EditorViewModel {
     func seekPlayer(to time: Double, exact: Bool) {
         let clamped = clampedPlayableTime(time)
         let tolerance = exact ? CMTime.zero : CMTime(seconds: 0.035, preferredTimescale: 600)
-        player?.seek(
-            to: CMTime(seconds: clamped, preferredTimescale: 600),
-            toleranceBefore: tolerance,
-            toleranceAfter: tolerance
-        )
+        guard let player else { return }
+        Task { [weak self, weak player] in
+            guard let self, let player else { return }
+            let didSeek = await self.boundedSeek(
+                player: player,
+                to: clamped,
+                toleranceBefore: tolerance,
+                toleranceAfter: tolerance,
+                timeoutNanoseconds: 900_000_000
+            )
+            guard !didSeek, self.player === player else { return }
+            self.schedulePreviewRecovery(
+                reason: .seekTimeout,
+                resumePlayback: self.isPlaying || self.pendingPlaybackResumeAfterPreviewRebuild
+            )
+        }
     }
 
     func beginScrub() {
@@ -220,6 +414,7 @@ extension EditorViewModel {
         playbackCommandGeneration &+= 1
         scrubSessionGeneration &+= 1
         wasPlayingBeforeScrub = isPlaying
+        stopPlaybackWatchdog()
         player?.pause()
         isPlaying = false
         isScrubbing = true
@@ -264,13 +459,22 @@ extension EditorViewModel {
             finishScrub(at: clamped, generation: generation)
             return
         }
-        player.seek(
-            to: CMTime(seconds: clampedPlayableTime(clamped), preferredTimescale: 600),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.finishScrub(at: clamped, generation: generation)
+        Task { [weak self, weak player] in
+            guard let self, let player else { return }
+            let didSeek = await self.boundedSeek(
+                player: player,
+                to: self.clampedPlayableTime(clamped),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero,
+                timeoutNanoseconds: 900_000_000
+            )
+            guard self.scrubSessionGeneration == generation else { return }
+            self.finishScrub(at: clamped, generation: generation)
+            if !didSeek, self.player === player {
+                self.schedulePreviewRecovery(
+                    reason: .seekTimeout,
+                    resumePlayback: false
+                )
             }
         }
     }
@@ -280,55 +484,53 @@ extension EditorViewModel {
         updateCurrentTime(time)
         isScrubbing = false
         wasPlayingBeforeScrub = false
-        flushDeferredPreviewRebuild(seekTo: time)
-        restoreGeneratedLayerPreviewQualityAfterScrub(seekTo: time)
+        flushDeferredPreviewRebuild(
+            seekTo: time,
+            includeGeneratedLayerQualityRestore: true
+        )
     }
 
     var navigationPoints: [Double] {
-        let points: [Double]
-        if let item = selectedTimelineItem {
-            points =
-                [item.timelineStart, item.timelineEnd]
-                + item.allKeyframeTimes.map { item.timelineStart + $0 }
-                + project.beatSnapAnchors()
-        } else {
-            points = project.tracks.flatMap(\.items).flatMap {
-                [$0.timelineStart, $0.timelineEnd]
-            }
-            + project.beatSnapAnchors()
-        }
-        return points.map(clampedTimelineTime).sorted().reduce(into: [Double]()) { result, value in
-            if result.last.map({ abs($0 - value) > keyframeTimeTolerance }) ?? true {
-                result.append(value)
-            }
-        }
+        cachedTimelineEvaluationIndex().navigationPoints(for: selectedTimelineItemID)
     }
 
     var canNavigateBackward: Bool {
-        navigationPoints.contains { $0 < currentTime - keyframeTimeTolerance }
+        cachedTimelineEvaluationIndex().previousNavigationPoint(
+            before: currentTime,
+            tolerance: keyframeTimeTolerance,
+            selectedItemID: selectedTimelineItemID
+        ) != nil
     }
 
     var canNavigateForward: Bool {
-        navigationPoints.contains { $0 > currentTime + keyframeTimeTolerance }
+        cachedTimelineEvaluationIndex().nextNavigationPoint(
+            after: currentTime,
+            tolerance: keyframeTimeTolerance,
+            selectedItemID: selectedTimelineItemID
+        ) != nil
     }
 
     func navigateBackward() {
-        guard let target = navigationPoints.last(
-            where: { $0 < currentTime - keyframeTimeTolerance }
+        guard let target = cachedTimelineEvaluationIndex().previousNavigationPoint(
+            before: currentTime,
+            tolerance: keyframeTimeTolerance,
+            selectedItemID: selectedTimelineItemID
         ) else { return }
         seek(to: target)
     }
 
     func navigateForward() {
-        guard let target = navigationPoints.first(
-            where: { $0 > currentTime + keyframeTimeTolerance }
+        guard let target = cachedTimelineEvaluationIndex().nextNavigationPoint(
+            after: currentTime,
+            tolerance: keyframeTimeTolerance,
+            selectedItemID: selectedTimelineItemID
         ) else { return }
         seek(to: target)
     }
 
     private func restoreSelectionIfPossible(_ clipID: UUID?) {
         if let clipID,
-            let location = project.itemLocation(id: clipID)
+            let location = indexedTimelineItemLocation(id: clipID)
         {
             selectedClipID = clipID
             selectedTrackID = project.tracks[location.track].id

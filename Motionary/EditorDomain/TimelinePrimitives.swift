@@ -520,20 +520,54 @@ private func solveBezierParameter(
     control1X: Double,
     control2X: Double
 ) -> Double {
+    let target = min(max(x, 0), 1)
+    guard target > 0, target < 1 else { return target }
+
     var lower = 0.0
     var upper = 1.0
-    var parameter = min(max(x, 0), 1)
+    var parameter = target
 
-    for _ in 0..<18 {
+    // Most editor easing curves converge to sub-pixel precision in two to
+    // four Newton iterations. Keep a bracket throughout so nearly-flat or
+    // pathological handles fall back to a deterministic binary search.
+    for _ in 0..<6 {
         let current = cubicBezierValue(
             parameter,
             control1: control1X,
             control2: control2X
         )
-        if abs(current - x) < KeyframeMergeSupport.timeTolerance {
+        let error = current - target
+        if abs(error) < 0.000_000_1 {
+            return parameter
+        }
+        if current < target {
+            lower = parameter
+        } else {
+            upper = parameter
+        }
+
+        let derivative = cubicBezierDerivative(
+            parameter,
+            control1: control1X,
+            control2: control2X
+        )
+        guard abs(derivative) > 0.000_000_1 else { break }
+        let candidate = parameter - error / derivative
+        guard candidate > lower, candidate < upper else { break }
+        parameter = candidate
+    }
+
+    parameter = min(max(parameter, lower), upper)
+    for _ in 0..<12 {
+        let current = cubicBezierValue(
+            parameter,
+            control1: control1X,
+            control2: control2X
+        )
+        if abs(current - target) < 0.000_000_1 {
             break
         }
-        if current < x {
+        if current < target {
             lower = parameter
         } else {
             upper = parameter
@@ -541,6 +575,18 @@ private func solveBezierParameter(
         parameter = (lower + upper) * 0.5
     }
     return parameter
+}
+
+private func cubicBezierDerivative(
+    _ parameter: Double,
+    control1: Double,
+    control2: Double
+) -> Double {
+    let t = min(max(parameter, 0), 1)
+    let inverse = 1 - t
+    return 3 * inverse * inverse * control1
+        + 6 * inverse * t * (control2 - control1)
+        + 3 * t * t * (1 - control2)
 }
 
 private func interpolate(

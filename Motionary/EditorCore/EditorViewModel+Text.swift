@@ -76,7 +76,6 @@ extension EditorViewModel {
             item.synchronizePropertyAnimationBaseValues()
             project.tracks[location.track].items[location.item] = .text(item)
         }
-        liveTextPreviewID = itemID
     }
 
     func finishTextEditing() {

@@ -68,7 +68,8 @@ extension TimelineClip {
                 group: .transform,
                 range: -720...720,
                 step: 1,
-                fractionDigits: 0
+                fractionDigits: 0,
+                isAngle: true
             )
         case .opacity:
             return KeyframePropertyMetadata(
@@ -206,7 +207,8 @@ extension TimelineClip {
             group: .effects,
             range: descriptor.scalarRange ?? component.defaultRange,
             step: descriptor.step,
-            fractionDigits: descriptor.fractionDigits
+            fractionDigits: descriptor.fractionDigits,
+            isAngle: descriptor.unit == .degrees && component == .scalar
         )
     }
 

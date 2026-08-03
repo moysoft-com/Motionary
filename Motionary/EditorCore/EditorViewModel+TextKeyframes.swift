@@ -5,7 +5,10 @@ import Foundation
 extension EditorViewModel {
     var selectedTimelineItemLocalTime: Double {
         guard let item = selectedTimelineItem else { return 0 }
-        return min(max(currentTime - item.timelineStart, 0), item.placementDuration)
+        if let text = selectedTextItem {
+            return snappedTextKeyframeTime(currentTime - item.timelineStart, item: text)
+        }
+        return snappedKeyframeTime(currentTime - item.timelineStart, clip: item.legacyClip())
     }
 
     func snappedTextKeyframeTime(_ time: Double, item: TextTimelineItem) -> Double {

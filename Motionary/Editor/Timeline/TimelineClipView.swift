@@ -10,6 +10,8 @@ struct TimelineTrimPreview {
 struct TimelineItemBlock: View {
     let item: TimelineItem
     let media: ClipMediaDescriptor?
+    let keyframeTimes: [Double]
+    let visibleTimelineRange: ClosedRange<Double>
     let isSelected: Bool
     let isDragSourceHidden: Bool
     let isDragGhost: Bool
@@ -75,7 +77,8 @@ struct TimelineItemBlock: View {
                 height: height,
                 pixelsPerSecond: pixelsPerSecond,
                 sampleWidth: mediaSampleWidth,
-                sampleOffsetX: mediaSampleOffsetX
+                sampleOffsetX: mediaSampleOffsetX,
+                visibleTimelineRange: visibleTimelineRange
             )
             .frame(width: displayWidth, height: height)
             .foregroundStyle(Color.black.opacity(0.88))
@@ -103,17 +106,21 @@ struct TimelineItemBlock: View {
                         markers: mediaItem.visibleBeatMarkers,
                         duration: displayDuration,
                         width: displayWidth,
-                        height: height
+                        height: height,
+                        itemTimelineStart: previewItem.timelineStart,
+                        visibleTimelineRange: visibleTimelineRange
                     )
                     .allowsHitTesting(false)
                     .zIndex(2)
                 }
 
                 TimelineKeyframeMarkers(
-                    times: keyframeTimes(for: previewItem),
+                    times: displayedKeyframeTimes(for: previewItem),
                     duration: displayDuration,
                     width: displayWidth,
-                    height: height
+                    height: height,
+                    itemTimelineStart: previewItem.timelineStart,
+                    visibleTimelineRange: visibleTimelineRange
                 )
                 .allowsHitTesting(false)
                 .zIndex(2)
@@ -168,7 +175,9 @@ struct TimelineItemBlock: View {
         .animation(nil, value: displayWidth)
         .animation(nil, value: displayOffsetX)
         .onDisappear {
-            finishTimelineGesture()
+            DispatchQueue.main.async {
+                finishTimelineGesture()
+            }
         }
     }
 
@@ -176,8 +185,8 @@ struct TimelineItemBlock: View {
         trimPreview?.item ?? item
     }
 
-    private func keyframeTimes(for item: TimelineItem) -> [Double] {
-        item.allKeyframeTimes
+    private func displayedKeyframeTimes(for item: TimelineItem) -> [Double] {
+        trimBaseline == nil ? keyframeTimes : item.allKeyframeTimes
     }
 
     private func timelineDisplayDuration(for item: TimelineItem) -> Double {
@@ -306,28 +315,55 @@ private struct TimelineKeyframeMarkers: View {
     let duration: Double
     let width: CGFloat
     let height: CGFloat
+    let itemTimelineStart: Double
+    let visibleTimelineRange: ClosedRange<Double>
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            ForEach(times, id: \.self) { time in
-                KeyframeDiamondShape()
-                    .fill(Color.clear)
-                    .overlay {
-                        KeyframeDiamondShape()
-                            .stroke(MotionaryTheme.control.opacity(0.72), lineWidth: 1.2)
-                    }
-                    .frame(width: 9, height: 9)
-                    .position(
-                        x: min(
-                            max(CGFloat(time / max(duration, 0.001)) * width, 7),
-                            max(width - 7, 7)
-                        ),
-                        y: height * 0.5
-                    )
-                    .shadow(color: .black.opacity(0.55), radius: 1)
+        Canvas { context, size in
+            let localVisibleStart = max(visibleTimelineRange.lowerBound - itemTimelineStart, 0)
+            let localVisibleEnd = min(
+                visibleTimelineRange.upperBound - itemTimelineStart,
+                duration
+            )
+            guard localVisibleEnd >= localVisibleStart else { return }
+
+            let firstIndex = lowerBoundIndex(in: times, value: localVisibleStart)
+            var index = firstIndex
+            while index < times.count, times[index] <= localVisibleEnd {
+                let x = min(
+                    max(CGFloat(times[index] / max(duration, 0.001)) * size.width, 7),
+                    max(size.width - 7, 7)
+                )
+                let y = size.height * 0.5
+                var diamond = Path()
+                diamond.move(to: CGPoint(x: x, y: y - 4.5))
+                diamond.addLine(to: CGPoint(x: x + 4.5, y: y))
+                diamond.addLine(to: CGPoint(x: x, y: y + 4.5))
+                diamond.addLine(to: CGPoint(x: x - 4.5, y: y))
+                diamond.closeSubpath()
+                context.stroke(
+                    diamond,
+                    with: .color(MotionaryTheme.control.opacity(0.72)),
+                    lineWidth: 1.2
+                )
+                index += 1
             }
         }
         .frame(width: width, height: height)
+    }
+
+    private func lowerBoundIndex(in values: [Double], value: Double) -> Int {
+        var lower = 0
+        var upper = values.count
+        while lower < upper {
+            let midpoint = (lower + upper) / 2
+            if values[midpoint] < value {
+                lower = midpoint + 1
+            } else {
+                upper = midpoint
+            }
+        }
+        return lower
     }
 }
 
@@ -336,10 +372,29 @@ private struct TimelineBeatMarkers: View {
     let duration: Double
     let width: CGFloat
     let height: CGFloat
+    let itemTimelineStart: Double
+    let visibleTimelineRange: ClosedRange<Double>
 
     var body: some View {
         Canvas { context, size in
-            for marker in markers {
+            let localVisibleStart = max(
+                visibleTimelineRange.lowerBound - itemTimelineStart,
+                0
+            )
+            let localVisibleEnd = min(
+                visibleTimelineRange.upperBound - itemTimelineStart,
+                duration
+            )
+            guard localVisibleEnd >= localVisibleStart else { return }
+
+            var index = lowerBoundIndex(
+                in: markers,
+                localTimelineTime: localVisibleStart
+            )
+            while index < markers.count,
+                markers[index].localTimelineTime <= localVisibleEnd
+            {
+                let marker = markers[index]
                 let x = min(
                     max(CGFloat(marker.localTimelineTime / max(duration, 0.001)) * size.width, 1),
                     max(size.width - 1, 1)
@@ -355,9 +410,27 @@ private struct TimelineBeatMarkers: View {
                         lineCap: .round
                     )
                 )
+                index += 1
             }
         }
         .frame(width: width, height: height)
+    }
+
+    private func lowerBoundIndex(
+        in values: [TimelineBeatMarker],
+        localTimelineTime: Double
+    ) -> Int {
+        var lower = 0
+        var upper = values.count
+        while lower < upper {
+            let midpoint = (lower + upper) / 2
+            if values[midpoint].localTimelineTime < localTimelineTime {
+                lower = midpoint + 1
+            } else {
+                upper = midpoint
+            }
+        }
+        return lower
     }
 }
 
@@ -375,6 +448,7 @@ struct TimelineItemVisualFill: View {
     let pixelsPerSecond: CGFloat
     let sampleWidth: CGFloat?
     let sampleOffsetX: CGFloat
+    var visibleTimelineRange: ClosedRange<Double>? = nil
 
     @ViewBuilder
     var body: some View {
@@ -389,7 +463,8 @@ struct TimelineItemVisualFill: View {
                     height: height,
                     pixelsPerSecond: pixelsPerSecond,
                     sampleWidth: sampleWidth,
-                    sampleOffsetX: sampleOffsetX
+                    sampleOffsetX: sampleOffsetX,
+                    visibleTimelineRange: visibleTimelineRange
                 )
             } else {
                 Color.orange
@@ -404,7 +479,8 @@ struct TimelineItemVisualFill: View {
                     height: height,
                     pixelsPerSecond: pixelsPerSecond,
                     sampleWidth: sampleWidth,
-                    sampleOffsetX: sampleOffsetX
+                    sampleOffsetX: sampleOffsetX,
+                    visibleTimelineRange: visibleTimelineRange
                 )
             } else {
                 TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
@@ -472,13 +548,13 @@ struct TimelineClipFill: View {
     let pixelsPerSecond: CGFloat
     let sampleWidth: CGFloat?
     let sampleOffsetX: CGFloat
+    var visibleTimelineRange: ClosedRange<Double>? = nil
 
     @Environment(\.displayScale) private var displayScale
     @State private var waveformSamples: [CGFloat] = []
 
     var body: some View {
         let thumbnailWidth = timelineThumbnailWidth
-        let thumbnailCount = max(Int(ceil(width / max(thumbnailWidth, 1))) + 1, 1)
         let secondsPerThumbnail = Double(thumbnailWidth / thumbnailSamplingPixelsPerSecond)
         let waveformCount = quantizedWaveformSampleCount
 
@@ -494,8 +570,8 @@ struct TimelineClipFill: View {
                     .frame(width: width, height: height, alignment: .leading)
                     .clipped()
             } else {
-                HStack(spacing: 0) {
-                    ForEach(0..<thumbnailCount, id: \.self) { index in
+                ZStack(alignment: .leading) {
+                    ForEach(visibleThumbnailIndices, id: \.self) { index in
                         TimelineThumbnailTile(
                             clip: clip,
                             media: media,
@@ -506,6 +582,7 @@ struct TimelineClipFill: View {
                             secondsPerTile: secondsPerThumbnail,
                             displayScale: displayScale
                         )
+                        .offset(x: CGFloat(index) * thumbnailWidth)
                     }
                 }
                 .allowsHitTesting(false)
@@ -534,7 +611,7 @@ struct TimelineClipFill: View {
         if !waveformSamples.isEmpty {
             return waveformSamples
         }
-        return Array(repeating: 0.02, count: quantizedWaveformSampleCount)
+        return [0.02]
     }
 
     private var timelineThumbnailWidth: CGFloat {
@@ -551,6 +628,26 @@ struct TimelineClipFill: View {
 
     private var thumbnailSamplingPixelsPerSecond: CGFloat {
         max((pixelsPerSecond / 4).rounded() * 4, 4)
+    }
+
+    private var visibleThumbnailIndices: Range<Int> {
+        let thumbnailWidth = max(timelineThumbnailWidth, 1)
+        let totalCount = max(Int(ceil(width / thumbnailWidth)) + 1, 1)
+        guard let visibleTimelineRange else { return 0..<totalCount }
+        let localStart = max(
+            CGFloat(visibleTimelineRange.lowerBound - clip.timelineStart) * pixelsPerSecond,
+            0
+        )
+        let localEnd = min(
+            max(
+                CGFloat(visibleTimelineRange.upperBound - clip.timelineStart) * pixelsPerSecond,
+                localStart
+            ),
+            width
+        )
+        let first = max(Int(floor(localStart / thumbnailWidth)) - 1, 0)
+        let end = min(Int(ceil(localEnd / thumbnailWidth)) + 2, totalCount)
+        return first..<max(first, end)
     }
 
     private var taskID: String {

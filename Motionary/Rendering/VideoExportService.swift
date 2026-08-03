@@ -163,7 +163,7 @@ struct VideoExportService {
         }
     }
 
-    private func validateRenderingAvailability(for project: EditorProject) throws {
+    func validateRenderingAvailability(for project: EditorProject) throws {
         try MetalRenderResources.validateAvailability()
         for track in project.tracks where !track.isMuted
             && (track.kind == .visual || track.kind == .shape || track.kind == .text)
@@ -178,6 +178,8 @@ struct VideoExportService {
                     effectStack = shapeItem.visuals.effectStack
                 case .text(let textItem) where textItem.duration > 0:
                     effectStack = textItem.visuals.effectStack
+                case .adjustment(let adjustmentItem) where adjustmentItem.duration > 0:
+                    effectStack = adjustmentItem.visuals.effectStack
                 case .media, .shape, .text, .caption, .adjustment, .compound:
                     continue
                 }

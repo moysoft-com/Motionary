@@ -294,6 +294,11 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
         }
     }
 
+    var isAdjustmentLayer: Bool {
+        if case .adjustment = self { return true }
+        return false
+    }
+
     var timelineStart: Double {
         get {
             switch self {
@@ -430,6 +435,30 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
             nil
         }
     }
+
+    /// A legacy clip-shaped projection used only by the existing generic
+    /// transform/effect/keyframe controls. Source-less adjustment layers keep
+    /// their typed domain identity and are merged back through
+    /// `mergingVisualEditingClip(_:)`; they never enter media/render lookup as
+    /// ordinary overlays.
+    func visualEditingClip() -> TimelineClip? {
+        if let legacyClip = legacyClip() {
+            return legacyClip
+        }
+        guard case .adjustment(let item) = self else { return nil }
+        return TimelineClip(
+            id: item.id,
+            name: item.name,
+            mediaID: MediaID(rawValue: item.id),
+            mediaType: .image,
+            timelineStart: item.timelineStart,
+            sourceRange: TimeRangeValue(start: 0, duration: item.duration),
+            transform: item.visuals.transform,
+            adjustments: item.visuals.adjustments,
+            effectStack: item.visuals.effectStack,
+            volume: item.visuals.volume
+        )
+    }
 }
 
 extension TimelineItem {
@@ -516,6 +545,20 @@ extension TimelineItem {
         }
     }
 
+    func mergingVisualEditingClip(_ clip: TimelineClip) -> TimelineItem {
+        guard case .adjustment(var item) = self else {
+            return mergingLegacyClip(clip)
+        }
+        item.name = clip.name
+        item.timelineStart = max(clip.timelineStart, 0)
+        item.duration = max(clip.sourceRange.duration, 0.1)
+        item.visuals.transform = clip.transform
+        item.visuals.adjustments = clip.adjustments
+        item.visuals.effectStack = clip.effectStack
+        item.visuals.volume = clip.volume
+        return .adjustment(item)
+    }
+
     func split(at offset: Double) -> (left: TimelineItem, right: TimelineItem)? {
         guard offset > 0.08, offset < placementDuration - 0.08 else { return nil }
 
@@ -594,12 +637,15 @@ extension TimelineItem {
 
         case .adjustment(var item):
             let originalDuration = item.duration
+            let splitVisuals = item.visuals.splittingAnimations(at: offset)
             item.duration = offset
+            item.visuals = splitVisuals.left
             var second = item
             second.id = UUID()
             second.name += " split"
             second.timelineStart = timelineStart + offset
             second.duration = originalDuration - offset
+            second.visuals = splitVisuals.right
             return (.adjustment(item), .adjustment(second))
 
         case .compound(var item):
@@ -662,8 +708,10 @@ extension TimelineItem {
             item.duration -= delta
             result = .caption(item)
         case .adjustment(var item):
+            let oldDuration = item.duration
             item.timelineStart += delta
             item.duration -= delta
+            item.visuals.trimAnimationsAtStart(by: delta, oldDuration: oldDuration)
             result = .adjustment(item)
         case .compound(var item):
             item.timelineStart += delta
@@ -722,7 +770,12 @@ extension TimelineItem {
             item.duration += delta
             result = .caption(item)
         case .adjustment(var item):
+            let oldDuration = item.duration
             item.duration += delta
+            item.visuals.trimAnimationsAtEnd(
+                newDuration: item.duration,
+                oldDuration: oldDuration
+            )
             result = .adjustment(item)
         case .compound(var item):
             item.duration += delta

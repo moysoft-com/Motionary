@@ -30,6 +30,13 @@ struct CoreToolBar: View {
 
                     ShapeToolMenu(viewModel: viewModel)
 
+                    CoreToolButton(systemName: "slider.horizontal.3", title: "Adjust") {
+                        guard let itemID = viewModel.addAdjustmentLayer() else { return }
+                        propertyContextClipID = itemID
+                        activePanel = .effects
+                    }
+                    .accessibilityLabel("Add adjustment layer")
+
                     CoreToolButton(systemName: "textformat", title: "Text") {
                         guard let itemID = viewModel.addText() else { return }
                         propertyContextClipID = itemID
@@ -264,7 +271,16 @@ struct CoreToolBar: View {
                 propertyContextClipID = viewModel.selectedTimelineItemID
                 activePanel = activePanel == .text ? .timeline : .text
             }
-        case .caption, .adjustment, .compound:
+        case .adjustment:
+            CoreToolButton(
+                systemName: "slider.horizontal.3",
+                title: "Edit",
+                isSelected: true
+            ) {
+                propertyContextClipID = viewModel.selectedTimelineItemID
+                activePanel = activePanel == .effects ? .timeline : .effects
+            }
+        case .caption, .compound:
             EmptyView()
         }
     }
@@ -322,7 +338,7 @@ struct CoreToolBar: View {
         switch viewModel.selectedTimelineItem {
         case .media(let item):
             item.mediaType != .audio
-        case .shape, .text:
+        case .shape, .text, .adjustment:
             true
         default:
             false
@@ -333,7 +349,7 @@ struct CoreToolBar: View {
         switch viewModel.selectedTimelineItem {
         case .media(let item):
             item.mediaType != .audio
-        case .shape:
+        case .shape, .adjustment:
             true
         default:
             false
@@ -349,7 +365,7 @@ struct CoreToolBar: View {
         switch viewModel.selectedTimelineItem {
         case .media(let item):
             item.mediaType != .audio
-        case .shape, .text:
+        case .shape, .text, .adjustment:
             true
         default:
             false
@@ -365,7 +381,7 @@ struct CoreToolBar: View {
         switch viewModel.selectedTimelineItem {
         case .media(let item):
             item.mediaType != .audio
-        case .shape, .text:
+        case .shape, .text, .adjustment:
             true
         default:
             false

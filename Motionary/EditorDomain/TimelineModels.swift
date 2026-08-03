@@ -439,6 +439,20 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
 }
 
 extension TimelineTrack {
+    /// Adjustment layers deliberately share the persisted visual track kind
+    /// for schema compatibility, but a track is homogeneous: it contains
+    /// either adjustment layers or regular content, never both.
+    func canAcceptItem(_ item: TimelineItem) -> Bool {
+        guard kind == item.requiredTrackKind || kind == .undefined else {
+            return false
+        }
+        guard item.requiredTrackKind == .visual else { return true }
+        if item.isAdjustmentLayer {
+            return items.allSatisfy(\.isAdjustmentLayer)
+        }
+        return !items.contains(where: \.isAdjustmentLayer)
+    }
+
     func itemIndex(id: UUID) -> Int? {
         items.firstIndex { $0.id == id }
     }

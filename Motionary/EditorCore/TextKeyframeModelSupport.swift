@@ -385,7 +385,7 @@ extension TextTimelineItem {
         case .scaleY:
             textMetadata("Scale Y", "arrow.up.and.down", .transform, 0.01...100, 0.01, 2)
         case .rotation:
-            textMetadata("Rotation", "rotate.right", .transform, -720...720, 1, 0)
+            textMetadata("Rotation", "rotate.right", .transform, -720...720, 1, 0, isAngle: true)
         case .opacity:
             textMetadata("Opacity", "circle.lefthalf.filled", .textStyle, 0...1, 0.01, 2)
         case .textFontSize:
@@ -454,7 +454,8 @@ extension TextTimelineItem {
         _ group: KeyframePropertyGroup,
         _ range: ClosedRange<Double>,
         _ step: Double,
-        _ fractionDigits: Int
+        _ fractionDigits: Int,
+        isAngle: Bool = false
     ) -> KeyframePropertyMetadata {
         KeyframePropertyMetadata(
             title: title,
@@ -462,7 +463,8 @@ extension TextTimelineItem {
             group: group,
             range: range,
             step: step,
-            fractionDigits: fractionDigits
+            fractionDigits: fractionDigits,
+            isAngle: isAngle
         )
     }
 

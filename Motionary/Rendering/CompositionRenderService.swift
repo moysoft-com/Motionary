@@ -3,7 +3,75 @@
 @preconcurrency import AVFoundation
 import CoreGraphics
 import ImageIO
+import os
 import UIKit
+
+private let compositionMetricsLog = OSLog(
+    subsystem: "com.moysoft.motionary",
+    category: .pointsOfInterest
+)
+
+private final class StillImageValidationCache: @unchecked Sendable {
+    private final class Entry: NSObject {
+        let identity: String
+
+        init(identity: String) {
+            self.identity = identity
+        }
+    }
+
+    private let entries: NSCache<NSString, Entry> = {
+        let cache = NSCache<NSString, Entry>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    /// Returns an immutable identity that can be embedded in the render
+    /// descriptor. Imported project media is immutable for the lifetime of its
+    /// URL, so subsequent visual-only descriptor recompilations avoid even
+    /// filesystem metadata reads on the main actor.
+    func validatedIdentity(for url: URL) -> String? {
+        let pathKey = url.standardizedFileURL.path as NSString
+        if let cached = entries.object(forKey: pathKey) {
+            return cached.identity
+        }
+
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer { if didAccess { url.stopAccessingSecurityScopedResource() } }
+        let values = try? url.resourceValues(forKeys: [
+            .fileSizeKey,
+            .contentModificationDateKey,
+            .fileResourceIdentifierKey,
+        ])
+        let fileSize = values?.fileSize ?? -1
+        let modifiedAt = values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? -1
+        let fileID = values?.fileResourceIdentifier.map { "\($0)" } ?? "unidentified"
+        let identity = "\(pathKey)|\(fileID)|\(fileSize)|\(modifiedAt)"
+        guard Self.validateStillImageFile(url) else { return nil }
+        entries.setObject(Entry(identity: identity), forKey: pathKey)
+        return identity
+    }
+
+    private static func validateStillImageFile(_ url: URL) -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+            CGImageSourceGetCount(source) > 0,
+            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) != nil
+        else { return false }
+
+        // Decode a tiny thumbnail once per immutable file identity. Merely
+        // opening the container would allow corrupt payloads into the renderer.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 8,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            options as CFDictionary
+        ) != nil
+    }
+}
 
 enum VideoSourceGeometry {
     static func displayRect(naturalSize: CGSize, transform: CGAffineTransform) -> CGRect {
@@ -66,6 +134,17 @@ struct RenderedComposition {
     var backgroundMaskTransforms: [UUID: CGAffineTransform] = [:]
 }
 
+/// Defines how a render descriptor participates in the layer stack.
+///
+/// Content layers contribute new pixels. An adjustment layer instead samples
+/// the composite accumulated below its stack position and transforms that
+/// result. Keeping the role explicit prevents source-less adjustment layers
+/// from silently falling through the generated-overlay path.
+enum RenderLayerRole: Sendable, Equatable {
+    case content
+    case adjustment
+}
+
 /// Per-clip information consumed by the custom video compositor.
 struct RenderClipDescriptor: @unchecked Sendable {
     let trackID: CMPersistentTrackID
@@ -73,6 +152,8 @@ struct RenderClipDescriptor: @unchecked Sendable {
     /// Non-video visual sources are decoded once by the frame engine and use
     /// the shared composition clock instead of a synthetic per-item movie.
     let stillImageURL: URL?
+    /// Immutable file identity prepared outside the frame-rendering path.
+    let stillImageCacheIdentity: String?
     let clipID: UUID
     let timelineStart: Double
     let duration: Double
@@ -87,12 +168,20 @@ struct RenderClipDescriptor: @unchecked Sendable {
     let blendIntensity: Double
     let shape: ClipShape?
     let text: TextTimelineItem?
+    let role: RenderLayerRole
+    /// Set only on a frame-local live override when its scale differs from the
+    /// persistent descriptor. Position/rotation-only interaction can continue
+    /// to reuse the cached shape texture.
+    let hasTransientRasterScaleOverride: Bool
     let renderOrder: Int
+
+    var isAdjustmentLayer: Bool { role == .adjustment }
 
     init(
         trackID: CMPersistentTrackID,
         backgroundMaskTrackID: CMPersistentTrackID?,
         stillImageURL: URL? = nil,
+        stillImageCacheIdentity: String? = nil,
         clipID: UUID,
         timelineStart: Double,
         duration: Double,
@@ -107,11 +196,14 @@ struct RenderClipDescriptor: @unchecked Sendable {
         blendIntensity: Double,
         shape: ClipShape?,
         text: TextTimelineItem?,
+        role: RenderLayerRole = .content,
+        hasTransientRasterScaleOverride: Bool = false,
         renderOrder: Int
     ) {
         self.trackID = trackID
         self.backgroundMaskTrackID = backgroundMaskTrackID
         self.stillImageURL = stillImageURL
+        self.stillImageCacheIdentity = stillImageCacheIdentity
         self.clipID = clipID
         self.timelineStart = timelineStart
         self.duration = duration
@@ -126,25 +218,188 @@ struct RenderClipDescriptor: @unchecked Sendable {
         self.blendIntensity = blendIntensity
         self.shape = shape
         self.text = text
+        self.role = role
+        self.hasTransientRasterScaleOverride = hasTransientRasterScaleOverride
         self.renderOrder = renderOrder
     }
 }
 
-struct RenderClipInterval: @unchecked Sendable {
-    let start: Double
-    let end: Double
-    let clips: [RenderClipDescriptor]
+/// Immutable interval tree for half-open clip ranges.
+///
+/// Every clip is stored once as a normalized span and at exactly one tree
+/// node. Node lookup arrays contain integer indices only, keeping storage O(n)
+/// even for thousands of heavily overlapping layers.
+struct RenderClipIntervalIndex: Sendable {
+    private struct ClipSpan: Sendable {
+        let clipIndex: Int
+        let start: Double
+        let end: Double
+    }
+
+    private indirect enum Node: Sendable {
+        case branch(
+            center: Double,
+            byStart: [Int],
+            byEndDescending: [Int],
+            left: Node?,
+            right: Node?
+        )
+
+        var storageEntryCount: Int {
+            switch self {
+            case .branch(_, let byStart, let byEndDescending, let left, let right):
+                byStart.count
+                    + byEndDescending.count
+                    + (left?.storageEntryCount ?? 0)
+                    + (right?.storageEntryCount ?? 0)
+            }
+        }
+    }
+
+    private let spans: [ClipSpan]
+    private let root: Node?
+
+    init() {
+        spans = []
+        root = nil
+    }
+
+    init(clips: [RenderClipDescriptor], duration: Double) {
+        let safeDuration = duration.isFinite ? max(duration, 0) : 0
+        let normalizedSpans: [ClipSpan] = clips.enumerated().compactMap {
+            (index: Int, clip: RenderClipDescriptor) -> ClipSpan? in
+            let rawStart = clip.timelineStart.isFinite ? clip.timelineStart : 0
+            let rawDuration = clip.duration.isFinite ? max(clip.duration, 0) : 0
+            let start = min(max(rawStart, 0), safeDuration)
+            let end = min(max(rawStart + rawDuration, 0), safeDuration)
+            guard end > start else { return nil }
+            return ClipSpan(clipIndex: index, start: start, end: end)
+        }
+        spans = normalizedSpans
+        root = Self.makeNode(
+            spanIndices: Array(normalizedSpans.indices),
+            spans: normalizedSpans
+        )
+    }
+
+    var isEmpty: Bool { spans.isEmpty }
+    var count: Int { spans.count }
+
+    /// Exposed to focused tests so a regression to per-interval descriptor
+    /// snapshots is detected without relying on allocator-specific metrics.
+    var storageEntryCount: Int {
+        spans.count + (root?.storageEntryCount ?? 0)
+    }
+
+    func activeClipIndices(at time: Double) -> [Int] {
+        guard time.isFinite, let root else { return [] }
+        var result: [Int] = []
+        Self.collectActive(
+            at: time,
+            node: root,
+            spans: spans,
+            result: &result
+        )
+        result.sort()
+        return result
+    }
+
+    private static func makeNode(
+        spanIndices: [Int],
+        spans: [ClipSpan]
+    ) -> Node? {
+        guard !spanIndices.isEmpty else { return nil }
+        let centers = spanIndices
+            .map { (spans[$0].start + spans[$0].end) * 0.5 }
+            .sorted()
+        let center = centers[centers.count / 2]
+        var left: [Int] = []
+        var right: [Int] = []
+        var spanning: [Int] = []
+        left.reserveCapacity(spanIndices.count / 2)
+        right.reserveCapacity(spanIndices.count / 2)
+        spanning.reserveCapacity(spanIndices.count)
+
+        for spanIndex in spanIndices {
+            let span = spans[spanIndex]
+            if span.end <= center {
+                left.append(spanIndex)
+            } else if span.start > center {
+                right.append(spanIndex)
+            } else {
+                spanning.append(spanIndex)
+            }
+        }
+
+        let byStart = spanning.sorted {
+            let lhs = spans[$0]
+            let rhs = spans[$1]
+            return lhs.start == rhs.start
+                ? lhs.clipIndex < rhs.clipIndex
+                : lhs.start < rhs.start
+        }
+        let byEndDescending = spanning.sorted {
+            let lhs = spans[$0]
+            let rhs = spans[$1]
+            return lhs.end == rhs.end
+                ? lhs.clipIndex < rhs.clipIndex
+                : lhs.end > rhs.end
+        }
+        return .branch(
+            center: center,
+            byStart: byStart,
+            byEndDescending: byEndDescending,
+            left: makeNode(spanIndices: left, spans: spans),
+            right: makeNode(spanIndices: right, spans: spans)
+        )
+    }
+
+    private static func collectActive(
+        at time: Double,
+        node: Node,
+        spans: [ClipSpan],
+        result: inout [Int]
+    ) {
+        switch node {
+        case .branch(let center, let byStart, let byEndDescending, let left, let right):
+            if time < center {
+                for spanIndex in byStart {
+                    let span = spans[spanIndex]
+                    guard span.start <= time else { break }
+                    result.append(span.clipIndex)
+                }
+                if let left {
+                    collectActive(at: time, node: left, spans: spans, result: &result)
+                }
+            } else {
+                for spanIndex in byEndDescending {
+                    let span = spans[spanIndex]
+                    guard span.end > time else { break }
+                    result.append(span.clipIndex)
+                }
+                if let right {
+                    collectActive(at: time, node: right, spans: spans, result: &result)
+                }
+            }
+        }
+    }
 }
 
 /// Video composition instruction containing all clips active in a render interval.
-final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol, @unchecked Sendable {
+final class MotionaryVideoCompositionInstruction:
+    NSObject,
+    AVVideoCompositionInstructionProtocol,
+    NSCopying,
+    @unchecked Sendable
+{
     let timeRange: CMTimeRange
     let enablePostProcessing: Bool = false
     let containsTweening: Bool = true
     let requiredSourceTrackIDs: [NSValue]?
     let passthroughTrackID: CMPersistentTrackID = kCMPersistentTrackID_Invalid
     let clips: [RenderClipDescriptor]
-    let clipIntervals: [RenderClipInterval]
+    let clipIntervals: RenderClipIntervalIndex
+    let textClipsByStart: [RenderClipDescriptor]
     let renderSize: CGSize
     let renderScale: CGFloat
     let vectorRenderScale: CGFloat
@@ -154,6 +409,7 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
     let qualityProfile: RenderQualityProfile
     let failurePolicy: RenderFailurePolicy
     let livePreviewState: LivePreviewRenderState?
+    let renderSessionID: UUID
 
     init(
         timeRange: CMTimeRange,
@@ -167,11 +423,36 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         frameDuration: Double,
         qualityProfile: RenderQualityProfile = .balanced,
         failurePolicy: RenderFailurePolicy = .skipUnavailableEffects,
-        livePreviewState: LivePreviewRenderState? = nil
+        livePreviewState: LivePreviewRenderState? = nil,
+        renderSessionID: UUID = UUID()
     ) {
         self.timeRange = timeRange
         self.clips = clips.sorted { $0.renderOrder < $1.renderOrder }
-        self.clipIntervals = Self.makeIntervals(clips: self.clips, duration: CMTimeGetSeconds(timeRange.duration))
+        self.textClipsByStart = self.clips
+            .filter { $0.text != nil }
+            .sorted {
+                if $0.timelineStart == $1.timelineStart {
+                    return $0.renderOrder < $1.renderOrder
+                }
+                return $0.timelineStart < $1.timelineStart
+            }
+        let intervalCompilationStartedAt = ProcessInfo.processInfo.systemUptime
+        self.clipIntervals = RenderClipIntervalIndex(
+            clips: self.clips,
+            duration: CMTimeGetSeconds(timeRange.duration)
+        )
+        let intervalCompilationMicroseconds = Int(
+            (ProcessInfo.processInfo.systemUptime - intervalCompilationStartedAt) * 1_000_000
+        )
+        os_signpost(
+            .event,
+            log: compositionMetricsLog,
+            name: "Compile Clip Intervals",
+            "clips=%d indexed=%d duration_us=%d",
+            self.clips.count,
+            self.clipIntervals.count,
+            intervalCompilationMicroseconds
+        )
         self.renderSize = renderSize
         self.renderScale = renderScale
         self.vectorRenderScale = max(vectorRenderScale ?? renderScale, renderScale, 0.000_001)
@@ -181,64 +462,56 @@ final class MotionaryVideoCompositionInstruction: NSObject, AVVideoCompositionIn
         self.qualityProfile = qualityProfile
         self.failurePolicy = failurePolicy
         self.livePreviewState = livePreviewState
+        self.renderSessionID = renderSessionID
         self.requiredSourceTrackIDs = sourceTrackIDs
             .filter { $0 != kCMPersistentTrackID_Invalid }
             .map { NSNumber(value: $0) }
         super.init()
     }
 
+    /// AVPlayer defensively copies custom instructions while installing a
+    /// video composition. The instruction is immutable, so retaining the same
+    /// instance is safe and avoids duplicating its interval index.
+    func copy(with zone: NSZone? = nil) -> Any {
+        self
+    }
+
     func activeClips(at time: Double) -> [RenderClipDescriptor] {
+        var active = clipIntervals.activeClipIndices(at: time).map { clips[$0] }
+        let frameEnd = time + frameDuration
+        var textIndex = firstTextClipIndex(after: time)
+        var appendedText = false
+        while textIndex < textClipsByStart.count {
+            let clip = textClipsByStart[textIndex]
+            guard clip.timelineStart < frameEnd else { break }
+            if clip.timelineStart + clip.duration > time,
+                !active.contains(where: { $0.clipID == clip.clipID })
+            {
+                active.append(clip)
+                appendedText = true
+            }
+            textIndex += 1
+        }
+        if appendedText {
+            active.sort { $0.renderOrder < $1.renderOrder }
+        }
+        return active
+    }
+
+    private func firstTextClipIndex(after time: Double) -> Int {
         var lower = 0
-        var upper = clipIntervals.count
+        var upper = textClipsByStart.count
         while lower < upper {
             let midpoint = (lower + upper) / 2
-            if clipIntervals[midpoint].end <= time {
+            if textClipsByStart[midpoint].timelineStart <= time {
                 lower = midpoint + 1
             } else {
                 upper = midpoint
             }
         }
-        guard clipIntervals.indices.contains(lower) else { return [] }
-        let interval = clipIntervals[lower]
-        var active = time >= interval.start && time < interval.end ? interval.clips : []
-        let frameEnd = time + frameDuration
-        for clip in clips where clip.text != nil
-            && clip.timelineStart > time
-            && clip.timelineStart < frameEnd
-            && clip.timelineStart + clip.duration > time
-            && !active.contains(where: { $0.clipID == clip.clipID })
-        {
-            active.append(clip)
-        }
-        return active.sorted { $0.renderOrder < $1.renderOrder }
+        return lower
     }
 
-    private static func makeIntervals(
-        clips: [RenderClipDescriptor],
-        duration: Double
-    ) -> [RenderClipInterval] {
-        let boundaries = ([0, duration] + clips.flatMap {
-            [$0.timelineStart, min($0.timelineStart + $0.duration, duration)]
-        })
-        .map { min(max($0, 0), duration) }
-        .sorted()
-        .reduce(into: [Double]()) { values, value in
-            if values.last.map({ abs($0 - value) > 0.000_001 }) ?? true {
-                values.append(value)
-            }
-        }
-
-        return zip(boundaries, boundaries.dropFirst()).compactMap { start, end in
-            guard end - start > 0.000_001 else { return nil }
-            return RenderClipInterval(
-                start: start,
-                end: end,
-                clips: clips.filter {
-                    $0.timelineStart < end && $0.timelineStart + $0.duration > start
-                }
-            )
-        }
-    }
 }
 
 enum PreviewQuality: Equatable {
@@ -248,8 +521,8 @@ enum PreviewQuality: Equatable {
 
     var maximumDimension: Double? {
         switch self {
-        case .interactive: nil
-        case .balanced: 1280
+        case .interactive: 720
+        case .balanced: 960
         case .full: nil
         }
     }
@@ -269,6 +542,17 @@ struct PreparedPreview {
     let audioMix: AVAudioMix?
     let duration: Double
     let topologyWasRebuilt: Bool
+}
+
+/// A track-local audio update prepared away from the main actor.
+///
+/// The graph revision prevents an envelope that finished after a topology or
+/// canonical mix rebuild from being installed into a newer player graph.
+struct PreparedInteractiveAudioMix {
+    let itemID: UUID
+    let volume: AnimatableProperty<Double>
+    let audioMix: AVAudioMix
+    fileprivate let graphRevision: Int
 }
 
 private struct PreviewRenderGraph {
@@ -337,32 +621,6 @@ private struct PreviewTopology: Equatable {
     }
 }
 
-private extension EditorProject {
-    var requiresFullResolutionPreviewRender: Bool {
-        containsGeneratedCanvasLayer(in: tracks)
-    }
-
-    func containsGeneratedCanvasLayer(in tracks: [TimelineTrack]) -> Bool {
-        for track in tracks {
-            for item in track.items {
-                switch item {
-                case .shape, .text:
-                    return true
-                case .compound(let compound):
-                    if let sequence = sequences[compound.sequenceID],
-                        containsGeneratedCanvasLayer(in: sequence.tracks)
-                    {
-                        return true
-                    }
-                case .media, .caption, .adjustment:
-                    continue
-                }
-            }
-        }
-        return false
-    }
-}
-
 private struct PreviewCanvasTopology: Equatable {
     let width: Int
     let height: Int
@@ -389,6 +647,15 @@ private struct PreviewItemTopology: Equatable {
     let speedSignature: UInt64
     let usesBackgroundRemoval: Bool
     let backgroundRemovalArtifact: BackgroundRemovalArtifact?
+}
+
+private struct RenderDescriptorCompilationInput: @unchecked Sendable {
+    let project: EditorProject
+    let visualTrackIDs: [UUID: CMPersistentTrackID]
+    let sourceTransforms: [UUID: CGAffineTransform]
+    let backgroundMaskTrackIDs: [UUID: CMPersistentTrackID]
+    let backgroundMaskTransforms: [UUID: CGAffineTransform]
+    let stillImageValidationCache: StillImageValidationCache
 }
 
 /// The render-facing projection of a typed timeline item. Keeping this value
@@ -470,61 +737,107 @@ private enum RenderSourceAvailabilityPolicy: Equatable {
     case omitUnavailable
 }
 
+private actor PreviewAudioEnvelopePreparer {
+    func points(
+        for volume: AnimatableProperty<Double>,
+        duration: Double,
+        frameRate: Int32
+    ) -> [AudioEnvelopePoint] {
+        AudioEnvelopeSampler.points(
+            for: volume,
+            duration: duration,
+            frameRate: frameRate
+        )
+    }
+}
+
 /// Converts an editor project into AVFoundation preview/export assets.
 final class CompositionRenderService {
     private let timescale: CMTimeScale = 600
     private let retimingTimescale: CMTimeScale = 60_000
     private let assetCache: MediaAssetCache
+    private let stillImageValidationCache = StillImageValidationCache()
+    private let previewAudioEnvelopePreparer = PreviewAudioEnvelopePreparer()
     let livePreviewState = LivePreviewRenderState()
     @MainActor private var previewGraph: PreviewRenderGraph?
+    @MainActor private var previewGraphRevision = 0
 
     init(assetCache: MediaAssetCache = .shared) {
         self.assetCache = assetCache
     }
 
     @MainActor
+    func invalidatePreviewGraph() {
+        previewGraph = nil
+        previewGraphRevision &+= 1
+    }
+
+    @MainActor
     func preparePreview(
         for project: EditorProject,
         quality: PreviewQuality,
-        invalidation: EditorInvalidation
+        invalidation: EditorInvalidation,
+        renderSessionID: UUID = UUID()
     ) async throws -> PreparedPreview? {
+        let signpostID = OSSignpostID(log: compositionMetricsLog)
+        os_signpost(
+            .begin,
+            log: compositionMetricsLog,
+            name: "Prepare Preview",
+            signpostID: signpostID,
+            "tracks=%d invalidation=%d",
+            project.tracks.count,
+            invalidation.rawValue
+        )
+        defer {
+            os_signpost(
+                .end,
+                log: compositionMetricsLog,
+                name: "Prepare Preview",
+                signpostID: signpostID
+            )
+        }
         let topology = PreviewTopology(project: project)
         let renderSettings = previewRenderSettings(
             for: project,
-            quality: quality,
-            livePreviewState: livePreviewState
+            quality: quality
         )
         let requiresTopologyBuild =
             invalidation.contains(.compositionTopology)
             || previewGraph?.topology != topology
 
         if requiresTopologyBuild {
+            os_signpost(
+                .event,
+                log: compositionMetricsLog,
+                name: "Rebuild Preview Topology",
+                signpostID: signpostID
+            )
             let rendered = try await makeComposition(
                 for: project,
                 renderSettings: renderSettings,
                 backgroundRemovalPolicy: .omitUnavailable,
                 qualityProfile: quality.renderQualityProfile,
                 failurePolicy: .skipUnavailableEffects,
-                livePreviewState: livePreviewState
+                livePreviewState: livePreviewState,
+                renderSessionID: renderSessionID
             )
             try Task.checkCancellation()
             guard rendered.duration > 0 else {
                 previewGraph = nil
+                previewGraphRevision &+= 1
                 return nil
             }
+            let initialDescriptors =
+                (rendered.videoComposition?.instructions.first
+                    as? MotionaryVideoCompositionInstruction)?.clips
+                ?? []
             previewGraph = PreviewRenderGraph(
                 topology: topology,
                 rendered: rendered,
-                renderDescriptors: rendered.videoComposition != nil
-                    ? compileRenderDescriptors(
-                        project: project,
-                        visualTrackIDs: rendered.visualTrackIDs,
-                        sourceTransforms: rendered.sourceTransforms,
-                        backgroundMaskTrackIDs: rendered.backgroundMaskTrackIDs,
-                        backgroundMaskTransforms: rendered.backgroundMaskTransforms
-                    )
-                    : []
+                renderDescriptors: initialDescriptors
             )
+            previewGraphRevision &+= 1
             return PreparedPreview(
                 composition: rendered.composition,
                 videoComposition: rendered.videoComposition,
@@ -535,16 +848,18 @@ final class CompositionRenderService {
         }
 
         guard let graph = previewGraph else { return nil }
-        let descriptors =
-            invalidation.contains(.previewFrame)
-            ? compileRenderDescriptors(
+        let descriptors: [RenderClipDescriptor]
+        if invalidation.contains(.previewFrame) {
+            descriptors = try await compileRenderDescriptors(
                 project: project,
                 visualTrackIDs: graph.rendered.visualTrackIDs,
                 sourceTransforms: graph.rendered.sourceTransforms,
                 backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
                 backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
             )
-            : graph.renderDescriptors
+        } else {
+            descriptors = graph.renderDescriptors
+        }
         let videoComposition =
             invalidation.contains(.previewFrame)
             ? makeVideoComposition(
@@ -561,10 +876,17 @@ final class CompositionRenderService {
                     for: descriptors,
                     videoClockTrackID: graph.rendered.videoClockTrackID
                 ),
+                sourceTrackIDForFrameTiming: graph.rendered.videoClockTrackID
+                    ?? sourceTrackIDs(
+                        for: descriptors,
+                        videoClockTrackID: graph.rendered.videoClockTrackID
+                    ).first
+                    ?? kCMPersistentTrackID_Invalid,
                 duration: project.duration,
                 qualityProfile: quality.renderQualityProfile,
                 failurePolicy: .skipUnavailableEffects,
-                livePreviewState: livePreviewState
+                livePreviewState: livePreviewState,
+                renderSessionID: renderSessionID
             )
             : graph.rendered.videoComposition
         let audioMix =
@@ -593,6 +915,7 @@ final class CompositionRenderService {
             ),
             renderDescriptors: descriptors
         )
+        previewGraphRevision &+= 1
         return PreparedPreview(
             composition: graph.rendered.composition,
             videoComposition: videoComposition,
@@ -688,7 +1011,8 @@ final class CompositionRenderService {
         backgroundRemovalPolicy: BackgroundRemovalAvailabilityPolicy,
         qualityProfile: RenderQualityProfile,
         failurePolicy: RenderFailurePolicy,
-        livePreviewState: LivePreviewRenderState? = nil
+        livePreviewState: LivePreviewRenderState? = nil,
+        renderSessionID: UUID = UUID()
     ) async throws -> RenderedComposition {
         let composition = AVMutableComposition()
         var renderClips: [RenderClipDescriptor] = []
@@ -770,7 +1094,31 @@ final class CompositionRenderService {
                         )
                     )
                     renderOrder += 1
-                case .caption, .adjustment, .compound:
+                case .adjustment(let adjustmentItem):
+                    renderClips.append(
+                        RenderClipDescriptor(
+                            trackID: kCMPersistentTrackID_Invalid,
+                            backgroundMaskTrackID: nil,
+                            clipID: adjustmentItem.id,
+                            timelineStart: adjustmentItem.timelineStart,
+                            duration: adjustmentItem.duration,
+                            sourceTransform: .identity,
+                            backgroundMaskSourceTransform: .identity,
+                            transform: adjustmentItem.visuals.transform,
+                            adjustments: adjustmentItem.visuals.adjustments,
+                            effectStack: adjustmentItem.visuals.effectStack,
+                            mask: adjustmentItem.visuals.mask,
+                            backgroundRemoval: nil,
+                            blendMode: adjustmentItem.visuals.blendMode,
+                            blendIntensity: adjustmentItem.visuals.blendIntensity,
+                            shape: nil,
+                            text: nil,
+                            role: .adjustment,
+                            renderOrder: renderOrder
+                        )
+                    )
+                    renderOrder += 1
+                case .caption, .compound:
                     continue
                 }
             }
@@ -866,7 +1214,7 @@ final class CompositionRenderService {
         let duration = max(project.duration, 0)
         if duration > 0,
             renderClips.contains(where: {
-                $0.text != nil || $0.shape != nil || $0.stillImageURL != nil
+                $0.text != nil || $0.shape != nil || $0.stillImageURL != nil || $0.isAdjustmentLayer
             })
         {
             videoClockTrackID = try await insertGeneratedVideoClock(
@@ -875,6 +1223,10 @@ final class CompositionRenderService {
                 composition: composition
             )
         }
+        let videoSourceTrackIDs = sourceTrackIDs(
+            for: renderClips,
+            videoClockTrackID: videoClockTrackID
+        )
         let videoComposition = makeVideoComposition(
             renderSettings: renderSettings,
             renderScale: CGFloat(renderSettings.width)
@@ -885,14 +1237,15 @@ final class CompositionRenderService {
                 qualityProfile: qualityProfile
             ),
             clips: renderClips,
-            sourceTrackIDs: sourceTrackIDs(
-                for: renderClips,
-                videoClockTrackID: videoClockTrackID
-            ),
+            sourceTrackIDs: videoSourceTrackIDs,
+            sourceTrackIDForFrameTiming: videoClockTrackID
+                ?? videoSourceTrackIDs.first
+                ?? kCMPersistentTrackID_Invalid,
             duration: duration,
             qualityProfile: qualityProfile,
             failurePolicy: failurePolicy,
-            livePreviewState: livePreviewState
+            livePreviewState: livePreviewState,
+            renderSessionID: renderSessionID
         )
 
         return RenderedComposition(
@@ -916,32 +1269,48 @@ final class CompositionRenderService {
         vectorRenderScale: CGFloat? = nil,
         clips: [RenderClipDescriptor],
         sourceTrackIDs: [CMPersistentTrackID],
+        sourceTrackIDForFrameTiming: CMPersistentTrackID,
         duration: Double,
         qualityProfile: RenderQualityProfile,
         failurePolicy: RenderFailurePolicy,
-        livePreviewState: LivePreviewRenderState? = nil
+        livePreviewState: LivePreviewRenderState? = nil,
+        renderSessionID: UUID = UUID()
     ) -> AVVideoComposition? {
         guard !clips.isEmpty, duration > 0 else { return nil }
+        guard sourceTrackIDForFrameTiming != kCMPersistentTrackID_Invalid else {
+            return nil
+        }
 
-        var configuration = AVVideoComposition.Configuration()
-        configuration.customVideoCompositorClass = MotionaryVideoCompositor.self
-        configuration.renderSize = renderSettings.size
-        configuration.frameDuration = CMTime(value: 1, timescale: renderSettings.frameRate)
-        configuration.instructions = [
-            MotionaryVideoCompositionInstruction(
-                timeRange: CMTimeRange(start: .zero, duration: cmTime(duration)),
-                clips: clips,
-                sourceTrackIDs: sourceTrackIDs,
-                renderSize: renderSettings.size,
-                renderScale: renderScale,
-                vectorRenderScale: vectorRenderScale,
-                backgroundColor: renderSettings.backgroundColor,
-                frameDuration: 1 / Double(max(renderSettings.frameRate, 1)),
-                qualityProfile: qualityProfile,
-                failurePolicy: failurePolicy,
-                livePreviewState: livePreviewState
-            )
-        ]
+        let instruction = MotionaryVideoCompositionInstruction(
+            timeRange: CMTimeRange(start: .zero, duration: cmTime(duration)),
+            clips: clips,
+            sourceTrackIDs: sourceTrackIDs,
+            renderSize: renderSettings.size,
+            renderScale: renderScale,
+            vectorRenderScale: vectorRenderScale,
+            backgroundColor: renderSettings.backgroundColor,
+            frameDuration: 1 / Double(max(renderSettings.frameRate, 1)),
+            qualityProfile: qualityProfile,
+            failurePolicy: failurePolicy,
+            livePreviewState: livePreviewState,
+            renderSessionID: renderSessionID
+        )
+        let configuration = AVVideoComposition.Configuration(
+            animationTool: nil,
+            colorPrimaries: nil,
+            colorTransferFunction: nil,
+            colorYCbCrMatrix: nil,
+            customVideoCompositorClass: MotionaryVideoCompositor.self,
+            frameDuration: CMTime(value: 1, timescale: renderSettings.frameRate),
+            instructions: [instruction],
+            outputBufferDescription: nil,
+            perFrameHDRDisplayMetadataPolicy: .propagate,
+            renderScale: 1,
+            renderSize: renderSettings.size,
+            sourceSampleDataTrackIDs: [],
+            sourceTrackIDForFrameTiming: sourceTrackIDForFrameTiming,
+            spatialVideoConfigurations: []
+        )
         return AVVideoComposition(configuration: configuration)
     }
 
@@ -988,13 +1357,9 @@ final class CompositionRenderService {
 
     private func previewRenderSettings(
         for project: EditorProject,
-        quality: PreviewQuality,
-        livePreviewState: LivePreviewRenderState? = nil
+        quality: PreviewQuality
     ) -> RenderSettings {
         let settings = project.renderSettings
-        guard quality == .interactive || !project.requiresFullResolutionPreviewRender else {
-            return settings
-        }
         guard let maximumDimension = quality.maximumDimension else { return settings }
         let width = Double(max(settings.width, 1))
         let height = Double(max(settings.height, 1))
@@ -1024,7 +1389,10 @@ final class CompositionRenderService {
         case .interactive, .export:
             return logicalScale
         case .balanced:
-            return max(logicalScale, 1)
+            // A 1.5x supersampled vector proxy remains crisp on the preview
+            // surface without forcing every text/shape project through a full
+            // export-resolution frame graph.
+            return min(max(logicalScale * 1.5, logicalScale), 1)
         }
     }
 
@@ -1091,13 +1459,18 @@ final class CompositionRenderService {
             }
             return
         }
-        if source.mediaType == .image, Self.isStillImageFile(mediaAsset.url) {
+        if source.mediaType == .image,
+            let stillImageCacheIdentity = stillImageValidationCache.validatedIdentity(
+                for: mediaAsset.url
+            )
+        {
             visualTrackIDs[source.id] = kCMPersistentTrackID_Invalid
             renderClips.append(
                 RenderClipDescriptor(
                     trackID: kCMPersistentTrackID_Invalid,
                     backgroundMaskTrackID: nil,
                     stillImageURL: mediaAsset.url,
+                    stillImageCacheIdentity: stillImageCacheIdentity,
                     clipID: source.id,
                     timelineStart: source.timelineStart,
                     duration: source.timelineDuration,
@@ -1379,27 +1752,6 @@ final class CompositionRenderService {
         }
     }
 
-    private static func isStillImageFile(_ url: URL) -> Bool {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-            CGImageSourceGetCount(source) > 0,
-            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) != nil
-        else { return false }
-
-        // Creating an image source only validates the container header. Force a
-        // tiny decode so corrupt payloads fail during composition preflight
-        // instead of disappearing silently inside the frame renderer.
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 8,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-        return CGImageSourceCreateThumbnailAtIndex(
-            source,
-            0,
-            options as CFDictionary
-        ) != nil
-    }
-
     private func cmTime(_ seconds: Double) -> CMTime {
         CMTime(seconds: seconds, preferredTimescale: timescale)
     }
@@ -1416,38 +1768,51 @@ final class CompositionRenderService {
         pitchFollowsSpeed: Bool = false,
         frameRate: Int32
     ) -> AVAudioMixInputParameters {
-        let parameters = AVMutableAudioMixInputParameters(track: track)
-        parameters.audioTimePitchAlgorithm = pitchFollowsSpeed ? .varispeed : .timeDomain
         let points = AudioEnvelopeSampler.points(
             for: volume,
             duration: timelineDuration,
             frameRate: frameRate
         )
-        guard let first = points.first else {
+        return makeAudioParameters(
+            track: track,
+            volume: volume,
+            timelineStart: timelineStart,
+            pitchFollowsSpeed: pitchFollowsSpeed,
+            points: points
+        )
+    }
+
+    private func makeAudioParameters(
+        track: AVCompositionTrack,
+        volume: AnimatableProperty<Double>,
+        timelineStart: Double,
+        pitchFollowsSpeed: Bool,
+        points: [AudioEnvelopePoint]
+    ) -> AVAudioMixInputParameters {
+        let parameters = AVMutableAudioMixInputParameters(track: track)
+        parameters.audioTimePitchAlgorithm = pitchFollowsSpeed ? .varispeed : .timeDomain
+        guard !points.isEmpty else {
             parameters.setVolume(Float(volume.baseValue), at: cmTime(timelineStart))
             return parameters
         }
 
-        parameters.setVolume(Float(first.value), at: cmTime(timelineStart + first.time))
-        for pair in zip(points, points.dropFirst()) {
-            let start = pair.0
-            let end = pair.1
-            let segmentDuration = end.time - start.time
-            guard segmentDuration > 0.000_001 else {
+        for command in AudioEnvelopeSampler.commands(from: points) {
+            switch command {
+            case .set(let time, let value):
                 parameters.setVolume(
-                    Float(end.value),
-                    at: cmTime(timelineStart + end.time)
+                    Float(value),
+                    at: cmTime(timelineStart + time)
                 )
-                continue
+            case .ramp(let startTime, let duration, let startValue, let endValue):
+                parameters.setVolumeRamp(
+                    fromStartVolume: Float(startValue),
+                    toEndVolume: Float(endValue),
+                    timeRange: CMTimeRange(
+                        start: cmTime(timelineStart + startTime),
+                        duration: cmTime(duration)
+                    )
+                )
             }
-            parameters.setVolumeRamp(
-                fromStartVolume: Float(start.value),
-                toEndVolume: Float(end.value),
-                timeRange: CMTimeRange(
-                    start: cmTime(timelineStart + start.time),
-                    duration: cmTime(segmentDuration)
-                )
-            )
         }
         return parameters
     }
@@ -1459,35 +1824,90 @@ final class CompositionRenderService {
         return mix
     }
 
-    @MainActor
     private func compileRenderDescriptors(
         project: EditorProject,
         visualTrackIDs: [UUID: CMPersistentTrackID],
         sourceTransforms: [UUID: CGAffineTransform],
         backgroundMaskTrackIDs: [UUID: CMPersistentTrackID],
         backgroundMaskTransforms: [UUID: CGAffineTransform]
-    ) -> [RenderClipDescriptor] {
+    ) async throws -> [RenderClipDescriptor] {
+        let input = RenderDescriptorCompilationInput(
+            project: project,
+            visualTrackIDs: visualTrackIDs,
+            sourceTransforms: sourceTransforms,
+            backgroundMaskTrackIDs: backgroundMaskTrackIDs,
+            backgroundMaskTransforms: backgroundMaskTransforms,
+            stillImageValidationCache: stillImageValidationCache
+        )
+        let compilationTask = Task.detached(priority: .userInitiated) {
+            let signpostID = OSSignpostID(log: compositionMetricsLog)
+            os_signpost(
+                .begin,
+                log: compositionMetricsLog,
+                name: "Compile Render Descriptors",
+                signpostID: signpostID,
+                "tracks=%d",
+                input.project.tracks.count
+            )
+            defer {
+                os_signpost(
+                    .end,
+                    log: compositionMetricsLog,
+                    name: "Compile Render Descriptors",
+                    signpostID: signpostID
+                )
+            }
+            return try Self.compileRenderDescriptors(input)
+        }
+        return try await withTaskCancellationHandler {
+            try await compilationTask.value
+        } onCancel: {
+            compilationTask.cancel()
+        }
+    }
+
+    private static func compileRenderDescriptors(
+        _ input: RenderDescriptorCompilationInput
+    ) throws -> [RenderClipDescriptor] {
+        let project = input.project
+        let visualTrackIDs = input.visualTrackIDs
+        let sourceTransforms = input.sourceTransforms
+        let backgroundMaskTrackIDs = input.backgroundMaskTrackIDs
+        let backgroundMaskTransforms = input.backgroundMaskTransforms
         var descriptors: [RenderClipDescriptor] = []
         var renderOrder = 0
         let visualTracks = project.tracks.filter {
             ($0.kind == .visual || $0.kind == .shape || $0.kind == .text) && !$0.isMuted
         }
         for track in visualTracks.reversed() {
+            try Task.checkCancellation()
             for item in track.items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+                try Task.checkCancellation()
                 switch item {
                 case .media(let mediaItem):
                     guard let trackID = visualTrackIDs[mediaItem.id]
                     else { continue }
                     let visuals = mediaItem.visuals
+                    let stillImageURL: URL?
+                    let stillImageCacheIdentity: String?
+                    if mediaItem.mediaType == .image,
+                        let asset = project.mediaLibrary[mediaItem.mediaID],
+                        let identity = input.stillImageValidationCache.validatedIdentity(
+                            for: asset.url
+                        )
+                    {
+                        stillImageURL = asset.url
+                        stillImageCacheIdentity = identity
+                    } else {
+                        stillImageURL = nil
+                        stillImageCacheIdentity = nil
+                    }
                     descriptors.append(
                         RenderClipDescriptor(
                             trackID: trackID,
                             backgroundMaskTrackID: backgroundMaskTrackIDs[mediaItem.id],
-                            stillImageURL: project.mediaLibrary[mediaItem.mediaID].flatMap {
-                                mediaItem.mediaType == .image && Self.isStillImageFile($0.url)
-                                    ? $0.url
-                                    : nil
-                            },
+                            stillImageURL: stillImageURL,
+                            stillImageCacheIdentity: stillImageCacheIdentity,
                             clipID: mediaItem.id,
                             timelineStart: mediaItem.timelineStart,
                             duration: mediaItem.timelineDuration,
@@ -1557,12 +1977,153 @@ final class CompositionRenderService {
                         )
                     )
                     renderOrder += 1
-                case .caption, .adjustment, .compound:
+                case .adjustment(let adjustmentItem):
+                    descriptors.append(
+                        RenderClipDescriptor(
+                            trackID: kCMPersistentTrackID_Invalid,
+                            backgroundMaskTrackID: nil,
+                            clipID: adjustmentItem.id,
+                            timelineStart: adjustmentItem.timelineStart,
+                            duration: adjustmentItem.duration,
+                            sourceTransform: .identity,
+                            backgroundMaskSourceTransform: .identity,
+                            transform: adjustmentItem.visuals.transform,
+                            adjustments: adjustmentItem.visuals.adjustments,
+                            effectStack: adjustmentItem.visuals.effectStack,
+                            mask: adjustmentItem.visuals.mask,
+                            backgroundRemoval: nil,
+                            blendMode: adjustmentItem.visuals.blendMode,
+                            blendIntensity: adjustmentItem.visuals.blendIntensity,
+                            shape: nil,
+                            text: nil,
+                            role: .adjustment,
+                            renderOrder: renderOrder
+                        )
+                    )
+                    renderOrder += 1
+                case .caption, .compound:
                     continue
                 }
             }
         }
         return descriptors
+    }
+
+    /// Returns whether the retained preview graph can accept a track-local
+    /// audio update. Pure volume/keyframe interaction must not rebuild the
+    /// composition topology or walk every project item.
+    @MainActor
+    func canPrepareInteractiveAudioMix(for itemID: UUID) -> Bool {
+        previewGraph?.rendered.audioTrackIDs[itemID] != nil
+    }
+
+    /// Builds one selected track's volume envelope off the main actor and
+    /// reuses every unaffected AVAudioMixInputParameters instance.
+    ///
+    /// This method deliberately does not mutate the retained graph. Call
+    /// `installInteractiveAudioMix(_:)` only after verifying that the editor
+    /// model still contains the captured volume property.
+    @MainActor
+    func prepareInteractiveAudioMix(
+        for project: EditorProject,
+        itemID: UUID
+    ) async -> PreparedInteractiveAudioMix? {
+        guard let graph = previewGraph,
+            case .media(let mediaItem)? = project.item(id: itemID),
+            let trackID = graph.rendered.audioTrackIDs[itemID],
+            let track = graph.rendered.composition.track(withTrackID: trackID)
+        else { return nil }
+
+        let graphRevision = previewGraphRevision
+        let volume = mediaItem.visuals.volume
+        let signpostID = OSSignpostID(log: compositionMetricsLog)
+        os_signpost(
+            .begin,
+            log: compositionMetricsLog,
+            name: "Prepare Live Audio Envelope",
+            signpostID: signpostID,
+            "keyframes=%d",
+            volume.keyframes.count
+        )
+        let points = await previewAudioEnvelopePreparer.points(
+            for: volume,
+            duration: mediaItem.timelineDuration,
+            frameRate: project.renderSettings.frameRate
+        )
+        os_signpost(
+            .end,
+            log: compositionMetricsLog,
+            name: "Prepare Live Audio Envelope",
+            signpostID: signpostID,
+            "points=%d",
+            points.count
+        )
+        guard !Task.isCancelled,
+            graphRevision == previewGraphRevision,
+            previewGraph?.rendered.composition === graph.rendered.composition
+        else { return nil }
+
+        let updatedParameters = makeAudioParameters(
+            track: track,
+            volume: volume,
+            timelineStart: mediaItem.timelineStart,
+            pitchFollowsSpeed: mediaItem.pitchFollowsSpeed,
+            points: points
+        )
+        var replacedSelectedTrack = false
+        var parameters: [AVAudioMixInputParameters] =
+            graph.rendered.audioMix?.inputParameters.map {
+                parameters -> AVAudioMixInputParameters in
+                guard parameters.trackID == trackID else { return parameters }
+                replacedSelectedTrack = true
+                return updatedParameters
+            } ?? []
+        if !replacedSelectedTrack {
+            parameters.append(updatedParameters)
+        }
+        guard let audioMix = makeAudioMix(parameters: parameters) else { return nil }
+        return PreparedInteractiveAudioMix(
+            itemID: itemID,
+            volume: volume,
+            audioMix: audioMix,
+            graphRevision: graphRevision
+        )
+    }
+
+    /// Atomically promotes a prepared track-local mix into the retained
+    /// preview graph. A stale result is rejected rather than overwriting a
+    /// newer topology, commit, or live audio update.
+    @MainActor
+    func installInteractiveAudioMix(_ prepared: PreparedInteractiveAudioMix) -> Bool {
+        guard prepared.graphRevision == previewGraphRevision,
+            let graph = previewGraph,
+            graph.rendered.audioTrackIDs[prepared.itemID] != nil
+        else { return false }
+
+        previewGraph = PreviewRenderGraph(
+            topology: graph.topology,
+            rendered: RenderedComposition(
+                composition: graph.rendered.composition,
+                videoComposition: graph.rendered.videoComposition,
+                audioMix: prepared.audioMix,
+                duration: graph.rendered.duration,
+                hasVideo: graph.rendered.hasVideo,
+                videoClockTrackID: graph.rendered.videoClockTrackID,
+                visualTrackIDs: graph.rendered.visualTrackIDs,
+                audioTrackIDs: graph.rendered.audioTrackIDs,
+                sourceTransforms: graph.rendered.sourceTransforms,
+                backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
+                backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
+            ),
+            renderDescriptors: graph.renderDescriptors
+        )
+        previewGraphRevision &+= 1
+        os_signpost(
+            .event,
+            log: compositionMetricsLog,
+            name: "Install Live Audio Mix"
+        )
+        return true
     }
 
     private func makeAudioMix(
@@ -1591,12 +2152,35 @@ final class CompositionRenderService {
     }
 }
 
-struct AudioEnvelopePoint: Equatable {
+enum AudioEnvelopeTransition: Equatable, Sendable {
+    /// Interpolate linearly from the preceding sampled point.
+    case ramp
+    /// Keep the preceding value constant, then switch at this point's time.
+    case step
+}
+
+struct AudioEnvelopePoint: Equatable, Sendable {
     var time: Double
     var value: Double
+    var transitionFromPrevious: AudioEnvelopeTransition = .ramp
+}
+
+enum AudioEnvelopeCommand: Equatable, Sendable {
+    case set(time: Double, value: Double)
+    case ramp(
+        startTime: Double,
+        duration: Double,
+        startValue: Double,
+        endValue: Double
+    )
 }
 
 enum AudioEnvelopeSampler {
+    private struct Boundary {
+        var time: Double
+        var transitionAfter: AudioEnvelopeTransition?
+    }
+
     static func points(
         for property: AnimatableProperty<Double>,
         duration: Double,
@@ -1608,23 +2192,61 @@ enum AudioEnvelopeSampler {
             return [AudioEnvelopePoint(time: 0, value: property.value(at: 0))]
         }
 
-        let boundaries =
-            ([0, safeDuration] + property.keyframes.map(\.time))
-            .map { min(max($0, 0), safeDuration) }
-            .sorted()
-            .reduce(into: [Double]()) { values, value in
-                if values.last.map({ abs($0 - value) > 0.000_001 }) ?? true {
-                    values.append(value)
+        let boundaries = (
+            [
+                Boundary(time: 0, transitionAfter: nil),
+                Boundary(time: safeDuration, transitionAfter: nil),
+            ]
+            + property.keyframes.map { keyframe in
+                Boundary(
+                    time: min(max(keyframe.time, 0), safeDuration),
+                    transitionAfter: {
+                        if case .hold = keyframe.interpolation {
+                            return .step
+                        }
+                        return .ramp
+                    }()
+                )
+            }
+        )
+            .sorted { $0.time < $1.time }
+            .reduce(into: [Boundary]()) { values, boundary in
+                if let last = values.last,
+                    abs(last.time - boundary.time) <= 0.000_001
+                {
+                    if let transitionAfter = boundary.transitionAfter {
+                        values[values.count - 1].transitionAfter = transitionAfter
+                    }
+                } else {
+                    values.append(boundary)
                 }
             }
         let minimumInterval = 0.25 / Double(max(frameRate, 1))
         var result: [AudioEnvelopePoint] = []
 
         for pair in zip(boundaries, boundaries.dropFirst()) {
+            if pair.0.transitionAfter == .step {
+                append(
+                    AudioEnvelopePoint(
+                        time: pair.0.time,
+                        value: property.value(at: pair.0.time)
+                    ),
+                    to: &result
+                )
+                append(
+                    AudioEnvelopePoint(
+                        time: pair.1.time,
+                        value: property.value(at: pair.1.time),
+                        transitionFromPrevious: .step
+                    ),
+                    to: &result
+                )
+                continue
+            }
             appendAdaptiveSegment(
                 property: property,
-                start: pair.0,
-                end: pair.1,
+                start: pair.0.time,
+                end: pair.1.time,
                 tolerance: tolerance,
                 minimumInterval: minimumInterval,
                 depth: 0,
@@ -1637,6 +2259,36 @@ enum AudioEnvelopeSampler {
             result.append(AudioEnvelopePoint(time: safeDuration, value: property.value(at: safeDuration)))
         }
         return result
+    }
+
+    /// Converts sampled points into the exact AVAudioMix automation operations
+    /// consumed by `makeAudioParameters`. Hold transitions become one
+    /// instantaneous set command at the right boundary, never a dense series
+    /// of approximation ramps.
+    static func commands(from points: [AudioEnvelopePoint]) -> [AudioEnvelopeCommand] {
+        guard let first = points.first else { return [] }
+        var commands: [AudioEnvelopeCommand] = [
+            .set(time: first.time, value: first.value)
+        ]
+        commands.reserveCapacity(points.count)
+        for pair in zip(points, points.dropFirst()) {
+            let start = pair.0
+            let end = pair.1
+            let duration = end.time - start.time
+            if end.transitionFromPrevious == .step || duration <= 0.000_001 {
+                commands.append(.set(time: end.time, value: end.value))
+            } else {
+                commands.append(
+                    .ramp(
+                        startTime: start.time,
+                        duration: duration,
+                        startValue: start.value,
+                        endValue: end.value
+                    )
+                )
+            }
+        }
+        return commands
     }
 
     private static func appendAdaptiveSegment(
@@ -1689,7 +2341,12 @@ enum AudioEnvelopeSampler {
 
     private static func append(_ point: AudioEnvelopePoint, to result: inout [AudioEnvelopePoint]) {
         if let last = result.last, abs(last.time - point.time) <= 0.000_001 {
+            // The duplicate is the next segment's left boundary. Preserve the
+            // transition that arrived at this time from the preceding segment;
+            // replacing it would turn an exact hold step back into a ramp.
+            let incomingTransition = last.transitionFromPrevious
             result[result.count - 1] = point
+            result[result.count - 1].transitionFromPrevious = incomingTransition
         } else {
             result.append(point)
         }

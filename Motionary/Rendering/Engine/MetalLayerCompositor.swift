@@ -12,6 +12,19 @@ enum MetalLayerCompositor {
         resources: MetalFrameResources
     ) throws -> CIImage {
         let extent = pixelAligned(extent)
+        let clampedIntensity = min(max(intensity, 0), 1)
+
+        // The normal blend equation is exactly Core Image source-over. Keeping
+        // it in the lazy CI graph avoids two full-frame FP16 rasterizations,
+        // one scratch output and one compute encoder for the overwhelmingly
+        // common layer path. A zero-intensity artistic blend also resolves to
+        // the same source-over result.
+        if mode == .normal || clampedIntensity <= 0.000_001 {
+            return foreground
+                .composited(over: background)
+                .cropped(to: extent)
+        }
+
         let foregroundTexture = try rasterize(foreground, in: extent, resources: resources)
         let backgroundTexture = try rasterize(background, in: extent, resources: resources)
         let outputTexture = try resources.makeScratchTexture(
@@ -34,7 +47,7 @@ enum MetalLayerCompositor {
             time: 0,
             frameIndex: 0,
             direction: .zero,
-            parameters: SIMD4(Float(min(max(intensity, 0), 1)), 0, 0, 0)
+            parameters: SIMD4(Float(clampedIntensity), 0, 0, 0)
         ))
         encoder.setBuffer(uniforms.buffer, offset: uniforms.offset, index: 0)
         resources.dispatch(

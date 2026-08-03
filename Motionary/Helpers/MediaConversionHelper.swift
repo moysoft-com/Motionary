@@ -11,7 +11,7 @@ struct NormalizedStillImage {
 }
 
 enum MediaConversionHelper {
-    /// Returns a temporary 2x2 movie that only supplies AVFoundation's
+    /// Returns a temporary 16x16 movie that only supplies AVFoundation's
     /// timing source for generated visual layers such as text.
     static func blankVideoClockURL(duration: Double, frameRate: Int32) async throws -> URL {
         try await BlankVideoClockCache.shared.url(
@@ -84,7 +84,7 @@ enum MediaConversionHelper {
         )
     }
 
-    /// Creates the single shared 2x2 clock track required by AVFoundation for
+    /// Creates the single shared 16x16 clock track required by AVFoundation for
     /// generated-only intervals. It never carries user-visible image pixels.
     fileprivate static func writeBlankVideoClock(
         duration: Double,
@@ -97,7 +97,7 @@ enum MediaConversionHelper {
             try FileManager.default.removeItem(at: outputURL)
         }
 
-        let videoSize = CGSize(width: 2, height: 2)
+        let videoSize = CGSize(width: 16, height: 16)
         let frameDuration = CMTime(value: 1, timescale: max(frameRate, 1))
         let stillDuration = CMTime(
             seconds: max(duration, CMTimeGetSeconds(frameDuration)),

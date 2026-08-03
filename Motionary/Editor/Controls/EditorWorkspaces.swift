@@ -282,13 +282,20 @@ private struct TransformMirrorSection: View {
 
 private struct TextTransformWorkspace: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let item: TextTimelineItem
+
+    init(viewModel: EditorViewModel, item: TextTimelineItem) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.item = item
+    }
 
     var body: some View {
         let isEnabled =
             viewModel.selectedTimelineItemID == item.id
-            && viewModel.currentTime >= item.timelineStart
-            && viewModel.currentTime < item.timelineEnd
+            && playbackState.currentTime >= item.timelineStart
+            && playbackState.currentTime < item.timelineEnd
         EditorWorkspaceShell(
             title: "Transform",
             systemImage: "crop.rotate",
@@ -313,6 +320,7 @@ private struct TextTransformWorkspace: View {
                             value: control.displayValue(rawValue, in: unitSpace),
                             range: control.displayRange(in: unitSpace),
                             step: control.displayStep,
+                            isAngle: control.isAngle,
                             format: control.format,
                             onBegan: viewModel.beginInteractiveEdit,
                             onChanged: { value in
@@ -346,7 +354,7 @@ private struct TextTransformWorkspace: View {
     }
 
     private var localTime: Double {
-        min(max(viewModel.currentTime - item.timelineStart, 0), item.duration)
+        min(max(playbackState.currentTime - item.timelineStart, 0), item.duration)
     }
 
     private func set(_ value: Double, for control: TextTransformControl) {
@@ -403,7 +411,7 @@ private enum TextTransformControl: String, CaseIterable, Identifiable {
     var range: ClosedRange<Double> {
         switch self {
         case .positionX, .positionY: -2...2
-        case .rotation: -720...720
+        case .rotation: -10_000...10_000
         case .scale: 0.01...100
         }
     }
@@ -421,10 +429,14 @@ private enum TextTransformControl: String, CaseIterable, Identifiable {
         case .positionX, .positionY:
             { "\(Int($0.rounded()))" }
         case .rotation:
-            { "\(Int($0.rounded()))°" }
+            AngleScrubberFormat.string
         case .scale:
             { $0.formatted(.number.precision(.fractionLength(2))) + "×" }
         }
+    }
+
+    var isAngle: Bool {
+        self == .rotation
     }
 
     func displayValue(_ rawValue: Double, in space: EditorUnitSpace) -> Double {
@@ -664,10 +676,14 @@ struct EffectsWorkspaceView: View {
             }
         }
         .onPreferenceChange(EffectsListWorkspaceMaxXPreferenceKey.self) { maxX in
-            listWorkspaceMaxX = maxX
+            DispatchQueue.main.async {
+                listWorkspaceMaxX = maxX
+            }
         }
         .onPreferenceChange(EffectsPagerMinXPreferenceKey.self) { minX in
-            pagerMinX = minX
+            DispatchQueue.main.async {
+                pagerMinX = minX
+            }
         }
         .sheet(isPresented: $isLibraryPresented) {
             EffectLibrarySheet(selectedModuleID: $librarySelection) { moduleID in
@@ -678,46 +694,54 @@ struct EffectsWorkspaceView: View {
             }
         }
         .onChange(of: clip?.id) { _, _ in
-            activeEffectID = nil
-            visibleEffectID = nil
-            workspacePage = 0
+            DispatchQueue.main.async {
+                activeEffectID = nil
+                visibleEffectID = nil
+                workspacePage = 0
+            }
         }
         .onChange(of: clip?.effectStack.effects.map(\.id)) { _, ids in
-            guard let visibleEffectID,
-                ids?.contains(visibleEffectID) == true
-            else {
-                activeEffectID = nil
-                self.visibleEffectID = nil
-                workspacePage = 0
-                return
+            DispatchQueue.main.async {
+                guard let visibleEffectID,
+                    ids?.contains(visibleEffectID) == true
+                else {
+                    activeEffectID = nil
+                    self.visibleEffectID = nil
+                    workspacePage = 0
+                    return
+                }
             }
         }
         .onChange(of: activeEffectID) { _, effectID in
-            if let effectID {
-                visibleEffectID = effectID
-                viewModel.activeKeyframeTarget = .effectMix(effectID)
-                animateWorkspacePage(to: 1)
-            } else if suppressActiveEffectCloseAnimation {
-                suppressActiveEffectCloseAnimation = false
-                viewModel.activeKeyframeTarget = nil
-                scheduleVisibleEffectRemoval()
-            } else if visibleEffectID != nil {
-                animateWorkspacePage(to: 0)
-                scheduleVisibleEffectRemoval()
-            } else {
-                workspacePage = 0
+            DispatchQueue.main.async {
+                if let effectID {
+                    visibleEffectID = effectID
+                    viewModel.activeKeyframeTarget = .effectMix(effectID)
+                    animateWorkspacePage(to: 1)
+                } else if suppressActiveEffectCloseAnimation {
+                    suppressActiveEffectCloseAnimation = false
+                    viewModel.activeKeyframeTarget = nil
+                    scheduleVisibleEffectRemoval()
+                } else if visibleEffectID != nil {
+                    animateWorkspacePage(to: 0)
+                    scheduleVisibleEffectRemoval()
+                } else {
+                    workspacePage = 0
+                }
             }
         }
         .onChange(of: workspacePage) { _, page in
-            if page == 0, visibleEffectID != nil {
-                suppressActiveEffectCloseAnimation = true
-                activeEffectID = nil
-                viewModel.activeKeyframeTarget = nil
-                scheduleVisibleEffectRemoval()
-            } else if page == 1, activeEffectID == nil {
-                workspacePage = 0
-            } else if page == nil {
-                workspacePage = visibleEffectID == nil ? 0 : 1
+            DispatchQueue.main.async {
+                if page == 0, visibleEffectID != nil {
+                    suppressActiveEffectCloseAnimation = true
+                    activeEffectID = nil
+                    viewModel.activeKeyframeTarget = nil
+                    scheduleVisibleEffectRemoval()
+                } else if page == 1, activeEffectID == nil {
+                    workspacePage = 0
+                } else if page == nil {
+                    workspacePage = visibleEffectID == nil ? 0 : 1
+                }
             }
         }
     }
@@ -1048,9 +1072,23 @@ private extension View {
 
 private struct EffectKeyframeButton: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let clip: TimelineClip?
     let effectID: UUID?
     let isEnabled: Bool
+
+    init(
+        viewModel: EditorViewModel,
+        clip: TimelineClip?,
+        effectID: UUID?,
+        isEnabled: Bool
+    ) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.clip = clip
+        self.effectID = effectID
+        self.isEnabled = isEnabled
+    }
 
     var body: some View {
         Button {
@@ -1089,7 +1127,7 @@ private struct EffectKeyframeButton: View {
 
     private var localTime: Double {
         guard let clip else { return 0 }
-        return viewModel.currentTime - clip.timelineStart
+        return playbackState.currentTime - clip.timelineStart
     }
 
     private var hasAny: Bool {
@@ -1888,6 +1926,10 @@ private struct PropertyScrubber: View {
         if target.isScaleTarget {
             rawValue =
                 effectiveRange(metadata: metadata).lowerBound * pow(1.05, Double(position))
+        } else if usesZeroAnchoredTicks(metadata: metadata) {
+            rawValue =
+                Double(position - zeroAnchorTickPosition(metadata: metadata))
+                * interactionStep(metadata: metadata)
         } else {
             rawValue =
                 effectiveRange(metadata: metadata).lowerBound
@@ -1910,6 +1952,13 @@ private struct PropertyScrubber: View {
                 metadata: metadata
             )
         }
+        if usesZeroAnchoredTicks(metadata: metadata) {
+            return boundedTickPosition(
+                zeroAnchorTickPosition(metadata: metadata)
+                    + CGFloat(value / interactionStep(metadata: metadata)),
+                metadata: metadata
+            )
+        }
         let range = effectiveRange(metadata: metadata)
         return boundedTickPosition(
             CGFloat((value - range.lowerBound) / interactionStep(metadata: metadata)),
@@ -1926,6 +1975,10 @@ private struct PropertyScrubber: View {
                 log(range.upperBound / range.lowerBound)
                     / log(1.05)
             )
+        }
+        if usesZeroAnchoredTicks(metadata: metadata) {
+            return zeroAnchorTickPosition(metadata: metadata)
+                + CGFloat(range.upperBound / interactionStep(metadata: metadata))
         }
         return CGFloat(
             (range.upperBound - range.lowerBound) / interactionStep(metadata: metadata)
@@ -1978,7 +2031,7 @@ private struct PropertyScrubber: View {
         case .shapeWidth, .shapeHeight, .shapeCornerRadius:
             "\(Int(canvasUnitSpace.units(fromPixels: value).rounded()))"
         case .rotation:
-            "\(Int(value.rounded()))°"
+            AngleScrubberFormat.string(for: value)
         case .scale, .scaleX, .scaleY:
             "\(value.formatted(.number.precision(.fractionLength(2))))×"
         case .opacity, .effectMix, .volume:
@@ -2011,28 +2064,50 @@ private struct PropertyScrubber: View {
         switch target {
         case .positionX, .positionY, .shapeCornerRadius:
             viewModel.propertyRange(for: target, clip: clip)
+        case _ where metadata.isAngle:
+            -10_000...10_000
         default:
             metadata.range
         }
+    }
+
+    private func usesZeroAnchoredTicks(metadata: KeyframePropertyMetadata) -> Bool {
+        target == .positionX || target == .positionY || metadata.isAngle
+    }
+
+    private func zeroAnchorTickPosition(
+        metadata: KeyframePropertyMetadata
+    ) -> CGFloat {
+        let range = effectiveRange(metadata: metadata)
+        return CGFloat(max(-range.lowerBound / interactionStep(metadata: metadata), 0))
     }
 }
 
 struct SectionKeyframeButton: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
     let itemID: UUID
     let section: KeyframeSection
     let isEnabled: Bool
+
+    init(
+        viewModel: EditorViewModel,
+        itemID: UUID,
+        section: KeyframeSection,
+        isEnabled: Bool
+    ) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        self.itemID = itemID
+        self.section = section
+        self.isEnabled = isEnabled
+    }
 
     var body: some View {
         let times = item?.keyframeTimes(in: section) ?? []
         let hasAny = !times.isEmpty
         let isSelectedItem = viewModel.selectedTimelineItemID == itemID
-        let isCurrent =
-            isSelectedItem
-            && times.contains {
-                abs((item?.timelineStart ?? 0) + $0 - viewModel.currentTime)
-                    <= viewModel.keyframeTimeTolerance
-            }
+        let isCurrent = isSelectedItem && hasKeyframeAtCurrentTime
 
         Button {
             if let item, case .text = item {
@@ -2069,13 +2144,43 @@ struct SectionKeyframeButton: View {
 
     private var availableTargetCount: Int {
         guard let item else { return 0 }
-        if let clip = item.legacyClip() {
+        if let clip = item.visualEditingClip() {
             return clip.keyframeTargets(in: section).count
         }
         if case .text(let text) = item {
             return text.keyframeTargets(in: section).count
         }
         return 0
+    }
+
+    private var hasKeyframeAtCurrentTime: Bool {
+        guard let item else { return false }
+        switch item {
+        case .text(let text):
+            let time = viewModel.snappedTextKeyframeTime(
+                playbackState.currentTime - text.timelineStart,
+                item: text
+            )
+            return text.keyframeTargets(in: section, includingInactiveEffects: true).contains { target in
+                text.animatableProperty(for: target)?.keyframeIndex(
+                    at: time,
+                    tolerance: viewModel.keyframeTimeTolerance
+                ) != nil
+            }
+        default:
+            guard let clip = item.visualEditingClip() else { return false }
+            let time = viewModel.snappedKeyframeTime(
+                playbackState.currentTime - item.timelineStart,
+                clip: clip
+            )
+            let effectID = section == .effects ? viewModel.activeKeyframeTarget?.effectID : nil
+            return clip.keyframeTargets(in: section, effectID: effectID).contains { target in
+                clip.animatableProperty(for: target)?.keyframeIndex(
+                    at: time,
+                    tolerance: viewModel.keyframeTimeTolerance
+                ) != nil
+            }
+        }
     }
 }
 
@@ -2085,6 +2190,7 @@ struct EditorValueScrubber: View {
     let value: Double
     let range: ClosedRange<Double>
     let step: Double
+    var isAngle = false
     var allowsUpperOverflow = false
     let format: (Double) -> String
     let onBegan: () -> Void
@@ -2151,25 +2257,27 @@ struct EditorValueScrubber: View {
 
     private var maximumPosition: CGFloat? {
         guard !allowsUpperOverflow else { return nil }
-        return CGFloat(max((range.upperBound - range.lowerBound) / safeStep, 0))
+        let effectiveRange = effectiveRange
+        return CGFloat(max((effectiveRange.upperBound - effectiveRange.lowerBound) / safeStep, 0))
     }
 
     private func position(for value: Double) -> CGFloat {
-        boundedPosition(CGFloat((clamped(value) - range.lowerBound) / safeStep))
+        boundedPosition(CGFloat((clamped(value) - effectiveRange.lowerBound) / safeStep))
     }
 
     private func value(at position: CGFloat) -> Double {
-        quantized(range.lowerBound + Double(position) * safeStep)
+        quantized(effectiveRange.lowerBound + Double(position) * safeStep)
     }
 
     private func clamped(_ value: Double) -> Double {
-        let lowerBounded = max(value, range.lowerBound)
-        return allowsUpperOverflow ? lowerBounded : min(lowerBounded, range.upperBound)
+        let effectiveRange = effectiveRange
+        let lowerBounded = max(value, effectiveRange.lowerBound)
+        return allowsUpperOverflow ? lowerBounded : min(lowerBounded, effectiveRange.upperBound)
     }
 
     private func quantized(_ value: Double) -> Double {
-        let steps = ((value - range.lowerBound) / safeStep).rounded()
-        let result = clamped(range.lowerBound + steps * safeStep)
+        let steps = ((value - effectiveRange.lowerBound) / safeStep).rounded()
+        let result = clamped(effectiveRange.lowerBound + steps * safeStep)
         return result == 0 ? 0 : result
     }
 
@@ -2229,7 +2337,7 @@ struct EditorValueScrubber: View {
 
     private func publish(_ value: Double) {
         onChanged(value)
-        let bucket = Int(((value - range.lowerBound) / safeStep).rounded())
+        let bucket = Int(((value - effectiveRange.lowerBound) / safeStep).rounded())
         guard bucket != lastHapticBucket else { return }
         if lastHapticBucket != nil { EditorHaptics.selection() }
         lastHapticBucket = bucket
@@ -2247,6 +2355,10 @@ struct EditorValueScrubber: View {
         lastHapticBucket = nil
         isEditing = false
         onEnded()
+    }
+
+    private var effectiveRange: ClosedRange<Double> {
+        isAngle ? -10_000...10_000 : range
     }
 }
 
@@ -2550,16 +2662,23 @@ struct SelectedLayerMiniTimeline: View {
                 player: viewModel.player,
                 isPlaying: viewModel.isPlaying
             ) { time in
-                displayTime = min(max(time, 0), max(viewModel.duration, 0))
+                let resolvedTime = min(max(time, 0), max(viewModel.duration, 0))
+                DispatchQueue.main.async {
+                    displayTime = resolvedTime
+                }
             }
             .allowsHitTesting(false)
         }
         .onAppear {
-            displayTime = viewModel.currentTime
+            DispatchQueue.main.async {
+                displayTime = viewModel.currentTime
+            }
         }
         .onChange(of: playbackState.currentTime) { _, time in
             guard !viewModel.isPlaying else { return }
-            displayTime = time
+            DispatchQueue.main.async {
+                displayTime = time
+            }
         }
     }
 

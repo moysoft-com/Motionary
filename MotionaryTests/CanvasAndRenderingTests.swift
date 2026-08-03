@@ -11,8 +11,499 @@ import UniformTypeIdentifiers
 
 @testable import Motionary
 
+private final class DiagnosticsTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: TimeInterval = 0
+
+    var now: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock()
+        value += interval
+        lock.unlock()
+    }
+}
+
+private final class DiagnosticsRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [EffectRenderDiagnostic] = []
+
+    func append(_ diagnostic: EffectRenderDiagnostic) {
+        lock.lock()
+        storage.append(diagnostic)
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.count
+    }
+}
+
 @Suite(.serialized)
 struct CanvasAndRenderingTests {
+    @Test func canvasPositionSnappingUsesReleaseHysteresis() {
+        let targets = PreviewSnapTargets(x: [100], y: [])
+        let acquired = PreviewSnapEngine.position(
+            center: CGPoint(x: 93, y: 40),
+            anchorOffsets: [.zero],
+            targets: targets,
+            lockedX: nil,
+            lockedY: nil
+        )
+        let retained = PreviewSnapEngine.position(
+            center: CGPoint(x: 112, y: 40),
+            anchorOffsets: [.zero],
+            targets: targets,
+            lockedX: acquired.lockX,
+            lockedY: nil
+        )
+        let released = PreviewSnapEngine.position(
+            center: CGPoint(x: 116, y: 40),
+            anchorOffsets: [.zero],
+            targets: targets,
+            lockedX: retained.lockX,
+            lockedY: nil
+        )
+
+        #expect(acquired.center.x == 100)
+        #expect(acquired.guideX == 100)
+        #expect(retained.center.x == 100)
+        #expect(retained.guideX == 100)
+        #expect(released.center.x == 116)
+        #expect(released.guideX == nil)
+    }
+
+    @Test func canvasScaleSnappingUsesTheSameStableGuideForPinchAndHandle() {
+        let targets = PreviewSnapTargets(x: [200], y: [])
+        let acquired = PreviewSnapEngine.scale(
+            center: CGPoint(x: 100, y: 100),
+            baseAnchorOffsets: [CGPoint(x: 50, y: 0)],
+            proposedScale: 1.84,
+            targets: targets,
+            lockedX: nil,
+            lockedY: nil,
+            minimumScale: 0.05,
+            maximumScale: 100,
+            maximumSnapRatio: 1.35
+        )
+        let retained = PreviewSnapEngine.scale(
+            center: CGPoint(x: 100, y: 100),
+            baseAnchorOffsets: [CGPoint(x: 50, y: 0)],
+            proposedScale: 2.2,
+            targets: targets,
+            lockedX: acquired.lockX,
+            lockedY: nil,
+            minimumScale: 0.05,
+            maximumScale: 100,
+            maximumSnapRatio: 1.35
+        )
+        let unsnappedWithoutLock = PreviewSnapEngine.scale(
+            center: CGPoint(x: 100, y: 100),
+            baseAnchorOffsets: [CGPoint(x: 50, y: 0)],
+            proposedScale: 2.2,
+            targets: targets,
+            lockedX: nil,
+            lockedY: nil,
+            minimumScale: 0.05,
+            maximumScale: 100,
+            maximumSnapRatio: 1.35
+        )
+
+        #expect(abs(acquired.scale - 2) < 0.000_001)
+        #expect(acquired.guideX == 200)
+        #expect(abs(retained.scale - 2) < 0.000_001)
+        #expect(retained.guideX == 200)
+        #expect(abs(unsnappedWithoutLock.scale - 2.2) < 0.000_001)
+        #expect(unsnappedWithoutLock.guideX == nil)
+    }
+
+    @Test func canvasPositionHysteresisKeepsTheAcquiredAnchorIdentity() {
+        let targets = PreviewSnapTargets(x: [100], y: [])
+        let acquired = PreviewSnapEngine.position(
+            center: CGPoint(x: 94.9, y: 40),
+            anchorOffsets: [.zero, CGPoint(x: 10, y: 0)],
+            targets: targets,
+            lockedX: nil,
+            lockedY: nil
+        )
+        let retained = PreviewSnapEngine.position(
+            center: CGPoint(x: 95.1, y: 40),
+            anchorOffsets: [.zero, CGPoint(x: 10, y: 0)],
+            targets: targets,
+            lockedX: acquired.lockX,
+            lockedY: nil
+        )
+
+        #expect(acquired.lockX?.anchorIndex == 1)
+        #expect(abs(acquired.center.x - 90) < 0.000_001)
+        #expect(retained.lockX?.anchorIndex == 1)
+        #expect(abs(retained.center.x - 90) < 0.000_001)
+    }
+
+    @Test func canvasScaleHysteresisKeepsTheAcquiredAnchorIdentity() {
+        let targets = PreviewSnapTargets(x: [100], y: [])
+        let acquired = PreviewSnapEngine.scale(
+            center: .zero,
+            baseAnchorOffsets: [
+                CGPoint(x: 50, y: 0),
+                CGPoint(x: 60, y: 0),
+            ],
+            proposedScale: 1.7,
+            targets: targets,
+            lockedX: nil,
+            lockedY: nil,
+            minimumScale: 0.05,
+            maximumScale: 100,
+            maximumSnapRatio: 1.35
+        )
+        let retained = PreviewSnapEngine.scale(
+            center: .zero,
+            baseAnchorOffsets: [
+                CGPoint(x: 50, y: 0),
+                CGPoint(x: 60, y: 0),
+            ],
+            proposedScale: 1.82,
+            targets: targets,
+            lockedX: acquired.lockX,
+            lockedY: nil,
+            minimumScale: 0.05,
+            maximumScale: 100,
+            maximumSnapRatio: 1.35
+        )
+
+        #expect(acquired.lockX?.anchorIndex == 1)
+        #expect(abs(acquired.scale - (100 / 60)) < 0.000_001)
+        #expect(retained.lockX?.anchorIndex == 1)
+        #expect(abs(retained.scale - (100 / 60)) < 0.000_001)
+    }
+
+    @Test func canvasRotationSnappingRetainsThenReleasesWithoutJitter() {
+        let acquired = PreviewSnapEngine.rotation(
+            degrees: 1.5,
+            lockedGuideDegrees: nil
+        )
+        let retained = PreviewSnapEngine.rotation(
+            degrees: 3.8,
+            lockedGuideDegrees: acquired.guideDegrees
+        )
+        let released = PreviewSnapEngine.rotation(
+            degrees: 5,
+            lockedGuideDegrees: retained.guideDegrees
+        )
+
+        #expect(acquired.degrees == 0)
+        #expect(acquired.didSnap)
+        #expect(retained.degrees == 0)
+        #expect(retained.didSnap)
+        #expect(released.degrees == 5)
+        #expect(!released.didSnap)
+    }
+
+    @Test func canvasHitSelectionUsesLayerStackForOverlappingFullCanvasLayers() {
+        let topAdjustmentID = UUID()
+        let contentID = UUID()
+        let bottomAdjustmentID = UUID()
+
+        let selected = PreviewHitResolver.topmost(
+            in: [
+                PreviewHitLayer(id: contentID, stackOrder: 1),
+                PreviewHitLayer(id: bottomAdjustmentID, stackOrder: 2),
+                PreviewHitLayer(id: topAdjustmentID, stackOrder: 0),
+            ]
+        )
+
+        #expect(selected == topAdjustmentID)
+    }
+
+    @Test func fullCanvasAdjustmentHitRegionOnlyConsumesItsBorder() {
+        let frame = PreviewClipFrame(
+            rect: CGRect(x: 0, y: 0, width: 320, height: 180),
+            rotationDegrees: 0
+        )
+
+        #expect(frame.contains(CGPoint(x: 160, y: 90)))
+        #expect(!frame.containsBorder(CGPoint(x: 160, y: 90), tolerance: 18))
+        #expect(frame.containsBorder(CGPoint(x: 7, y: 90), tolerance: 18))
+        #expect(frame.containsBorder(CGPoint(x: 160, y: 174), tolerance: 18))
+    }
+
+    @Test func canvasVisualIntervalIndexUsesHalfOpenRangesAndStableStackOrder() {
+        let clip = TimelineClip(
+            name: "Video",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/index-video.mov"),
+                mediaType: .video,
+                originalDuration: 1
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let text = TextTimelineItem(
+            text: "Text",
+            timelineStart: 1,
+            duration: 1
+        )
+        let adjustment = AdjustmentTimelineItem(
+            timelineStart: 0.5,
+            duration: 1
+        )
+        let audio = TimelineClip(
+            name: "Audio",
+            source: ClipSource(
+                url: URL(fileURLWithPath: "/tmp/index-audio.m4a"),
+                mediaType: .audio,
+                originalDuration: 10
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 10)
+        )
+        let project = EditorProject(
+            title: "Canvas interval index",
+            tracks: [
+                TimelineTrack(name: "Video", kind: .visual, clips: [clip]),
+                TimelineTrack(name: "Text", kind: .text, items: [.text(text)]),
+                TimelineTrack(
+                    name: "Adjustment",
+                    kind: .visual,
+                    items: [.adjustment(adjustment)]
+                ),
+                TimelineTrack(name: "Audio", kind: .audio, clips: [audio]),
+            ]
+        )
+        let index = PreviewVisualIntervalIndex(project: project)
+
+        #expect(index.active(at: 0.75, retaining: nil).map(\.id) == [
+            clip.id,
+            adjustment.id,
+        ])
+        #expect(index.active(at: 1, retaining: nil).map(\.id) == [
+            text.id,
+            adjustment.id,
+        ])
+        #expect(index.active(at: 1, retaining: clip.id).map(\.id) == [
+            clip.id,
+            text.id,
+            adjustment.id,
+        ])
+    }
+
+    @Test func liveCanvasProxyNeverDropsEnabledEffectsOrMasks() {
+        let plain = TimelineItemVisuals()
+        let effected = TimelineItemVisuals(
+            effectStack: EffectStack(
+                effects: [
+                    EffectInstance(moduleID: "test.canvas.effect")
+                ]
+            )
+        )
+        let disabledEffect = TimelineItemVisuals(
+            effectStack: EffectStack(
+                effects: [
+                    EffectInstance(
+                        moduleID: "test.canvas.effect",
+                        isEnabled: false
+                    )
+                ]
+            )
+        )
+        let masked = TimelineItemVisuals(mask: ItemMask())
+
+        #expect(PreviewInteractionProxyPolicy.canUseRasterProxy(for: plain))
+        #expect(!PreviewInteractionProxyPolicy.canUseRasterProxy(for: effected))
+        #expect(PreviewInteractionProxyPolicy.canUseRasterProxy(for: disabledEffect))
+        #expect(!PreviewInteractionProxyPolicy.canUseRasterProxy(for: masked))
+    }
+
+    @Test func staleCanvasRasterRequestsCannotReplaceTheCurrentSelection() {
+        let selectedID = UUID()
+        let loadID = UUID()
+        let token = PreviewRasterRequestToken(
+            itemID: selectedID,
+            assetKey: "selected|revision|time",
+            loadID: loadID
+        )
+
+        #expect(
+            PreviewRasterDeliveryPolicy.shouldApply(
+                token,
+                currentLoadID: loadID,
+                currentSelectedItemID: selectedID,
+                currentAssetKey: token.assetKey,
+                isTransforming: false
+            )
+        )
+        #expect(
+            !PreviewRasterDeliveryPolicy.shouldApply(
+                token,
+                currentLoadID: UUID(),
+                currentSelectedItemID: selectedID,
+                currentAssetKey: token.assetKey,
+                isTransforming: false
+            )
+        )
+        #expect(
+            !PreviewRasterDeliveryPolicy.shouldApply(
+                token,
+                currentLoadID: loadID,
+                currentSelectedItemID: UUID(),
+                currentAssetKey: token.assetKey,
+                isTransforming: false
+            )
+        )
+        #expect(
+            !PreviewRasterDeliveryPolicy.shouldApply(
+                token,
+                currentLoadID: loadID,
+                currentSelectedItemID: selectedID,
+                currentAssetKey: "newer-frame",
+                isTransforming: false
+            )
+        )
+        #expect(
+            !PreviewRasterDeliveryPolicy.shouldApply(
+                token,
+                currentLoadID: loadID,
+                currentSelectedItemID: selectedID,
+                currentAssetKey: token.assetKey,
+                isTransforming: true
+            )
+        )
+    }
+
+    @Test func adjustmentCanvasGeometryDefaultsToFullCanvasBounds() {
+        let canvas = CGRect(x: 0, y: 0, width: 320, height: 180)
+        let mapper = PreviewGeometryMapper(
+            canvasRect: canvas,
+            renderSize: CGSize(width: 1_920, height: 1_080)
+        )
+
+        let identity = mapper.adjustmentFrame(transform: ClipTransform(), at: 0)
+        var transformed = ClipTransform()
+        transformed.positionX.baseValue = 0.25
+        transformed.positionY.baseValue = -0.5
+        transformed.scale.baseValue = ScaleValue(x: 0.5, y: 2)
+        transformed.rotationDegrees.baseValue = 30
+        let edited = mapper.adjustmentFrame(transform: transformed, at: 0)
+
+        #expect(identity.rect == canvas)
+        #expect(identity.rotationDegrees == 0)
+        #expect(edited.rect.size == CGSize(width: 160, height: 360))
+        #expect(edited.center == CGPoint(x: 200, y: 135))
+        #expect(edited.rotationDegrees == 30)
+    }
+
+    @MainActor
+    @Test func adjustmentCanvasTransformEditsItsOwnVisualModel() throws {
+        let adjustment = AdjustmentTimelineItem(
+            timelineStart: 0,
+            duration: 3
+        )
+        let project = EditorProject(
+            title: "Adjustment canvas transform",
+            tracks: [
+                TimelineTrack(
+                    name: "Adjustment",
+                    kind: .visual,
+                    items: [.adjustment(adjustment)]
+                )
+            ]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.selectTimelineItem(
+            adjustment.id,
+            trackID: project.tracks[0].id
+        )
+        viewModel.currentTime = 1
+
+        viewModel.setSelectedAdjustmentTransform(
+            positionX: 0.25,
+            positionY: -0.4,
+            scale: ScaleValue(x: 1.5, y: 0.75),
+            rotationDegrees: 30
+        )
+
+        let updated = try #require(viewModel.project.item(id: adjustment.id))
+        guard case .adjustment(let item) = updated else {
+            Issue.record("Canvas transform converted the adjustment into another layer kind")
+            return
+        }
+        #expect(item.visuals.transform.positionX.baseValue == 0.25)
+        #expect(item.visuals.transform.positionY.baseValue == -0.4)
+        #expect(item.visuals.transform.scale.baseValue == ScaleValue(x: 1.5, y: 0.75))
+        #expect(item.visuals.transform.rotationDegrees.baseValue == 30)
+        #expect(viewModel.project.tracks[0].items[0].kind == .adjustment)
+    }
+
+    @MainActor
+    @Test func interactiveAdjustmentTransformPublishesNewKeyframeSnapshotOnCommit() throws {
+        let adjustment = AdjustmentTimelineItem(
+            timelineStart: 0,
+            duration: 3,
+            visuals: TimelineItemVisuals(
+                transform: ClipTransform(
+                    positionX: AnimatableProperty(
+                        baseValue: 0,
+                        keyframes: [Keyframe(time: 0, value: 0)]
+                    )
+                )
+            )
+        )
+        let track = TimelineTrack(
+            name: "Adjustment",
+            kind: .visual,
+            items: [.adjustment(adjustment)]
+        )
+        let project = EditorProject(
+            title: "Adjustment keyframe invalidation",
+            tracks: [track]
+        )
+        let viewModel = EditorViewModel(
+            projectID: UUID(),
+            projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project)
+        )
+        viewModel.selectTimelineItem(adjustment.id, trackID: track.id)
+        viewModel.currentTime = 1
+        let initialSnapshot = viewModel.timelineRenderSnapshot
+
+        viewModel.setSelectedAdjustmentTransform(
+            positionX: 0.5,
+            interactive: true
+        )
+
+        #expect(
+            viewModel.timelineRenderSnapshot.trackSnapshotsByID[track.id]?
+                .items.first?.keyframeTimes == [0]
+        )
+
+        viewModel.finishInteractiveEdit(rebuild: false)
+        let committedSnapshot = viewModel.timelineRenderSnapshot
+
+        #expect(committedSnapshot.revision > initialSnapshot.revision)
+        #expect(
+            committedSnapshot.trackSnapshotsByID[track.id]?
+                .items.first?.keyframeTimes == [0, 1]
+        )
+        let committedItem = try #require(
+            viewModel.project.item(id: adjustment.id)
+        )
+        guard case .adjustment(let committed) = committedItem else {
+            Issue.record("Expected adjustment layer after interactive transform")
+            return
+        }
+        #expect(committed.visuals.transform.positionX.keyframes.map(\.time) == [0, 1])
+    }
+
     @Test func editorUnitsScaleTheLongestDimensionToOneThousand() {
         let landscape = EditorUnitSpace(size: CGSize(width: 2_000, height: 1_000))
         let square = EditorUnitSpace(size: CGSize(width: 800, height: 800))
@@ -62,22 +553,202 @@ struct CanvasAndRenderingTests {
         )
         let renderSize = CGSize(width: 640, height: 360)
         let renderer = TextLayerRenderer()
-        let base = renderer.render(
+        let preparedSample = renderer.prepareSample(
             item: item,
             renderSize: renderSize,
             renderScale: 0.5,
+            at: 0.25
+        )
+        let base = renderer.render(
+            preparedSample,
             rasterScaleMultiplier: 1
         )
         let supersampled = renderer.render(
-            item: item,
-            renderSize: renderSize,
-            renderScale: 0.5,
+            preparedSample,
             rasterScaleMultiplier: 2
         )
 
+        #expect(preparedSample.geometry == base.geometry)
         #expect(base.geometry == supersampled.geometry)
+        #expect(renderer.layoutPreparationCount == 1)
+        #expect(renderer.layoutKeyCreationCount == 1)
+        #expect(renderer.itemResolutionCount == 1)
+        #expect(renderer.rasterKeyCreationCount == 2)
         #expect(abs(supersampled.image.extent.width - base.image.extent.width * 2) <= 1)
         #expect(abs(supersampled.image.extent.height - base.image.extent.height * 2) <= 1)
+    }
+
+    @Test func textRasterIdentityIsStableOnlyForTheCachedRasterLifetime() {
+        let item = TextTimelineItem(
+            text: "Stable GPU cache identity",
+            style: TextStyle(fontSize: 42),
+            timelineStart: 0,
+            duration: 1
+        )
+        let renderer = TextLayerRenderer()
+        let first = renderer.render(
+            item: item,
+            renderSize: CGSize(width: 640, height: 360),
+            renderScale: 1
+        )
+        let cached = renderer.render(
+            item: item,
+            renderSize: CGSize(width: 640, height: 360),
+            renderScale: 1
+        )
+
+        #expect(cached.cacheIdentity == first.cacheIdentity)
+
+        renderer.removeAllObjects()
+        let rerasterized = renderer.render(
+            item: item,
+            renderSize: CGSize(width: 640, height: 360),
+            renderScale: 1
+        )
+
+        #expect(rerasterized.cacheIdentity != first.cacheIdentity)
+    }
+
+    @MainActor
+    @Test func frameRendererEncodesGeneratedCacheMissesWithoutStandaloneGPUWaits() throws {
+        let text = TextTimelineItem(
+            text: "One prepared frame sample",
+            timelineStart: 0,
+            duration: 1
+        )
+        let shape = ClipShape(
+            kind: .rectangle,
+            color: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1),
+            width: 80,
+            height: 80
+        )
+        let stillImage = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
+            UIColor.systemBlue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
+        }
+        let stillURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-preview-still.png")
+        try #require(stillImage.pngData()).write(to: stillURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: stillURL) }
+
+        let shapeDescriptor = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: UUID(),
+            timelineStart: 0,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(),
+            adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(),
+            mask: nil,
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: shape,
+            text: nil,
+            renderOrder: 0
+        )
+        let stillDescriptor = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            stillImageURL: stillURL,
+            clipID: UUID(),
+            timelineStart: 0,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(),
+            adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(),
+            mask: nil,
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: nil,
+            text: nil,
+            renderOrder: 1
+        )
+        let textDescriptor = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: text.id,
+            timelineStart: 0,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: text.visuals.transform,
+            adjustments: text.visuals.adjustments,
+            effectStack: text.visuals.effectStack,
+            mask: nil,
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: nil,
+            text: text,
+            renderOrder: 2
+        )
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            320,
+            180,
+            kCVPixelFormatType_32BGRA,
+            [
+                kCVPixelBufferMetalCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [String: String]()
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        #expect(status == kCVReturnSuccess)
+        let renderer = try MetalFrameRenderer()
+        let plan = FrameRenderPlan(
+            renderSize: CGSize(width: 320, height: 180),
+            renderScale: 1,
+            backgroundColor: .black,
+            frameDuration: 1 / 60,
+            clips: [shapeDescriptor, stillDescriptor, textDescriptor],
+            quality: .interactive,
+            failurePolicy: .failOnUnavailableEffects
+        )
+        try renderer.render(
+            plan: plan,
+            compositionTime: CMTime(seconds: 0.2, preferredTimescale: 600),
+            sourceFrame: { _ in nil },
+            destination: try #require(pixelBuffer),
+            isCancelled: { false }
+        )
+        let firstFrameAverage = averageRGBA(in: try #require(pixelBuffer))
+        #expect(firstFrameAverage[0] > 2)
+        #expect(firstFrameAverage[1] > 2)
+        #expect(firstFrameAverage[2] > 2)
+
+        let metrics = renderer.textPreparationMetrics()
+        #expect(metrics.itemResolutions == 1)
+        #expect(metrics.layoutKeyCreations == 1)
+        #expect(metrics.layoutPreparations == 1)
+        #expect(metrics.rasterKeyCreations == 1)
+        #expect(metrics.inFrameTextureUploads == 1)
+        #expect(metrics.standaloneTextureUploadSubmissions == 0)
+
+        // A completed frame publishes the immutable texture cache entry. The
+        // next frame must reuse it without either another in-frame upload or
+        // falling back to a synchronously waited standalone command buffer.
+        try renderer.render(
+            plan: plan,
+            compositionTime: CMTime(seconds: 0.2, preferredTimescale: 600),
+            sourceFrame: { _ in nil },
+            destination: try #require(pixelBuffer),
+            isCancelled: { false }
+        )
+        let cachedFrameAverage = averageRGBA(in: try #require(pixelBuffer))
+        #expect(zip(firstFrameAverage, cachedFrameAverage).allSatisfy { pair in
+            abs(Int(pair.0) - Int(pair.1)) <= 1
+        })
+        let cachedMetrics = renderer.textPreparationMetrics()
+        #expect(cachedMetrics.inFrameTextureUploads == 1)
+        #expect(cachedMetrics.standaloneTextureUploadSubmissions == 0)
     }
 
     @Test func roundedRectangleSupersamplingScalesCornerRadiusAfterLogicalClamp() {
@@ -107,6 +778,120 @@ struct CanvasAndRenderingTests {
         #expect(supersampled.logicalCornerRadius == base.logicalCornerRadius)
         #expect(supersampled.rasterSize == CGSize(width: 120, height: 40))
         #expect(supersampled.rasterCornerRadius == 20)
+    }
+
+    @Test func shapeRasterPolicyCachesStaticInteractiveShapes() {
+        let staticShape = ClipShape(
+            kind: .rectangle,
+            color: .white,
+            width: 100,
+            height: 60
+        )
+        #expect(
+            !ShapeRasterizationPolicy.requiresFrameLocalEncoding(
+                shape: staticShape,
+                transform: ClipTransform(),
+                hasTransientScaleOverride: false
+            )
+        )
+
+        var positionOnlyTransform = ClipTransform()
+        positionOnlyTransform.positionX.baseValue = 0.4
+        #expect(
+            !ShapeRasterizationPolicy.requiresFrameLocalEncoding(
+                shape: staticShape,
+                transform: positionOnlyTransform,
+                hasTransientScaleOverride: false
+            )
+        )
+        #expect(
+            ShapeRasterizationPolicy.requiresFrameLocalEncoding(
+                shape: staticShape,
+                transform: positionOnlyTransform,
+                hasTransientScaleOverride: true
+            )
+        )
+
+        var animatedShape = ClipShape(
+            kind: .rectangle,
+            color: .white,
+            width: 100,
+            height: 60
+        )
+        animatedShape.width = AnimatableProperty(
+            baseValue: 100,
+            keyframes: [Keyframe(time: 0.5, value: 160)]
+        )
+        #expect(
+            ShapeRasterizationPolicy.requiresFrameLocalEncoding(
+                shape: animatedShape,
+                transform: ClipTransform(),
+                hasTransientScaleOverride: false
+            )
+        )
+
+        let descriptor = shapeDescriptor(
+            transform: ClipTransform(),
+            color: .white,
+            renderOrder: 0
+        )
+        let liveState = LivePreviewRenderState()
+        liveState.setTransform(positionOnlyTransform, for: descriptor.clipID)
+        let positionResolved = descriptor.resolvingLiveOverride(from: liveState.snapshot())
+        #expect(!positionResolved.hasTransientRasterScaleOverride)
+
+        var scaledTransform = positionOnlyTransform
+        scaledTransform.scale.baseValue = ScaleValue(x: 1.5, y: 1.5)
+        liveState.setTransform(scaledTransform, for: descriptor.clipID)
+        let scaleResolved = descriptor.resolvingLiveOverride(from: liveState.snapshot())
+        #expect(scaleResolved.hasTransientRasterScaleOverride)
+    }
+
+    @Test func interactiveGeneratedLayersSampleAtThirtyFPSOrNativeCadence() {
+        let sixtyFPSFrame = 1.0 / 60.0
+        #expect(
+            GeneratedLayerSamplingPolicy.sourceTime(
+                sixtyFPSFrame,
+                frameDuration: sixtyFPSFrame,
+                quality: .interactive
+            ) == 0
+        )
+        #expect(
+            abs(
+                GeneratedLayerSamplingPolicy.sourceTime(
+                    sixtyFPSFrame * 2,
+                    frameDuration: sixtyFPSFrame,
+                    quality: .interactive
+                ) - 1.0 / 30.0
+            ) < 0.000_001
+        )
+        #expect(
+            abs(
+                GeneratedLayerSamplingPolicy.sourceTime(
+                    sixtyFPSFrame * 3,
+                    frameDuration: sixtyFPSFrame,
+                    quality: .interactive
+                ) - 1.0 / 30.0
+            ) < 0.000_001
+        )
+
+        let twentyFourFPSFrame = 1.0 / 24.0
+        #expect(
+            abs(
+                GeneratedLayerSamplingPolicy.sourceTime(
+                    twentyFourFPSFrame,
+                    frameDuration: twentyFourFPSFrame,
+                    quality: .interactive
+                ) - twentyFourFPSFrame
+            ) < 0.000_001
+        )
+        #expect(
+            GeneratedLayerSamplingPolicy.sourceTime(
+                0.017,
+                frameDuration: sixtyFPSFrame,
+                quality: .export
+            ) == 0.017
+        )
     }
 
     @Test func textRasterBudgetFallbackPreservesLogicalGeometry() {
@@ -321,7 +1106,7 @@ struct CanvasAndRenderingTests {
     }
 
     @MainActor
-    @Test func generatedCanvasLayersKeepFullPreviewRenderSize() async throws {
+    @Test func generatedCanvasLayersUseProxyFrameWithFullVectorRasterScale() async throws {
         let text = TextTimelineItem(
             text: "Full resolution",
             timelineStart: 0,
@@ -345,7 +1130,14 @@ struct CanvasAndRenderingTests {
             invalidation: [.previewFrame, .compositionTopology, .audioMix]
         )
 
-        #expect(prepared?.videoComposition?.renderSize == CGSize(width: 1080, height: 1920))
+        let videoComposition = try #require(prepared?.videoComposition)
+        let instruction = try #require(
+            videoComposition.instructions.first
+                as? MotionaryVideoCompositionInstruction
+        )
+        #expect(videoComposition.renderSize == CGSize(width: 540, height: 960))
+        #expect(instruction.renderScale == 0.5)
+        #expect(instruction.vectorRenderScale == 0.75)
     }
 
     @Test func generatedTextIsActiveInItsFirstOverlappingFrame() {
@@ -416,6 +1208,7 @@ struct CanvasAndRenderingTests {
         var liveTransform = text.visuals.transform
         liveTransform.positionX = AnimatableProperty(baseValue: 0.42)
         liveState.setTransform(liveTransform, for: text.id)
+        liveState.setInteractiveQualityOverride(true)
         let instruction = MotionaryVideoCompositionInstruction(
             timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: 2, preferredTimescale: 600)),
             clips: [descriptor],
@@ -429,7 +1222,7 @@ struct CanvasAndRenderingTests {
         )
 
         let plan = RenderPlanCompiler.compile(instruction)
-        let resolved = descriptor.resolvingLiveOverride(from: plan.livePreviewState)
+        let resolved = descriptor.resolvingLiveOverride(from: plan.livePreviewSnapshot)
 
         #expect(plan.clipIntervals.count == instruction.clipIntervals.count)
         #expect(plan.renderScale == 0.5)
@@ -437,15 +1230,210 @@ struct CanvasAndRenderingTests {
         #expect(plan.viewport.visibleRect == CGRect(x: 0, y: 0, width: 1080, height: 1920))
         #expect(plan.viewport.overscanRect.contains(plan.viewport.visibleRect))
         #expect(plan.livePreviewState === liveState)
+        #expect(plan.livePreviewSnapshot != nil)
         #expect(plan.quality == .interactive)
         #expect(resolved.transform.positionX.baseValue == 0.42)
         #expect(descriptor.transform.positionX.baseValue == 0)
+
+        var newerTransform = liveTransform
+        newerTransform.positionX = AnimatableProperty(baseValue: 0.75)
+        liveState.setTransform(newerTransform, for: text.id)
+        let frameStable = descriptor.resolvingLiveOverride(from: plan.livePreviewSnapshot)
+        #expect(frameStable.transform.positionX.baseValue == 0.42)
 
         liveState.setHidden(true, for: text.id)
         liveState.revealPreservingTransform(for: text.id)
 
         #expect(liveState.isHidden(text.id) == false)
-        #expect(liveState.transform(for: text.id)?.positionX.baseValue == 0.42)
+        #expect(liveState.transform(for: text.id)?.positionX.baseValue == 0.75)
+    }
+
+    @MainActor
+    @Test func liveVisualOverrideRendersFullInspectorStateWithoutDescriptorRebuild() throws {
+        let descriptor = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+            width: 100,
+            height: 100,
+            renderOrder: 0
+        )
+        var noir = try #require(
+            EffectRegistry.shared.makeEffect(moduleID: .noir)
+        )
+        noir.mix = AnimatableProperty(baseValue: 1)
+        var inspectorTransform = descriptor.transform
+        inspectorTransform.positionX = AnimatableProperty(baseValue: 0.35)
+        inspectorTransform.scale.baseValue = ScaleValue(x: 1.25, y: 1.25)
+        let inspectorMask = ItemMask(
+            shape: .ellipse,
+            widthScale: 0.8,
+            heightScale: 0.8
+        )
+        let inspectorVisuals = TimelineItemVisuals(
+            transform: inspectorTransform,
+            adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(effects: [noir]),
+            blendMode: .normal,
+            blendIntensity: 0.85,
+            mask: inspectorMask
+        )
+        var inspectorShape = try #require(descriptor.shape)
+        inspectorShape.width = AnimatableProperty(baseValue: 96)
+
+        // A direct canvas transform intentionally wins over the transform
+        // carried by the inspector's full visual state.
+        var canvasTransform = descriptor.transform
+        canvasTransform.positionX = AnimatableProperty(baseValue: 0)
+        let liveState = LivePreviewRenderState()
+        liveState.setTransform(canvasTransform, for: descriptor.clipID)
+        liveState.setVisuals(
+            inspectorVisuals,
+            shape: inspectorShape,
+            for: descriptor.clipID
+        )
+
+        let snapshot = liveState.snapshot()
+        let resolved = descriptor.resolvingLiveOverride(from: snapshot)
+        #expect(resolved.transform.positionX.baseValue == 0)
+        #expect(resolved.effectStack.effects.count == 1)
+        #expect(resolved.effectStack.effects[0].moduleID == .noir)
+        #expect(resolved.effectStack.effects[0].isEnabled)
+        #expect(resolved.mask == inspectorMask)
+        #expect(resolved.blendIntensity == 0.85)
+        #expect(resolved.shape == inspectorShape)
+        #expect(resolved.hasTransientRasterScaleOverride == false)
+
+        // The live effect stack is consumed by the actual frame renderer. A
+        // fully red source becomes achromatic while the immutable descriptor
+        // itself remains unchanged.
+        let pixel = try renderPixel(
+            clips: [descriptor],
+            x: 50,
+            y: 50,
+            livePreviewState: liveState
+        )
+        #expect(abs(Int(pixel[0]) - Int(pixel[1])) < 18)
+        #expect(abs(Int(pixel[1]) - Int(pixel[2])) < 18)
+        #expect(descriptor.effectStack.effects.isEmpty)
+        #expect(descriptor.shape?.width.baseValue == 100)
+    }
+
+    @Test func liveTextOverrideAndGranularCommitHandoffPreserveCanvasState() {
+        let text = TextTimelineItem(
+            text: "Before",
+            timelineStart: 0,
+            duration: 2
+        )
+        let descriptor = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: text.id,
+            timelineStart: text.timelineStart,
+            duration: text.duration,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: text.visuals.transform,
+            adjustments: text.visuals.adjustments,
+            effectStack: text.visuals.effectStack,
+            mask: text.visuals.mask,
+            backgroundRemoval: text.visuals.backgroundRemoval,
+            blendMode: text.visuals.blendMode,
+            blendIntensity: text.visuals.blendIntensity,
+            shape: nil,
+            text: text,
+            renderOrder: 0
+        )
+        var editedText = text
+        editedText.text = "After"
+        editedText.style.fontSize = 72
+        var editedVisuals = editedText.visuals
+        editedVisuals.blendMode = .screen
+        editedText.visuals = editedVisuals
+        var canvasTransform = text.visuals.transform
+        canvasTransform.rotationDegrees = AnimatableProperty(baseValue: 12)
+
+        let liveState = LivePreviewRenderState()
+        liveState.setTransform(canvasTransform, for: text.id)
+        liveState.setHidden(true, for: text.id)
+        liveState.setVisuals(editedVisuals, text: editedText, for: text.id)
+
+        let resolved = descriptor.resolvingLiveOverride(from: liveState.snapshot())
+        #expect(resolved.text?.text == "After")
+        #expect(resolved.text?.style.fontSize == 72)
+        #expect(resolved.blendMode == .screen)
+        #expect(resolved.transform.rotationDegrees.baseValue == 12)
+        #expect(resolved.transform.opacity.baseValue == 0)
+
+        let revisionBeforeClear = liveState.snapshot().revision
+        let revisionAfterClear = liveState.clearVisuals(for: text.id)
+        let canvasHandoff = liveState.override(for: text.id)
+        #expect(revisionAfterClear > revisionBeforeClear)
+        #expect(canvasHandoff?.visuals == nil)
+        #expect(canvasHandoff?.text == nil)
+        #expect(canvasHandoff?.transform == canvasTransform)
+        #expect(canvasHandoff?.isHidden == true)
+
+        liveState.clearOverride(for: text.id)
+        #expect(liveState.override(for: text.id) == nil)
+        #expect(!liveState.hasActiveOverrides)
+    }
+
+    @Test func effectDiagnosticsDeduplicateFramesAndReemitAfterInterval() {
+        let clock = DiagnosticsTestClock()
+        let diagnostics = EffectRenderDiagnostics(
+            repeatInterval: 1,
+            maximumRetainedSignatures: 2,
+            clock: { clock.now }
+        )
+        let recorder = DiagnosticsRecorder()
+        let handler = diagnostics.installHandler { recorder.append($0) }
+        defer { diagnostics.removeHandler(handler) }
+        let effectID = UUID()
+        let repeated = EffectRenderDiagnostic(
+            severity: .warning,
+            moduleID: "missing.preview.effect",
+            effectID: effectID,
+            message: "Unavailable on this device"
+        )
+
+        diagnostics.report(repeated)
+        diagnostics.report(repeated)
+        clock.advance(by: 0.75)
+        diagnostics.report(repeated)
+        #expect(recorder.count == 1)
+
+        clock.advance(by: 0.26)
+        diagnostics.report(repeated)
+        #expect(recorder.count == 2)
+
+        for index in 0..<4 {
+            diagnostics.report(
+                EffectRenderDiagnostic(
+                    severity: .warning,
+                    moduleID: "missing.preview.effect.\(index)",
+                    effectID: UUID(),
+                    message: "Unavailable \(index)"
+                )
+            )
+        }
+        #expect(recorder.count == 6)
+        #expect(diagnostics.retainedSignatureCount <= 2)
+    }
+
+    @Test func standaloneEffectDiagnosticsUseStableEffectIdentity() {
+        let effect = EffectInstance(
+            id: UUID(),
+            moduleID: .noir,
+            seed: 0
+        )
+        #expect(
+            EffectImageRenderer.diagnosticEffectID(
+                for: EffectStack(effects: [effect])
+            ) == effect.id
+        )
+        let firstFallback = EffectImageRenderer.diagnosticEffectID(for: EffectStack())
+        let secondFallback = EffectImageRenderer.diagnosticEffectID(for: EffectStack())
+        #expect(firstFallback == secondFallback)
     }
 
     @Test func overlayEffectsPreserveTransparentSourceRegions() throws {
@@ -746,18 +1734,33 @@ struct CanvasAndRenderingTests {
     }
 
     @MainActor
-    @Test func stillImageCacheInvalidatesWhenFileChangesAtSameURL() throws {
+    @Test func stillImageCacheUsesPreparedIdentityWithoutFramePathFileIO() throws {
         let sourceURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString)-mutable-still.png")
         defer { try? FileManager.default.removeItem(at: sourceURL) }
 
         try writeSolidImage(.systemRed, to: sourceURL, modificationOffset: 10)
         let renderer = try MetalFrameRenderer()
-        let first = try renderStillAverage(url: sourceURL, renderer: renderer)
+        let first = try renderStillAverage(
+            url: sourceURL,
+            cacheIdentity: "still-v1",
+            renderer: renderer
+        )
+        try FileManager.default.removeItem(at: sourceURL)
+        let cachedAfterRemoval = try renderStillAverage(
+            url: sourceURL,
+            cacheIdentity: "still-v1",
+            renderer: renderer
+        )
         try writeSolidImage(.systemBlue, to: sourceURL, modificationOffset: 20)
-        let second = try renderStillAverage(url: sourceURL, renderer: renderer)
+        let second = try renderStillAverage(
+            url: sourceURL,
+            cacheIdentity: "still-v2",
+            renderer: renderer
+        )
 
         #expect(first[0] > first[2])
+        #expect(cachedAfterRemoval[0] > cachedAfterRemoval[2])
         #expect(second[2] > second[0])
     }
 
@@ -980,6 +1983,349 @@ struct CanvasAndRenderingTests {
         let lowerLeft = rgbaPixel(in: destination, x: 20, y: 75)
         #expect(upperLeft[0] < 20)
         #expect(lowerLeft[0] > 80)
+    }
+
+    @Test func adjustmentCompositionUsesDedicatedRenderRoleAndStackOrder() async throws {
+        let shape = ShapeTimelineItem(
+            name: "Background",
+            mediaID: MediaID(),
+            shape: ClipShape(
+                kind: .rectangle,
+                color: .white,
+                width: 64,
+                height: 64
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let adjustment = AdjustmentTimelineItem(
+            timelineStart: 0,
+            duration: 1
+        )
+        let project = EditorProject(
+            title: "Typed adjustment render",
+            renderSettings: RenderSettings(width: 64, height: 64, frameRate: 10),
+            tracks: [
+                TimelineTrack(
+                    name: "Adjustment",
+                    kind: .visual,
+                    items: [.adjustment(adjustment)]
+                ),
+                TimelineTrack(
+                    name: "Shape",
+                    kind: .shape,
+                    items: [.shape(shape)]
+                ),
+            ]
+        )
+
+        let rendered = try await CompositionRenderService().makeComposition(for: project)
+        let instruction = try #require(
+            rendered.videoComposition?.instructions.first
+                as? MotionaryVideoCompositionInstruction
+        )
+
+        #expect(instruction.clips.map(\.role) == [.content, .adjustment])
+        #expect(instruction.clips.map(\.clipID) == [shape.id, adjustment.id])
+        #expect(instruction.clips.last?.trackID == kCMPersistentTrackID_Invalid)
+        #expect(instruction.clips.last?.shape == nil)
+        #expect(instruction.clips.last?.text == nil)
+    }
+
+    @Test func exportValidationIncludesAdjustmentEffectStacks() throws {
+        let unsupportedEffect = EffectInstance(
+            moduleID: "com.example.motionary.unsupported-adjustment"
+        )
+        let adjustment = AdjustmentTimelineItem(
+            timelineStart: 0,
+            duration: 1,
+            visuals: TimelineItemVisuals(
+                effectStack: EffectStack(effects: [unsupportedEffect])
+            )
+        )
+        let project = EditorProject(
+            title: "Adjustment effect validation",
+            tracks: [
+                TimelineTrack(
+                    name: "Adjustment",
+                    kind: .visual,
+                    items: [.adjustment(adjustment)]
+                )
+            ]
+        )
+
+        do {
+            try VideoExportService().validateRenderingAvailability(for: project)
+            Issue.record("Unsupported adjustment effect passed export validation")
+        } catch MetalRenderingError.unavailableEffect(let name) {
+            #expect(name.contains("unsupported-adjustment"))
+        } catch {
+            Issue.record("Unexpected export validation error: \(error)")
+        }
+    }
+
+    @MainActor
+    @Test func adjustmentLayerOnlyAffectsContentBelowDuringItsTimelineRange() throws {
+        let background = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+            width: 100,
+            height: 100,
+            renderOrder: 0
+        )
+        let adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: UUID(),
+            timelineStart: 0.5,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(),
+            adjustments: AdjustmentSettings(
+                saturation: AnimatableProperty(baseValue: 0)
+            ),
+            effectStack: EffectStack(),
+            mask: nil,
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: nil,
+            text: nil,
+            role: .adjustment,
+            renderOrder: 1
+        )
+        let foreground = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1),
+            width: 20,
+            height: 20,
+            renderOrder: 2
+        )
+        let clips = [background, adjustment, foreground]
+
+        let beforeRange = try renderPixel(
+            clips: clips,
+            at: 0.25,
+            x: 10,
+            y: 10
+        )
+        let adjustedBelow = try renderPixel(
+            clips: clips,
+            at: 0.75,
+            x: 10,
+            y: 10
+        )
+        let contentAbove = try renderPixel(
+            clips: clips,
+            at: 0.75,
+            x: 50,
+            y: 50
+        )
+
+        #expect(beforeRange[0] > beforeRange[1] + 60)
+        #expect(abs(Int(adjustedBelow[0]) - Int(adjustedBelow[1])) < 12)
+        #expect(abs(Int(adjustedBelow[1]) - Int(adjustedBelow[2])) < 12)
+        #expect(contentAbove[1] > contentAbove[0] + 60)
+        #expect(contentAbove[1] > contentAbove[2] + 60)
+    }
+
+    @MainActor
+    @Test func typedAdjustmentProjectRendersStackSemanticsEndToEnd() async throws {
+        let background = ShapeTimelineItem(
+            name: "Background",
+            mediaID: MediaID(),
+            shape: ClipShape(
+                kind: .rectangle,
+                color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+                width: 100,
+                height: 100
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let adjustment = AdjustmentTimelineItem(
+            timelineStart: 0,
+            duration: 1,
+            visuals: TimelineItemVisuals(
+                adjustments: AdjustmentSettings(
+                    saturation: AnimatableProperty(baseValue: 0)
+                )
+            )
+        )
+        let foreground = ShapeTimelineItem(
+            name: "Foreground",
+            mediaID: MediaID(),
+            shape: ClipShape(
+                kind: .rectangle,
+                color: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1),
+                width: 20,
+                height: 20
+            ),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let project = EditorProject(
+            title: "End-to-end adjustment",
+            renderSettings: RenderSettings(width: 100, height: 100, frameRate: 30),
+            tracks: [
+                TimelineTrack(name: "Foreground", kind: .shape, items: [.shape(foreground)]),
+                TimelineTrack(name: "Adjustment", kind: .visual, items: [.adjustment(adjustment)]),
+                TimelineTrack(name: "Background", kind: .shape, items: [.shape(background)]),
+            ]
+        )
+
+        let rendered = try await CompositionRenderService().makeComposition(for: project)
+        let instruction = try #require(
+            rendered.videoComposition?.instructions.first
+                as? MotionaryVideoCompositionInstruction
+        )
+        let adjustedBackground = try renderPixel(
+            clips: instruction.clips,
+            at: 0.5,
+            x: 10,
+            y: 10
+        )
+        let untouchedForeground = try renderPixel(
+            clips: instruction.clips,
+            at: 0.5,
+            x: 50,
+            y: 50
+        )
+
+        #expect(instruction.qualityProfile == .export)
+        #expect(instruction.failurePolicy == .failOnUnavailableEffects)
+        #expect(instruction.clips.map(\.clipID) == [background.id, adjustment.id, foreground.id])
+        #expect(abs(Int(adjustedBackground[0]) - Int(adjustedBackground[1])) < 12)
+        #expect(abs(Int(adjustedBackground[1]) - Int(adjustedBackground[2])) < 12)
+        #expect(untouchedForeground[1] > untouchedForeground[0] + 60)
+        #expect(untouchedForeground[1] > untouchedForeground[2] + 60)
+    }
+
+    @MainActor
+    @Test func adjustmentLayerEffectAndMaskOperateOnCanvasSizedComposite() throws {
+        let background = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+            width: 100,
+            height: 100,
+            renderOrder: 0
+        )
+        var noir = try #require(
+            EffectRegistry.shared.makeEffect(moduleID: .noir)
+        )
+        noir.mix = AnimatableProperty(baseValue: 1)
+        let adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: UUID(),
+            timelineStart: 0,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(),
+            adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(effects: [noir]),
+            mask: ItemMask(
+                shape: .ellipse,
+                widthScale: 0.5,
+                heightScale: 0.5
+            ),
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: nil,
+            text: nil,
+            role: .adjustment,
+            renderOrder: 1
+        )
+
+        let center = try renderPixel(clips: [background, adjustment], x: 50, y: 50)
+        let corner = try renderPixel(clips: [background, adjustment], x: 8, y: 8)
+
+        #expect(abs(Int(center[0]) - Int(center[1])) < 18)
+        #expect(abs(Int(center[1]) - Int(center[2])) < 18)
+        #expect(corner[0] > corner[1] + 60)
+        #expect(corner[0] > corner[2] + 60)
+    }
+
+    @MainActor
+    @Test func shapeLayerMaskIsAppliedBeforeCompositing() throws {
+        let background = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 0, green: 0, blue: 1, alpha: 1),
+            width: 100,
+            height: 100,
+            renderOrder: 0
+        )
+        let foreground = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: UUID(),
+            timelineStart: 0,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(),
+            adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(),
+            mask: ItemMask(
+                shape: .ellipse,
+                widthScale: 0.5,
+                heightScale: 0.5
+            ),
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: ClipShape(
+                kind: .rectangle,
+                color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+                width: 100,
+                height: 100
+            ),
+            text: nil,
+            renderOrder: 1
+        )
+
+        let center = try renderPixel(clips: [background, foreground], x: 50, y: 50)
+        let corner = try renderPixel(clips: [background, foreground], x: 8, y: 8)
+
+        #expect(center[0] > center[2] + 60)
+        #expect(corner[2] > corner[0] + 60)
+    }
+
+    @MainActor
+    @Test func shapeLayerBlendModeUsesTheSharedLayerCompositor() throws {
+        let background = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 0.8, green: 0.4, blue: 0.2, alpha: 1),
+            width: 100,
+            height: 100,
+            renderOrder: 0
+        )
+        let normal = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1),
+            width: 100,
+            height: 100,
+            blendMode: .normal,
+            renderOrder: 1
+        )
+        let multiply = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 0.5, green: 0.5, blue: 0.5, alpha: 1),
+            width: 100,
+            height: 100,
+            blendMode: .multiply,
+            renderOrder: 1
+        )
+
+        let normalPixel = try renderPixel(clips: [background, normal], x: 50, y: 50)
+        let multiplyPixel = try renderPixel(clips: [background, multiply], x: 50, y: 50)
+
+        #expect(normalPixel[0] > multiplyPixel[0] + 10)
+        #expect(normalPixel[1] > multiplyPixel[1] + 10)
+        #expect(normalPixel[2] > multiplyPixel[2] + 10)
     }
 
     @Test func projectPosterRendersPersistedCompositedFirstVisibleFrame() async throws {
@@ -1322,8 +2668,8 @@ struct CanvasAndRenderingTests {
         let naturalSize = try await track.load(.naturalSize)
 
         #expect(tracks.count == 1)
-        #expect(Int(naturalSize.width.rounded()) == 2)
-        #expect(Int(naturalSize.height.rounded()) == 2)
+        #expect(Int(naturalSize.width.rounded()) == 16)
+        #expect(Int(naturalSize.height.rounded()) == 16)
         #expect(abs(CMTimeGetSeconds(try await asset.load(.duration)) - 5) < 0.05)
     }
 
@@ -1459,6 +2805,9 @@ struct CanvasAndRenderingTests {
     private func shapeDescriptor(
         transform: ClipTransform,
         color: RGBAColor,
+        width: Double = 20,
+        height: Double = 20,
+        blendMode: BlendMode = .normal,
         renderOrder: Int
     ) -> RenderClipDescriptor {
         RenderClipDescriptor(
@@ -1474,17 +2823,59 @@ struct CanvasAndRenderingTests {
             effectStack: EffectStack(),
             mask: nil,
             backgroundRemoval: nil,
-            blendMode: .normal,
+            blendMode: blendMode,
             blendIntensity: 1,
             shape: ClipShape(
                 kind: .rectangle,
                 color: color,
-                width: 20,
-                height: 20
+                width: width,
+                height: height
             ),
             text: nil,
             renderOrder: renderOrder
         )
+    }
+
+    @MainActor
+    private func renderPixel(
+        clips: [RenderClipDescriptor],
+        at time: Double = 0,
+        x: Int,
+        y: Int,
+        backgroundColor: RGBAColor = .black,
+        livePreviewState: LivePreviewRenderState? = nil
+    ) throws -> [UInt8] {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            100,
+            100,
+            kCVPixelFormatType_32BGRA,
+            [
+                kCVPixelBufferMetalCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [String: String]()
+            ] as CFDictionary,
+            &pixelBuffer
+        )
+        #expect(status == kCVReturnSuccess)
+        let destination = try #require(pixelBuffer)
+        try MetalFrameRenderer().render(
+            plan: FrameRenderPlan(
+                renderSize: CGSize(width: 100, height: 100),
+                renderScale: 1,
+                backgroundColor: backgroundColor,
+                frameDuration: 1 / 30,
+                clips: clips,
+                quality: .export,
+                failurePolicy: .failOnUnavailableEffects,
+                livePreviewState: livePreviewState
+            ),
+            compositionTime: CMTime(seconds: time, preferredTimescale: 600),
+            sourceFrame: { _ in nil },
+            destination: destination,
+            isCancelled: { false }
+        )
+        return rgbaPixel(in: destination, x: x, y: y)
     }
 
     @MainActor
@@ -1609,12 +3000,14 @@ struct CanvasAndRenderingTests {
 
     private func renderStillAverage(
         url: URL,
+        cacheIdentity: String,
         renderer: MetalFrameRenderer
     ) throws -> [UInt8] {
         let descriptor = RenderClipDescriptor(
             trackID: kCMPersistentTrackID_Invalid,
             backgroundMaskTrackID: nil,
             stillImageURL: url,
+            stillImageCacheIdentity: cacheIdentity,
             clipID: UUID(),
             timelineStart: 0,
             duration: 1,
