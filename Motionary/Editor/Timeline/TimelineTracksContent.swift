@@ -93,6 +93,23 @@ struct TimelineTracksContent: View {
         }
         .frame(width: contentWidth, height: max(contentHeight, containerHeight), alignment: .topLeading)
         .offset(y: 8)
+        .onChange(of: clipDragScrollOffset) { _, _ in
+            // Edge scrolling continues while the finger is stationary.
+            if let drag = activeClipDrag, let location = drag.fingerLocationInWindow {
+                updateClipDrag(
+                    drag.itemSnapshot,
+                    dragValue: TimelineLongPressDragValue(
+                        translation: drag.fingerTranslation, locationInWindow: location
+                    ))
+            }
+            if let drag = activeTrackDrag, let location = drag.fingerLocationInWindow {
+                updateTrackDrag(
+                    trackID: drag.trackID,
+                    dragValue: TimelineLongPressDragValue(
+                        translation: drag.fingerTranslation, locationInWindow: location
+                    ))
+            }
+        }
     }
 
     private var activeSnapGuide: (time: Double, minY: CGFloat, height: CGFloat)? {
@@ -161,7 +178,8 @@ struct TimelineTracksContent: View {
             indices.insert(activeTrackDrag.sourceIndex)
             indices.insert(activeTrackDrag.targetIndex)
         }
-        return indices
+        return
+            indices
             .filter { snapshot.tracks.indices.contains($0) }
             .sorted()
     }
@@ -261,7 +279,7 @@ struct TimelineTracksContent: View {
                 beginTrackDrag(trackID: track.id, sourceIndex: index)
             },
             onTrackDragChanged: { value in
-                updateTrackDrag(trackID: track.id, translation: value.translation)
+                updateTrackDrag(trackID: track.id, dragValue: value)
             },
             onTrackDragEnded: { commit in
                 finishTrackDrag(commit: commit)
@@ -335,7 +353,8 @@ struct TimelineTracksContent: View {
             itemSnapshot: currentDrag.itemSnapshot,
             selectedClipIDBeforeDrag: currentDrag.selectedClipIDBeforeDrag,
             selectedTrackIDBeforeDrag: currentDrag.selectedTrackIDBeforeDrag,
-            fingerLocationInWindow: dragValue.locationInWindow
+            fingerLocationInWindow: dragValue.locationInWindow,
+            fingerTranslation: dragValue.translation
         )
     }
 
@@ -371,14 +390,14 @@ struct TimelineTracksContent: View {
         timelineDragHaptic()
     }
 
-    private func updateTrackDrag(trackID: UUID, translation: CGSize) {
+    private func updateTrackDrag(trackID: UUID, dragValue: TimelineLongPressDragValue) {
         guard let drag = activeTrackDrag, drag.trackID == trackID else { return }
         let stride = max(trackHeight + rowSpacing, 1)
         let minimumY = -CGFloat(drag.sourceIndex) * stride
         let maximumY = CGFloat(max(viewModel.project.tracks.count - 1 - drag.sourceIndex, 0)) * stride
         let clampedTranslation = CGSize(
             width: 0,
-            height: min(max(translation.height, minimumY), maximumY)
+            height: min(max(dragValue.translation.height + clipDragScrollOffset.height, minimumY), maximumY)
         )
         let targetIndex = targetTrackIndex(
             sourceTrackIndex: drag.sourceIndex,
@@ -391,7 +410,9 @@ struct TimelineTracksContent: View {
             trackID: trackID,
             sourceIndex: drag.sourceIndex,
             targetIndex: targetIndex,
-            translationY: clampedTranslation.height
+            translationY: clampedTranslation.height,
+            fingerTranslation: dragValue.translation,
+            fingerLocationInWindow: dragValue.locationInWindow
         )
     }
 

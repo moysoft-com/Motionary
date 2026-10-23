@@ -2,8 +2,8 @@
 
 import CoreGraphics
 import Foundation
-import os
 import SwiftUI
+import os
 
 struct TimelineViewportWindow: Equatable, Sendable {
     var timeRange: ClosedRange<Double>
@@ -98,8 +98,7 @@ final class TimelineViewportState: ObservableObject {
             configuration.trackCount
         )
         let retainedTrackRange: Range<Int> =
-            max(firstVisibleTrack - 1, 0)
-            ..< min(max(lastVisibleTrack + 1, 0), configuration.trackCount)
+            max(firstVisibleTrack - 1, 0)..<min(max(lastVisibleTrack + 1, 0), configuration.trackCount)
 
         if !force,
             window.contains(timeRange: retainedVisibleRange),
@@ -121,8 +120,7 @@ final class TimelineViewportState: ObservableObject {
             )
         )
         let requestedTrackRange =
-            max(firstVisibleTrack - 3, 0)
-            ..< min(max(lastVisibleTrack + 3, 0), configuration.trackCount)
+            max(firstVisibleTrack - 3, 0)..<min(max(lastVisibleTrack + 3, 0), configuration.trackCount)
         let updated = TimelineViewportWindow(
             timeRange: requestedRange,
             trackRange: requestedTrackRange
@@ -163,6 +161,7 @@ struct TimelineClipDragState: Equatable {
     let selectedClipIDBeforeDrag: UUID?
     let selectedTrackIDBeforeDrag: UUID?
     let fingerLocationInWindow: CGPoint?
+    var fingerTranslation: CGSize = .zero
 }
 
 struct TimelineTrackDragState: Equatable {
@@ -170,4 +169,6 @@ struct TimelineTrackDragState: Equatable {
     let sourceIndex: Int
     let targetIndex: Int
     let translationY: CGFloat
+    var fingerTranslation: CGSize = .zero
+    var fingerLocationInWindow: CGPoint? = nil
 }

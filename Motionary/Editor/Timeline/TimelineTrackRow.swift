@@ -51,7 +51,7 @@ struct TimelineTrackRow: View {
                 onTrackDragChanged: onTrackDragChanged,
                 onTrackDragEnded: onTrackDragEnded
             )
-                .zIndex(300)
+            .zIndex(300)
 
             if let backgroundRange = visibleTrackBackgroundRange {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -120,7 +120,7 @@ struct TimelineTrackRow: View {
             value: trackReorderOffset
         )
         .zIndex(
-                activeTrackDrag?.trackID == track.id
+            activeTrackDrag?.trackID == track.id
                 ? 200
                 : (items.contains { $0.id == selectedClipID } ? 100 : 0)
         )
@@ -173,6 +173,8 @@ private struct TimelineTrackHeader: View {
                 TimelineLongPressInteractionTarget(
                     minimumPressDuration: 0.32,
                     allowableMovement: 16,
+                    accessibilityIdentifier: "timeline-track-\(track.id.uuidString)",
+                    accessibilityLabel: track.name,
                     onTap: onSelectTrack,
                     onDoubleTap: {
                         EditorHaptics.tap()

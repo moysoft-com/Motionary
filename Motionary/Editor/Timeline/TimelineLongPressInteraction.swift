@@ -6,6 +6,8 @@ import UIKit
 struct TimelineLongPressInteractionTarget: UIViewRepresentable {
     let minimumPressDuration: TimeInterval
     let allowableMovement: CGFloat
+    var accessibilityIdentifier: String = ""
+    var accessibilityLabel: String = "Timeline item"
     let onTap: () -> Void
     var onDoubleTap: (() -> Void)? = nil
     let onLongPressBegan: () -> Void
@@ -17,17 +19,26 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIView {
-        let view = InteractionView()
+        let view = TimelineAccessibleInteractionView()
+        view.onActivate = { [weak coordinator = context.coordinator] in
+            coordinator?.parent.onTap()
+            return coordinator != nil
+        }
         view.backgroundColor = .clear
         view.isUserInteractionEnabled = true
+        view.isAccessibilityElement = true
+        view.accessibilityIdentifier = accessibilityIdentifier
+        view.accessibilityLabel = accessibilityLabel
+        view.accessibilityTraits = .button
 
-        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        let tap = TimelineTapGestureRecognizer(
+            target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         tap.cancelsTouchesInView = false
         tap.delegate = context.coordinator
         view.addGestureRecognizer(tap)
 
         if onDoubleTap != nil {
-            let doubleTap = UITapGestureRecognizer(
+            let doubleTap = TimelineTapGestureRecognizer(
                 target: context.coordinator,
                 action: #selector(Coordinator.handleDoubleTap(_:))
             )
@@ -41,7 +52,8 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
         let longPress = UILongPressGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
         longPress.minimumPressDuration = minimumPressDuration
-        longPress.allowableMovement = allowableMovement
+        longPress.allowableMovement = min(allowableMovement, TimelineGestureIntent.selectionSlop)
+        longPress.numberOfTouchesRequired = 1
         longPress.cancelsTouchesInView = false
         longPress.delegate = context.coordinator
         view.addGestureRecognizer(longPress)
@@ -52,10 +64,16 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.parent = self
+        uiView.accessibilityIdentifier = accessibilityIdentifier
+        uiView.accessibilityLabel = accessibilityLabel
         if let longPress = uiView.gestureRecognizers?.compactMap({ $0 as? UILongPressGestureRecognizer }).first {
             longPress.minimumPressDuration = minimumPressDuration
-            longPress.allowableMovement = allowableMovement
+            longPress.allowableMovement = min(allowableMovement, TimelineGestureIntent.selectionSlop)
         }
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.cancelActiveDrag()
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
@@ -68,12 +86,12 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended else { return }
+            guard recognizer.state == .ended, !hasActiveScroll(in: recognizer.view) else { return }
             parent.onTap()
         }
 
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended else { return }
+            guard recognizer.state == .ended, !hasActiveScroll(in: recognizer.view) else { return }
             parent.onDoubleTap?()
         }
 
@@ -100,88 +118,122 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
             case .ended:
                 guard isActive else { return }
                 isActive = false
-                (view as? InteractionView)?.resetTouchTracking()
                 parent.onLongPressEnded(true)
             case .cancelled, .failed:
                 guard isActive else { return }
                 isActive = false
-                (view as? InteractionView)?.resetTouchTracking()
                 parent.onLongPressEnded(false)
             default:
                 break
             }
         }
 
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard gestureRecognizer is UILongPressGestureRecognizer,
-                let view = gestureRecognizer.view as? InteractionView,
-                let translation = view.touchTranslation
-            else {
-                return true
-            }
+        func cancelActiveDrag() {
+            guard isActive else { return }
+            isActive = false
+            parent.onLongPressEnded(false)
+        }
 
-            let horizontal = abs(translation.width)
-            let vertical = abs(translation.height)
-            if horizontal > 12, horizontal > vertical * 1.35 {
-                return false
+        private func hasActiveScroll(in view: UIView?) -> Bool {
+            var ancestor = view?.superview
+            while let current = ancestor {
+                if let scroll = current as? UIScrollView,
+                    scroll.isDragging || scroll.isDecelerating || scroll.isZooming
+                {
+                    return true
+                }
+                ancestor = current.superview
             }
-            return true
+            return false
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            // A touch used to stop momentum must not later select or lift a layer.
+            !hasActiveScroll(in: gestureRecognizer.view)
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            !hasActiveScroll(in: gestureRecognizer.view)
         }
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
-            otherGestureRecognizer is UIPanGestureRecognizer
+            // A scroll that wins must invalidate tap/hold for the entire touch sequence.
+            // A hold that wins first owns the subsequent drag instead.
+            false
         }
     }
+}
 
-    final class InteractionView: UIView {
-        var initialTouchLocation: CGPoint?
-        private var latestTouchLocation: CGPoint?
+/// Tracks the furthest excursion, so moving out and back never becomes a tap.
+struct TimelineGestureIntent {
+    static let selectionSlop: CGFloat = 6
+    static let directionSlop: CGFloat = 3
+    private(set) var maximumDistance: CGFloat = 0
 
-        var touchTranslation: CGSize? {
-            guard let initialTouchLocation, let latestTouchLocation else { return nil }
-            return CGSize(
-                width: latestTouchLocation.x - initialTouchLocation.x,
-                height: latestTouchLocation.y - initialTouchLocation.y
-            )
-        }
+    mutating func record(_ translation: CGSize) {
+        maximumDistance = max(maximumDistance, hypot(translation.width, translation.height))
+    }
 
-        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let touch = touches.first {
-                let location = touch.location(in: self)
-                initialTouchLocation = location
-                latestTouchLocation = location
+    var permitsSelection: Bool { maximumDistance <= Self.selectionSlop }
+
+    static func axis(for translation: CGSize) -> Axis? {
+        guard max(abs(translation.width), abs(translation.height)) >= directionSlop else { return nil }
+        return abs(translation.width) > abs(translation.height) ? .horizontal : .vertical
+    }
+}
+
+final class TimelineTapGestureRecognizer: UITapGestureRecognizer {
+    private var startLocation: CGPoint?
+    private var intent = TimelineGestureIntent()
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        startLocation = touches.first?.location(in: view?.window)
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard recordMovement(touches, event: event) else { return }
+        super.touchesMoved(touches, with: event)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard recordMovement(touches, event: event) else { return }
+        super.touchesEnded(touches, with: event)
+    }
+
+    private func recordMovement(_ touches: Set<UITouch>, event: UIEvent) -> Bool {
+        if let startLocation, let touch = touches.first {
+            for sample in event.coalescedTouches(for: touch) ?? [touch] {
+                let location = sample.location(in: view?.window)
+                intent.record(CGSize(width: location.x - startLocation.x, height: location.y - startLocation.y))
             }
-            super.touchesBegan(touches, with: event)
         }
+        if !intent.permitsSelection, state == .possible {
+            state = .failed
+            return false
+        }
+        return true
+    }
 
-        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-            if let touch = touches.first {
-                latestTouchLocation = touch.location(in: self)
-            }
-            super.touchesMoved(touches, with: event)
-        }
-
-        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-            super.touchesEnded(touches, with: event)
-            resetTouchTracking()
-        }
-
-        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-            super.touchesCancelled(touches, with: event)
-            resetTouchTracking()
-        }
-
-        func resetTouchTracking() {
-            initialTouchLocation = nil
-            latestTouchLocation = nil
-        }
+    override func reset() {
+        super.reset()
+        startLocation = nil
+        intent = TimelineGestureIntent()
     }
 }
 
 struct TimelineLongPressDragValue {
     let translation: CGSize
     let locationInWindow: CGPoint
+}
+
+private final class TimelineAccessibleInteractionView: UIView {
+    var onActivate: (() -> Bool)?
+
+    override func accessibilityActivate() -> Bool {
+        onActivate?() ?? false
+    }
 }

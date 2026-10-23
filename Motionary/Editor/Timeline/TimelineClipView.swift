@@ -45,9 +45,10 @@ struct TimelineItemBlock: View {
         let mediaSampleWidth = trimBaseline.map {
             CGFloat(timelineDisplayDuration(for: $0)) * pixelsPerSecond
         }
-        let mediaSampleOffsetX = trimBaseline.map {
-            CGFloat($0.timelineStart - previewItem.timelineStart) * pixelsPerSecond
-        } ?? 0
+        let mediaSampleOffsetX =
+            trimBaseline.map {
+                CGFloat($0.timelineStart - previewItem.timelineStart) * pixelsPerSecond
+            } ?? 0
         let displayDuration = timelineDisplayDuration(for: previewItem)
         let displayWidth = max(CGFloat(displayDuration) * pixelsPerSecond, 6)
         let displayOffsetX =
@@ -130,6 +131,8 @@ struct TimelineItemBlock: View {
                 TimelineLongPressInteractionTarget(
                     minimumPressDuration: 0.34,
                     allowableMovement: 16,
+                    accessibilityIdentifier: "timeline-item-\(item.id.uuidString)",
+                    accessibilityLabel: timelineItemTitle(for: item),
                     onTap: {
                         guard !isEditing else { return }
                         EditorHaptics.selection()
@@ -153,15 +156,15 @@ struct TimelineItemBlock: View {
         .overlay(alignment: .leading) {
             if isSelected && allowsClipInteraction && !isDragSourceHidden {
                 TrimHandle(edge: .leading, height: height, visibleWidth: selectionExtension)
+                    .overlay { trimInteraction(isStart: true) }
                     .offset(x: -(TrimHandle.hitWidth + selectionExtension) * 0.5)
-                    .gesture(trimStartGesture)
             }
         }
         .overlay(alignment: .trailing) {
             if isSelected && allowsClipInteraction && !isDragSourceHidden {
                 TrimHandle(edge: .trailing, height: height, visibleWidth: selectionExtension)
+                    .overlay { trimInteraction(isStart: false) }
                     .offset(x: (TrimHandle.hitWidth + selectionExtension) * 0.5)
-                    .gesture(trimEndGesture)
             }
         }
         .offset(x: displayOffsetX)
@@ -200,54 +203,50 @@ struct TimelineItemBlock: View {
         }
     }
 
-    private var trimStartGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
-            .onChanged { value in
+    private func trimInteraction(isStart: Bool) -> some View {
+        TimelineTrimInteractionTarget(
+            accessibilityIdentifier: "timeline-trim-\(item.id.uuidString)-\(isStart ? "start" : "end")",
+            onChanged: { translation in
                 let baseline = beginTrimIfNeeded()
-                let seconds = Double(value.translation.width / max(pixelsPerSecond, 1))
-                guard let result = onPreviewTrimStart(seconds, baseline) else { return }
+                let seconds = Double(translation / max(pixelsPerSecond, 1))
+                let result =
+                    isStart
+                    ? onPreviewTrimStart(seconds, baseline)
+                    : onPreviewTrimEnd(seconds, baseline)
+                guard let result else { return }
                 trimPreview = TimelineTrimPreview(
-                    item: baseline.trimmingStart(by: result.appliedDelta),
+                    item: isStart
+                        ? baseline.trimmingStart(by: result.appliedDelta)
+                        : baseline.trimmingEnd(by: result.appliedDelta),
                     result: result
                 )
                 onSnapGuideChanged(result.snapped ? result.edgeTime : nil)
-                updateSnapHaptic(kind: "trim-start", snapped: result.snapped, value: result.edgeTime)
-            }
-            .onEnded { value in
-                if let trimBaseline {
-                    let seconds = Double(value.translation.width / max(pixelsPerSecond, 1))
-                    let committedDelta = trimPreview?.result.appliedDelta ?? seconds
-                    let result = onTrimStart(committedDelta, trimBaseline, true)
-                    committedInteractiveEdit = true
-                    updateSnapHaptic(kind: "trim-start", snapped: result?.snapped == true, value: result?.edgeTime)
-                }
-                finishTimelineGesture()
-            }
-    }
-
-    private var trimEndGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .global)
-            .onChanged { value in
-                let baseline = beginTrimIfNeeded()
-                let seconds = Double(value.translation.width / max(pixelsPerSecond, 1))
-                guard let result = onPreviewTrimEnd(seconds, baseline) else { return }
-                trimPreview = TimelineTrimPreview(
-                    item: baseline.trimmingEnd(by: result.appliedDelta),
-                    result: result
+                updateSnapHaptic(
+                    kind: isStart ? "trim-start" : "trim-end",
+                    snapped: result.snapped,
+                    value: result.edgeTime
                 )
-                onSnapGuideChanged(result.snapped ? result.edgeTime : nil)
-                updateSnapHaptic(kind: "trim-end", snapped: result.snapped, value: result.edgeTime)
-            }
-            .onEnded { value in
-                if let trimBaseline {
-                    let seconds = Double(value.translation.width / max(pixelsPerSecond, 1))
-                    let committedDelta = trimPreview?.result.appliedDelta ?? seconds
-                    let result = onTrimEnd(committedDelta, trimBaseline, true)
-                    committedInteractiveEdit = true
-                    updateSnapHaptic(kind: "trim-end", snapped: result?.snapped == true, value: result?.edgeTime)
+            },
+            onEnded: { translation, commit in
+                if commit, let trimBaseline {
+                    let seconds = Double(translation / max(pixelsPerSecond, 1))
+                    // Re-evaluate the final finger position; the final move may arrive
+                    // with touchesEnded rather than a preceding touchesMoved callback.
+                    let preview =
+                        isStart
+                        ? onPreviewTrimStart(seconds, trimBaseline)
+                        : onPreviewTrimEnd(seconds, trimBaseline)
+                    if let preview {
+                        let result =
+                            isStart
+                            ? onTrimStart(preview.appliedDelta, trimBaseline, true)
+                            : onTrimEnd(preview.appliedDelta, trimBaseline, true)
+                        committedInteractiveEdit = result != nil
+                    }
                 }
                 finishTimelineGesture()
             }
+        )
     }
 
     private func beginTrimIfNeeded() -> TimelineItem {
@@ -531,7 +530,8 @@ private func timelineItemTitle(for item: TimelineItem) -> String {
 }
 
 private func timelineFirstLine(of text: String) -> String {
-    let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+    let firstLine =
+        text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         .first
         .map(String.init)?
         .trimmingCharacters(in: .whitespacesAndNewlines)

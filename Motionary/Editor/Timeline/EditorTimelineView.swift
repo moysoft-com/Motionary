@@ -1,7 +1,7 @@
 // Timeline root layout, scrolling surface, playhead, and empty state.
 
-import SwiftUI
 import AVFoundation
+import SwiftUI
 import UIKit
 
 struct CoreTimelineView: View {
@@ -91,6 +91,7 @@ struct CoreTimelineLayout: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .motionaryGlass(cornerRadius: 20)
+        .accessibilityIdentifier("editor-timeline")
         .background {
             TimelineDisplayLink(
                 player: viewModel.player,
@@ -136,7 +137,8 @@ struct CoreTimelineLayout: View {
             contentRevision: timelineContentRevision,
             contentSize: CGSize(width: contentWidth, height: max(contentHeight, size.height)),
             isScrollDisabled: activeClipDrag != nil || activeTrackDrag != nil,
-            autoScrollTarget: clipAutoScrollTarget,
+            autoScrollTarget: dragAutoScrollTarget,
+            allowsHorizontalAutoScroll: activeTrackDrag == nil,
             onAutoScroll: { delta in
                 clipDragScrollOffset.width += delta.width
                 clipDragScrollOffset.height += delta.height
@@ -185,6 +187,9 @@ struct CoreTimelineLayout: View {
         .onChange(of: activeClipDrag?.clipID) { _, _ in
             clipDragScrollOffset = .zero
         }
+        .onChange(of: activeTrackDrag?.trackID) { _, _ in
+            clipDragScrollOffset = .zero
+        }
         .mask(alignment: .bottom) {
             Rectangle()
                 .frame(height: max(size.height - 38, 0))
@@ -206,8 +211,8 @@ struct CoreTimelineLayout: View {
         viewModel.timelineHostingRevision
     }
 
-    private var clipAutoScrollTarget: CGPoint? {
-        activeClipDrag?.fingerLocationInWindow
+    private var dragAutoScrollTarget: CGPoint? {
+        activeClipDrag?.fingerLocationInWindow ?? activeTrackDrag?.fingerLocationInWindow
     }
 
     private var playhead: some View {

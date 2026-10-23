@@ -1,22 +1,24 @@
 // Application entry point and root tab structure. 😳
 
-import SwiftUI
 import FirebaseAppCheck
 import FirebaseCore
+import SwiftUI
 
 private final class MotionaryAppAttestProviderFactory: NSObject, AppCheckProviderFactory {
     func createProvider(with app: FirebaseApp) -> AppCheckProvider? {
-        return AppAttestProvider(app: app)  
+        return AppAttestProvider(app: app)
     }
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication,
-    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
         #if DEBUG
-        AppCheck.setAppCheckProviderFactory(AppCheckDebugProviderFactory())
+            AppCheck.setAppCheckProviderFactory(AppCheckDebugProviderFactory())
         #else
-        AppCheck.setAppCheckProviderFactory(MotionaryAppAttestProviderFactory())
+            AppCheck.setAppCheckProviderFactory(MotionaryAppAttestProviderFactory())
         #endif
         FirebaseApp.configure()
         return true
@@ -32,20 +34,32 @@ struct MainView: App {
 
     var body: some Scene {
         WindowGroup {
-            TabView {
-                Tab {
-                    HomeView()
-                        .labelStyle(.automatic)
-                } label: {
-                    Image("MotionarySF")
+            #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("--timeline-gesture-tests") {
+                    TimelineGestureTestScene()
+                } else {
+                    appTabs
                 }
-
-                Tab("Settings", systemImage: "gearshape.fill") {
-                    SettingsView()
-                }
-            }
-            .labelStyle(.iconOnly)
-            .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
+            #else
+                appTabs
+            #endif
         }
+    }
+
+    private var appTabs: some View {
+        TabView {
+            Tab {
+                HomeView()
+                    .labelStyle(.automatic)
+            } label: {
+                Image("MotionarySF")
+            }
+
+            Tab("Settings", systemImage: "gearshape.fill") {
+                SettingsView()
+            }
+        }
+        .labelStyle(.iconOnly)
+        .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
     }
 }
