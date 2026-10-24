@@ -114,6 +114,7 @@ extension View {
 
 /// A reusable Motionary-styled decimal number pad presented from any label.
 struct MotionaryNumberPadPopover<Label: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Binding private var isPresented: Bool
     private let onValueChange: (Double) -> Void
     private let label: () -> Label
@@ -140,6 +141,7 @@ struct MotionaryNumberPadPopover<Label: View>: View {
         .buttonStyle(.plain)
         .popover(isPresented: $isPresented, arrowEdge: .bottom) {
             numberPad
+                .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
                 .presentationCompactAdaptation(.popover)
                 .presentationBackground(.clear)
         }
@@ -165,13 +167,19 @@ struct MotionaryNumberPadPopover<Label: View>: View {
                 key(systemName: "delete.left") { deleteLast() }
             }
 
-            Button("Done") {
+            Button {
                 isPresented = false
+            } label: {
+                Text("Done")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(MotionaryTheme.foregroundOnAccent)
+                    .frame(maxWidth: .infinity, minHeight: 42)
+                    .background(
+                        MotionaryTheme.accent,
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                    .contentShape(Rectangle())
             }
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(MotionaryTheme.foregroundOnAccent)
-            .frame(maxWidth: .infinity, minHeight: 42)
-            .background(MotionaryTheme.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .buttonStyle(.plain)
         }
         .padding(MotionaryDesign.Spacing.xl)

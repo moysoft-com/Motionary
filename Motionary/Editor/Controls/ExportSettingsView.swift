@@ -7,6 +7,7 @@ struct ExportSettingsView: View {
     let onExport: (VideoExportSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var settings: VideoExportSettings
     @State private var resolutionPreset: ExportResolutionPreset = .project
     @State private var showAdvanced: Bool = false
@@ -115,6 +116,9 @@ struct ExportSettingsView: View {
                     .font(.caption)
                     .opacity(0.5)
             }
+            .scrollContentBackground(.hidden)
+            .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
+            .tint(MotionaryTheme.accent)
             .navigationTitle("Export")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -37,7 +37,7 @@ struct EditSuggestionView: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
+            .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
             .navigationTitle("Edit Suggestion")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

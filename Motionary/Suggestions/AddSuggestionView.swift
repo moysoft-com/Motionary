@@ -68,7 +68,7 @@ struct AddSuggestionView: View {
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
-            .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
+            .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
             .navigationTitle("New Suggestion")
             .navigationBarTitleDisplayMode(.inline)
             .tint(MotionaryTheme.accent)

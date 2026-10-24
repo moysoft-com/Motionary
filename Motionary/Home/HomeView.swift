@@ -18,6 +18,8 @@ struct HomeView: View {
     @State private var selectedProject: ProjectEditorSelection?
     @State private var editingProjectID: UUID?
     @State private var newProjectMediaItems: [PhotosPickerItem] = []
+    private let newProjectRequest: UUID?
+    @State private var isMediaPickerPresented = false
     @State private var isCreatingProject = false
     @State private var errorMessage: String?
 
@@ -25,7 +27,8 @@ struct HomeView: View {
         GridItem(.adaptive(minimum: 156), spacing: 12)
     ]
 
-    init(projectStore: ProjectStore = ProjectStore()) {
+    init(projectStore: ProjectStore = ProjectStore(), newProjectRequest: UUID? = nil) {
+        self.newProjectRequest = newProjectRequest
         _projectStore = StateObject(wrappedValue: projectStore)
     }
 
@@ -121,6 +124,17 @@ struct HomeView: View {
                 .transition(.opacity)
                 .zIndex(100)
             }
+        }
+        .photosPicker(
+            isPresented: $isMediaPickerPresented,
+            selection: $newProjectMediaItems,
+            matching: .any(of: [.images, .videos])
+        )
+        .onChange(of: newProjectRequest, initial: true) { _, request in
+            guard request != nil, !isCreatingProject else { return }
+            selectedProject = nil
+            editingProjectID = nil
+            isMediaPickerPresented = true
         }
         .animation(.easeInOut(duration: 0.18), value: selectedProject?.id)
     }
