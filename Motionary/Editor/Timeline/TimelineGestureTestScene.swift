@@ -69,6 +69,7 @@
                         } ?? -1)
                 ).accessibilityIdentifier("test-first-track-index")
                 Text(playback.isPlaying ? "playing" : "paused").accessibilityIdentifier("test-playback")
+                Text(String(format: "%.3f", playback.currentTime)).accessibilityIdentifier("test-time")
             }
             .font(.caption2)
         }

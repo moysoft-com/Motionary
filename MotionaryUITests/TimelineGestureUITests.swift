@@ -26,11 +26,21 @@ final class TimelineGestureUITests: XCTestCase {
         app.buttons["Set playing"].tap()
         let point = itemPoint(row: 2)
         point.press(
-            forDuration: 0.01, thenDragTo: point.withOffset(CGVector(dx: 2, dy: -70)),
+            forDuration: 0.01, thenDragTo: point.withOffset(CGVector(dx: 0, dy: -70)),
             withVelocity: .slow, thenHoldForDuration: 0)
         XCTAssertEqual(app.staticTexts["test-selection"].label, "none")
         XCTAssertEqual(app.staticTexts["test-playback"].label, "playing")
         XCTAssertEqual(app.staticTexts["test-start"].label, "0.500")
+    }
+
+    func testDiagonalScrollMovesTimeAndTracksWithoutSelectingAnItem() {
+        let item = app.buttons["timeline-item-00000000-0000-0000-0000-000000000003"]
+        let originalY = item.frame.minY
+        let point = itemPoint(row: 2)
+        point.press(forDuration: 0.01, thenDragTo: point.withOffset(CGVector(dx: -44, dy: -70)))
+        XCTAssertEqual(app.staticTexts["test-selection"].label, "none")
+        XCTAssertGreaterThan(Double(app.staticTexts["test-time"].label) ?? 0, 0.1)
+        XCTAssertLessThan(item.frame.minY, originalY - 20)
     }
 
     func testLongPressStillMovesClip() {

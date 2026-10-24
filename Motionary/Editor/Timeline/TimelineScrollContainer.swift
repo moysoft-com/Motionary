@@ -205,9 +205,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         var isProgrammaticScroll = false
         var isUserInteracting = false
         private var isPinching = false
-        private var scrollAxis: Axis?
         private var scrollStartX: CGFloat = 0
-        private var scrollStartY: CGFloat = 0
         private var isScrubSession = false
         private var isApplyingPinchScale = false
         private var hostedContentRevision: Int
@@ -478,21 +476,16 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             beginScroll(
                 in: scrollView,
-                translation: scrollView.panGestureRecognizer.translation(in: scrollView),
-                velocity: scrollView.panGestureRecognizer.velocity(in: scrollView)
+                translation: scrollView.panGestureRecognizer.translation(in: scrollView)
             )
         }
 
-        func beginScroll(in scrollView: UIScrollView, translation: CGPoint, velocity: CGPoint) {
+        func beginScroll(in scrollView: UIScrollView, translation: CGPoint) {
             isUserInteracting = true
             scrollStartX = scrollView.contentOffset.x
-            scrollStartY = scrollView.contentOffset.y
-            scrollAxis =
-                parent.allowsVerticalScrolling
-                ? (TimelineGestureIntent.axis(for: CGSize(width: translation.x, height: translation.y))
-                    ?? TimelineGestureIntent.axis(for: CGSize(width: velocity.x, height: velocity.y)))
-                : .horizontal
-            isScrubSession = scrollAxis == .horizontal
+            // Horizontal and vertical scrolling can share the same pan. Only a
+            // horizontal component needs to start a playback scrub session.
+            isScrubSession = !parent.allowsVerticalScrolling || abs(translation.x) > 0.01
             if isScrubSession { parent.onScrubStart() }
         }
 
@@ -505,22 +498,6 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            if scrollAxis == .vertical, !isProgrammaticScroll, !isPinching,
-                abs(scrollView.contentOffset.x - scrollStartX) > 0.01
-            {
-                isProgrammaticScroll = true
-                scrollView.contentOffset.x = scrollStartX
-                isProgrammaticScroll = false
-                return
-            }
-            if scrollAxis == .horizontal, !isProgrammaticScroll, !isPinching,
-                abs(scrollView.contentOffset.y - scrollStartY) > 0.01
-            {
-                isProgrammaticScroll = true
-                scrollView.contentOffset.y = scrollStartY
-                isProgrammaticScroll = false
-                return
-            }
             if !isApplyingPinchScale {
                 publishHorizontalScrollOffset(
                     scrollView.contentOffset.x,
@@ -559,6 +536,13 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             }
             updateViewport(in: scrollView)
 
+            if !isPinching, !isProgrammaticScroll, isUserInteracting, !isScrubSession,
+                abs(scrollView.contentOffset.x - scrollStartX) > 0.01
+            {
+                // A pan may start vertically and later add horizontal movement.
+                isScrubSession = true
+                parent.onScrubStart()
+            }
             guard !isPinching, isScrubSession else { return }
             guard !isProgrammaticScroll, isUserInteracting || scrollView.isDragging || scrollView.isDecelerating else {
                 return
@@ -710,7 +694,6 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             scrubDisplayLink = nil
             if isScrubSession { parent.onScrubEnd(time) }
             isScrubSession = false
-            scrollAxis = nil
             isUserInteracting = false
         }
 

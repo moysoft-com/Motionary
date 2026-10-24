@@ -29,13 +29,13 @@ struct TimelineGestureTests {
     }
 
     @MainActor
-    @Test func verticalNavigationDoesNotStartScrubbingOrDriftHorizontally() {
+    @Test func pureVerticalNavigationDoesNotStartScrubbing() {
         var events: [String] = []
         let coordinator = makeScrollCoordinator { events.append($0) }
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
         scroll.contentSize = CGSize(width: 1_000, height: 1_000)
-        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 2, y: -40), velocity: .zero)
-        scroll.contentOffset = CGPoint(x: 12, y: 40)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 0, y: -40))
+        scroll.contentOffset = CGPoint(x: 0, y: 40)
         coordinator.scrollViewDidScroll(scroll)
         coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
         #expect(events.isEmpty)
@@ -44,12 +44,43 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    @Test func diagonalPanPreservesBothScrollAxes() {
+        var events: [String] = []
+        let coordinator = makeScrollCoordinator { events.append($0) }
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_000, height: 1_000)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: -20, y: -40))
+        scroll.contentOffset = CGPoint(x: 88, y: 120)
+        coordinator.scrollViewDidScroll(scroll)
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
+        #expect(scroll.contentOffset == CGPoint(x: 88, y: 120))
+        #expect(events == ["start", "change:1.0", "end:1.0"])
+    }
+
+    @MainActor
+    @Test func verticalPanCanAddHorizontalScrubbingWithoutLiftingTheFinger() {
+        var events: [String] = []
+        let coordinator = makeScrollCoordinator { events.append($0) }
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_000, height: 1_000)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 0, y: -40))
+        scroll.contentOffset = CGPoint(x: 0, y: 40)
+        coordinator.scrollViewDidScroll(scroll)
+        #expect(events.isEmpty)
+        scroll.contentOffset = CGPoint(x: 88, y: 120)
+        coordinator.scrollViewDidScroll(scroll)
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
+        #expect(scroll.contentOffset == CGPoint(x: 88, y: 120))
+        #expect(events == ["start", "change:1.0", "end:1.0"])
+    }
+
+    @MainActor
     @Test func horizontalScrubbingEndsOnceAndFlushesTheFinalTime() {
         var events: [String] = []
         let coordinator = makeScrollCoordinator { events.append($0) }
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
         scroll.contentSize = CGSize(width: 1_000, height: 1_000)
-        coordinator.beginScroll(in: scroll, translation: CGPoint(x: -40, y: 2), velocity: .zero)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: -40, y: 2))
         scroll.contentOffset.x = 88
         coordinator.scrollViewDidScroll(scroll)
         coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
@@ -63,7 +94,7 @@ struct TimelineGestureTests {
         var events: [String] = []
         let coordinator = makeScrollCoordinator { events.append($0) }
         let scroll = UIScrollView()
-        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 20, y: 0), velocity: .zero)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 20, y: 0))
         coordinator.stopInteractions(in: scroll)
         coordinator.stopInteractions(in: scroll)
         #expect(events == ["start", "end:0.0"])
