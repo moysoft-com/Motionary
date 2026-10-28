@@ -74,7 +74,7 @@ struct HomeView: View {
                 }
             }
             .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
-            .safeAreaBar(edge: .top) {
+            .motionaryTopBar {
                 dashboardHeader
                     .padding(18)
             }
@@ -158,7 +158,7 @@ struct HomeView: View {
                     .background {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .fill(MotionaryTheme.accent)
-                            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                     .labelStyle(.titleAndIcon)
             }
@@ -181,11 +181,11 @@ struct HomeView: View {
                     .padding(.vertical, 10)
                     .foregroundStyle(MotionaryTheme.foregroundOnAccent)
                     .background(MotionaryTheme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
         }
         .frame(maxWidth: .infinity, minHeight: 260)
-        .motionaryGlass(cornerRadius: 24)
     }
 
     private func createProject(from items: [PhotosPickerItem]) {

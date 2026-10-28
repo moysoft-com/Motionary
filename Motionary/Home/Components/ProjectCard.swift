@@ -103,7 +103,7 @@ struct ProjectCard: View {
                     }
                 }
             }
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: 6, style: .continuous))
 
         }
         .frame(maxWidth: .infinity)

@@ -1,9 +1,11 @@
-// Foreground matte generation using Vision, bidirectional optical flow, and HEVC with alpha.
+// Vision foreground mattes: orientation-correct PNGs for stills and stabilized alpha video.
 
 import AVFoundation
 import CoreGraphics
+import CoreImage
 import Foundation
 import ImageIO
+import UniformTypeIdentifiers
 import VideoToolbox
 import Vision
 
@@ -145,6 +147,14 @@ struct BackgroundRemovalService {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> BackgroundRemovalArtifact {
         try Task.checkCancellation()
+        // ImageIO handles stills directly; AVAssetReader cannot open PNG/HEIC/JPEG.
+        if let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
+            CGImageSourceGetCount(source) > 0 {
+            return try processStillImage(
+                source, sourceRange: sourceRange, destinationURL: destinationURL,
+                sourceFingerprint: sourceFingerprint, segmenter: segmenter, progress: progress
+            )
+        }
         let asset = AVURLAsset(url: sourceURL)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw BackgroundRemovalError.noVideoTrack
@@ -296,6 +306,51 @@ struct BackgroundRemovalService {
             sourceRange: sourceRange,
             sourceFingerprint: sourceFingerprint
         )
+    }
+
+    private static func processStillImage(
+        _ source: CGImageSource, sourceRange: TimeRangeValue, destinationURL: URL,
+        sourceFingerprint: String, segmenter: any ForegroundSegmenting,
+        progress: @escaping @Sendable (Double) -> Void
+    ) throws -> BackgroundRemovalArtifact {
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 2560,
+        ] as CFDictionary) else { throw BackgroundRemovalError.cannotReadSource }
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, image.width, image.height,
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+            &buffer) == kCVReturnSuccess, let buffer
+        else { throw BackgroundRemovalError.cannotCreateMatte }
+        let context = CIContext()
+        context.render(CIImage(cgImage: image), to: buffer)
+        progress(0.15)
+        try Task.checkCancellation()
+        let mask = try segmenter.mask(for: buffer, orientation: .up)
+        guard mask.width > 0, mask.height > 0,
+            mask.values.count == mask.width * mask.height
+        else { throw BackgroundRemovalError.cannotCreateMatte }
+        let bytes = mask.values.map { UInt8((min(max($0, 0), 1) * 255).rounded()) }
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData),
+            let maskImage = CGImage(width: mask.width, height: mask.height,
+                bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: mask.width,
+                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: 0),
+                provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+        else { throw BackgroundRemovalError.cannotCreateMatte }
+        let url = destinationURL.deletingPathExtension().appendingPathExtension("png")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let temporary = url.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        guard let destination = CGImageDestinationCreateWithURL(temporary as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw BackgroundRemovalError.cannotCreateMatte }
+        CGImageDestinationAddImage(destination, maskImage, nil)
+        guard CGImageDestinationFinalize(destination) else { throw BackgroundRemovalError.cannotCreateMatte }
+        try Task.checkCancellation()
+        try atomicallyInstall(temporary, at: url)
+        progress(1)
+        return BackgroundRemovalArtifact(url: url, sourceRange: sourceRange, sourceFingerprint: sourceFingerprint)
     }
 
     private static func imageOrientation(for transform: CGAffineTransform) -> CGImagePropertyOrientation {

@@ -26,8 +26,9 @@ extension EditorViewModel {
     }
 
     var selectedBackgroundRemovalArtifactIsReady: Bool {
-        guard case .media(let item) = selectedTimelineItem,
-            let artifact = project.mediaLibrary[item.mediaID]?.backgroundRemovalArtifact
+        guard case .media(let item) = selectedTimelineItem else { return false }
+        if let settings = item.visuals.backgroundRemoval, !settings.requiresForegroundMatte { return true }
+        guard let artifact = project.mediaLibrary[item.mediaID]?.backgroundRemovalArtifact
         else { return false }
         return !invalidBackgroundRemovalMediaIDs.contains(item.mediaID)
             && artifact.algorithmVersion == BackgroundRemovalArtifact.currentAlgorithmVersion
@@ -79,6 +80,25 @@ extension EditorViewModel {
         startBackgroundRemovalPreparation(for: item.id, force: false, enableAfterPreparation: true)
     }
 
+    func setSelectedBackgroundRemovalMode(_ mode: BackgroundRemovalMode) {
+        guard case .media(let media) = selectedTimelineItem,
+            media.mediaType == .image || media.mediaType == .video,
+            !isPerformingLongTask
+        else { return }
+        if mode == .automatic {
+            startBackgroundRemovalPreparation(for: media.id, force: false, enableAfterPreparation: true)
+            return
+        }
+        mutateProject { project in
+            guard var item = project.item(id: media.id), var visuals = item.editableVisuals else { return }
+            var settings = visuals.backgroundRemoval ?? BackgroundRemovalSettings()
+            settings.mode = mode
+            visuals.backgroundRemoval = settings
+            item.editableVisuals = visuals
+            project.replaceItem(id: item.id, with: item)
+        }
+    }
+
     func regenerateSelectedBackgroundRemoval() {
         guard case .media(let item) = selectedTimelineItem,
             item.mediaType == .image || item.mediaType == .video
@@ -103,6 +123,12 @@ extension EditorViewModel {
     func setSelectedBackgroundRemovalSettings(
         edgeRefinement: Double? = nil,
         feather: Double? = nil,
+        keyColor: RGBAColor? = nil,
+        tolerance: Double? = nil,
+        softness: Double? = nil,
+        spillSuppression: Double? = nil,
+        isInverted: Bool? = nil,
+        strokes: [BackgroundBrushStroke]? = nil,
         interactive: Bool = false
     ) {
         guard let itemID = selectedTimelineItemID else { return }
@@ -119,7 +145,14 @@ extension EditorViewModel {
             else { return }
             settings = BackgroundRemovalSettings(
                 edgeRefinement: edgeRefinement ?? settings.edgeRefinement,
-                feather: feather ?? settings.feather
+                feather: feather ?? settings.feather,
+                mode: settings.mode,
+                keyColor: keyColor ?? settings.keyColor,
+                tolerance: tolerance ?? settings.tolerance,
+                softness: softness ?? settings.softness,
+                spillSuppression: spillSuppression ?? settings.spillSuppression,
+                isInverted: isInverted ?? settings.isInverted,
+                strokes: strokes ?? settings.strokes
             )
             visuals.backgroundRemoval = settings
             item.editableVisuals = visuals
@@ -231,7 +264,7 @@ extension EditorViewModel {
     @discardableResult
     func prepareSelectedBackgroundRemovalExtensionIfNeeded() -> Bool {
         guard case .media(let item) = selectedTimelineItem,
-            item.visuals.backgroundRemoval != nil,
+            item.visuals.backgroundRemoval?.requiresForegroundMatte == true,
             !selectedBackgroundRemovalArtifactIsReady,
             !isPerformingLongTask
         else { return false }
@@ -270,7 +303,9 @@ extension EditorViewModel {
                 if enableAfterPreparation {
                     mutateProject { project in
                         guard var item = project.item(id: itemID), var visuals = item.editableVisuals else { return }
-                        visuals.backgroundRemoval = visuals.backgroundRemoval ?? BackgroundRemovalSettings()
+                        var settings = visuals.backgroundRemoval ?? BackgroundRemovalSettings()
+                        settings.mode = .automatic
+                        visuals.backgroundRemoval = settings
                         item.editableVisuals = visuals
                         project.replaceItem(id: itemID, with: item)
                     }
@@ -302,7 +337,7 @@ extension EditorViewModel {
         let matchingItems = project.tracks.flatMap(\.items).compactMap { item -> MediaTimelineItem? in
             guard case .media(let media) = item,
                 media.mediaID == includedItem.mediaID,
-                media.id == itemID || media.visuals.backgroundRemoval != nil
+                media.id == itemID || media.visuals.backgroundRemoval?.requiresForegroundMatte == true
             else { return nil }
             return media
         }
@@ -318,7 +353,7 @@ extension EditorViewModel {
     private func backgroundRemovalRequirements() -> [BackgroundRemovalRequirement] {
         let enabledItems = project.tracks.flatMap(\.items).compactMap { item -> MediaTimelineItem? in
             guard case .media(let media) = item,
-                media.visuals.backgroundRemoval != nil,
+                media.visuals.backgroundRemoval?.requiresForegroundMatte == true,
                 media.mediaType == .image || media.mediaType == .video
             else { return nil }
             return media
@@ -388,11 +423,10 @@ extension EditorViewModel {
                 invalidBackgroundRemovalMediaIDs.insert(requirement.mediaID)
             }
             if mustGenerate {
-                let destinationURL = artifact?.url
-                    ?? projectStore.derivedMediaURL(
-                        fileName: "remove-bg-\(requirement.mediaID.rawValue.uuidString).mov",
-                        projectID: projectID
-                    )
+                let destinationURL = projectStore.derivedMediaURL(
+                    fileName: "remove-bg-\(requirement.mediaID.rawValue.uuidString)-\(UUID().uuidString).mov",
+                    projectID: projectID
+                )
                 let baseProgress = Double(index) / Double(count)
                 let generated = try await BackgroundRemovalService().generateMatte(
                     sourceURL: requirement.sourceURL,

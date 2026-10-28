@@ -100,12 +100,45 @@ struct GlassPanelModifier<S: Shape>: ViewModifier {
             .background {
                 shape
                     .fill(Color.clear)
-                    .glassEffect(.regular, in: shape)
+                    .motionaryGlassEffect(in: shape)
             }
     }
 }
 
 extension View {
+    /// Uses native Liquid Glass where available and standard system material on earlier iOS versions.
+    @ViewBuilder
+    func motionaryGlassEffect<S: Shape>(in shape: S) -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular, in: shape)
+        } else {
+            background(.regularMaterial, in: shape)
+        }
+    }
+
+    /// Uses the platform's native prominent button appearance.
+    @ViewBuilder
+    func motionaryProminentButtonStyle() -> some View {
+        if #available(iOS 26.0, *) {
+            buttonStyle(.glassProminent)
+        } else {
+            buttonStyle(.borderedProminent)
+        }
+    }
+
+    /// Keeps custom headers integrated with the safe area on each supported iOS version.
+    @ViewBuilder
+    func motionaryTopBar<Bar: View>(@ViewBuilder content: () -> Bar) -> some View {
+        if #available(iOS 26.0, *) {
+            safeAreaBar(edge: .top, content: content)
+        } else {
+            safeAreaInset(edge: .top) {
+                content()
+                    .background(.bar)
+            }
+        }
+    }
+
     /// Wraps a view in the standard rounded Motionary glass surface.
     func motionaryGlass(cornerRadius: CGFloat = 18) -> some View {
         modifier(GlassPanelModifier(shape: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))

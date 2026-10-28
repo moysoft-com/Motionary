@@ -144,6 +144,12 @@ final class TimelineViewportState: ObservableObject {
 final class TimelineScrollPresentationState: ObservableObject {
     @Published private(set) var horizontalOffset: CGFloat = 0
     @Published private(set) var hasResolvedHorizontalOffset = false
+    @Published private(set) var verticalOffset: CGFloat = 0
+
+    func update(verticalOffset: CGFloat) {
+        guard abs(self.verticalOffset - verticalOffset) >= 0.5 else { return }
+        self.verticalOffset = verticalOffset
+    }
 
     func update(horizontalOffset: CGFloat) {
         hasResolvedHorizontalOffset = true

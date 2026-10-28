@@ -120,6 +120,7 @@ struct ShapeRasterLayout: Sendable, Equatable {
     static let maximumTextureDimension = GeneratedRasterPolicy.maximumTextureDimension
 
     let logicalSize: CGSize
+    let logicalRenderScale: CGFloat
     let logicalCornerRadius: CGFloat
     let rasterSize: CGSize
     let rasterCornerRadius: CGFloat
@@ -169,6 +170,7 @@ struct ShapeRasterLayout: Sendable, Equatable {
         let rasterHeight = max(ceil(logicalHeight * boundedScale.height), 1)
 
         self.logicalSize = logicalSize
+        self.logicalRenderScale = logicalScale
         self.logicalCornerRadius = logicalRadius
         self.rasterSize = CGSize(width: rasterWidth, height: rasterHeight)
         self.rasterCornerRadius = min(
@@ -590,6 +592,7 @@ extension RenderClipDescriptor {
         return RenderClipDescriptor(
             trackID: trackID,
             backgroundMaskTrackID: backgroundMaskTrackID,
+            backgroundMaskImageURL: backgroundMaskImageURL,
             stillImageURL: stillImageURL,
             stillImageCacheIdentity: stillImageCacheIdentity,
             clipID: clipID,
@@ -613,11 +616,36 @@ extension RenderClipDescriptor {
     }
 }
 
+/// The effect stack runs in a stable authored pixel grid before placement.
+/// Media uses its source pixels; generated and adjustment layers use project
+/// pixels. Output resolution and raster supersampling never alter that grid.
+struct LayerEffectCoordinates {
+    let renderScale: CGFloat
+    let inputTransform: CGAffineTransform
+
+    init(isGeneratedLayer: Bool, outputScale: CGFloat, rasterScaleCorrection: CGSize) {
+        guard isGeneratedLayer else {
+            renderScale = 1
+            inputTransform = .identity
+            return
+        }
+        renderScale = 1
+        // Run the complete stack in project pixels, including grain, scanlines,
+        // offsets and margins. Output and supersampling affect placement only.
+        let outputScale = max(outputScale, 0.000_001)
+        inputTransform = CGAffineTransform(
+            scaleX: max(rasterScaleCorrection.width, 0.000_001) / outputScale,
+            y: max(rasterScaleCorrection.height, 0.000_001) / outputScale
+        )
+    }
+}
+
 struct EffectRenderContext: Sendable {
     let compositionTime: Double
     let clipTime: Double
     let frameIndex: Int64
     let itemID: UUID
+    /// Input pixels per authored pixel, never the final export scale.
     let renderScale: CGFloat
     let quality: RenderQualityProfile
 

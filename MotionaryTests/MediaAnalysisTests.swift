@@ -1,6 +1,10 @@
 // Focused signal-analysis and source-to-timeline beat mapping tests.
 
 import Foundation
+import CoreImage
+import ImageIO
+import UniformTypeIdentifiers
+import AVFoundation
 import Testing
 
 @testable import Motionary
@@ -134,6 +138,86 @@ struct MediaAnalysisTests {
         }
     }
 
+    @Test func legacyBackgroundSettingsDecodeAsAutomatic() throws {
+        let settings = try JSONDecoder().decode(BackgroundRemovalSettings.self,
+            from: Data(#"{"edgeRefinement":0.2,"feather":0.35}"#.utf8))
+        #expect(settings.mode == .automatic)
+        #expect(settings.requiresForegroundMatte)
+        #expect(settings.strokes.isEmpty)
+        #expect(settings.feather == 0.35)
+    }
+
+    @Test func customCutoutSettingsRoundTrip() throws {
+        let settings = BackgroundRemovalSettings(mode: .custom, isInverted: true, strokes: [
+            BackgroundBrushStroke(points: [BackgroundBrushPoint(x: 0.25, y: 0.75)], diameter: 0.2, restores: false)
+        ])
+        let decoded = try JSONDecoder().decode(BackgroundRemovalSettings.self, from: JSONEncoder().encode(settings))
+        #expect(decoded == settings)
+        #expect(!decoded.requiresForegroundMatte)
+    }
+
+    @Test func stillBackgroundRemovalWritesReadableReusablePNGMatte() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("source.png")
+        let context = CIContext(options: [.useSoftwareRenderer: true])
+        let image = CIImage(color: CIColor(red: 1, green: 0, blue: 0)).cropped(to: CGRect(x: 0, y: 0, width: 64, height: 32))
+        try context.writePNGRepresentation(of: image, to: url, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        let artifact = try await BackgroundRemovalService(segmenter: HalfForegroundSegmenter()).generateMatte(
+            sourceURL: url, sourceRange: TimeRangeValue(start: 2, duration: 5),
+            destinationURL: directory.appendingPathComponent("matte.mov"))
+        #expect(artifact.url.pathExtension == "png")
+        #expect(artifact.covers(TimeRangeValue(start: 0, duration: 100)))
+        let matte = try #require(CIImage(contentsOf: artifact.url))
+        let result = BackgroundRemovalImageRenderer.apply(BackgroundRemovalSettings(),
+            matte: matte.applyingFilter("CIMaskToAlpha"), to: image)
+        #expect(alpha(result, x: 8, y: 16) > 240)
+        #expect(alpha(result, x: 56, y: 16) < 10)
+    }
+
+    @Test func chromaKeyPreservesForegroundAndSourceTransparency() {
+        let extent = CGRect(x: 0, y: 0, width: 64, height: 32)
+        let green = CIImage(color: CIColor(red: 0, green: 1, blue: 0)).cropped(to: extent)
+        let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0, alpha: 0.5))
+            .cropped(to: CGRect(x: 32, y: 0, width: 32, height: 32))
+        let source = red.composited(over: CIImage(color: .clear).cropped(to: extent))
+            .composited(over: green.cropped(to: CGRect(x: 0, y: 0, width: 32, height: 32)))
+        let settings = BackgroundRemovalSettings(mode: .chromaKey)
+        let result = BackgroundRemovalImageRenderer.apply(settings, matte: nil, to: source)
+        #expect(alpha(result, x: 8, y: 16) < 10)
+        #expect(abs(Int(alpha(result, x: 56, y: 16)) - 128) < 5)
+        #expect(BackgroundRemovalImageRenderer.keyAlpha(red: 0, green: 1, blue: 0, settings: settings) == 0)
+        #expect(BackgroundRemovalImageRenderer.keyAlpha(red: 1, green: 0, blue: 0, settings: settings) == 1)
+    }
+
+    @Test func customBrushErasesRestoresAndInvertsAtNormalizedCoordinates() {
+        let image = CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 100, height: 100))
+        let point = BackgroundBrushPoint(x: 0.25, y: 0.25)
+        var settings = BackgroundRemovalSettings(mode: .custom, strokes: [
+            BackgroundBrushStroke(points: [point], diameter: 0.3, restores: false)
+        ])
+        let erased = BackgroundRemovalImageRenderer.apply(settings, matte: nil, to: image)
+        #expect(alpha(erased, x: 25, y: 75) < 10)
+        #expect(alpha(erased, x: 75, y: 25) > 240)
+        settings.isInverted = true
+        let inverted = BackgroundRemovalImageRenderer.apply(settings, matte: nil, to: image)
+        #expect(alpha(inverted, x: 25, y: 75) > 240)
+        #expect(alpha(inverted, x: 75, y: 25) < 10)
+        settings.isInverted = false
+        settings.strokes.append(BackgroundBrushStroke(points: [point], diameter: 0.2, restores: true))
+        let restored = BackgroundRemovalImageRenderer.apply(settings, matte: nil, to: image)
+        #expect(alpha(restored, x: 25, y: 75) > 240)
+    }
+
+    private func alpha(_ image: CIImage, x: Int, y: Int) -> UInt8 {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        CIContext(options: [.useSoftwareRenderer: true]).render(image, toBitmap: &pixel,
+            rowBytes: 4, bounds: CGRect(x: x, y: y, width: 1, height: 1), format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB())
+        return pixel[3]
+    }
+
     private func syntheticBeatSamples(beatTimes: [Double], duration: Double) -> [Float] {
         let sampleRate = AudioBeatAnalysisService.sampleRate
         var samples = Array(repeating: Float(0), count: Int(sampleRate * duration))
@@ -145,5 +229,14 @@ struct MediaAnalysisTests {
             }
         }
         return samples
+    }
+}
+
+private struct HalfForegroundSegmenter: ForegroundSegmenting {
+    func mask(for pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation) throws -> ForegroundMaskFrame {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        return ForegroundMaskFrame(width: width, height: height,
+            values: (0..<(width * height)).map { $0 % width < width / 2 ? 1 : 0 })
     }
 }

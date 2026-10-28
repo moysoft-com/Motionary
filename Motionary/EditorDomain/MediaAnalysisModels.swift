@@ -2,25 +2,86 @@
 
 import Foundation
 
+enum BackgroundRemovalMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case automatic, chromaKey, custom
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .automatic: "Auto"
+        case .chromaKey: "Chroma key"
+        case .custom: "Custom"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .automatic: "person.crop.square"
+        case .chromaKey: "eyedropper"
+        case .custom: "paintbrush.pointed"
+        }
+    }
+}
+
+struct BackgroundBrushPoint: Codable, Equatable, Hashable, Sendable {
+    var x: Double
+    var y: Double
+}
+
+/// Brush coordinates and diameter are normalized to the untransformed source.
+struct BackgroundBrushStroke: Codable, Equatable, Hashable, Sendable {
+    var points: [BackgroundBrushPoint]
+    var diameter: Double
+    var restores: Bool
+}
+
 struct BackgroundRemovalSettings: Codable, Equatable, Sendable {
+    var mode: BackgroundRemovalMode
     var edgeRefinement: Double
     var feather: Double
+    var keyColor: RGBAColor
+    var tolerance: Double
+    var softness: Double
+    var spillSuppression: Double
+    var isInverted: Bool
+    var strokes: [BackgroundBrushStroke]
+    var requiresForegroundMatte: Bool { mode == .automatic }
 
-    init(edgeRefinement: Double = 0, feather: Double = 0) {
+    init(
+        edgeRefinement: Double = 0, feather: Double = 0,
+        mode: BackgroundRemovalMode = .automatic,
+        keyColor: RGBAColor = RGBAColor(red: 0, green: 1, blue: 0),
+        tolerance: Double = 0.3, softness: Double = 0.1,
+        spillSuppression: Double = 0.5, isInverted: Bool = false,
+        strokes: [BackgroundBrushStroke] = []
+    ) {
+        self.mode = mode
         self.edgeRefinement = Self.bounded(edgeRefinement, to: -1...1)
         self.feather = Self.bounded(feather, to: 0...1)
+        self.keyColor = keyColor
+        self.tolerance = Self.bounded(tolerance, to: 0...1)
+        self.softness = Self.bounded(softness, to: 0...1)
+        self.spillSuppression = Self.bounded(spillSuppression, to: 0...1)
+        self.isInverted = isInverted
+        self.strokes = strokes
     }
 
     private enum CodingKeys: String, CodingKey {
-        case edgeRefinement
-        case feather
+        case mode, edgeRefinement, feather, keyColor, tolerance, softness
+        case spillSuppression, isInverted, strokes
     }
 
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            edgeRefinement: try container.decodeIfPresent(Double.self, forKey: .edgeRefinement) ?? 0,
-            feather: try container.decodeIfPresent(Double.self, forKey: .feather) ?? 0
+            edgeRefinement: try c.decodeIfPresent(Double.self, forKey: .edgeRefinement) ?? 0,
+            feather: try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0,
+            mode: try c.decodeIfPresent(BackgroundRemovalMode.self, forKey: .mode) ?? .automatic,
+            keyColor: try c.decodeIfPresent(RGBAColor.self, forKey: .keyColor)
+                ?? RGBAColor(red: 0, green: 1, blue: 0),
+            tolerance: try c.decodeIfPresent(Double.self, forKey: .tolerance) ?? 0.3,
+            softness: try c.decodeIfPresent(Double.self, forKey: .softness) ?? 0.1,
+            spillSuppression: try c.decodeIfPresent(Double.self, forKey: .spillSuppression) ?? 0.5,
+            isInverted: try c.decodeIfPresent(Bool.self, forKey: .isInverted) ?? false,
+            strokes: try c.decodeIfPresent([BackgroundBrushStroke].self, forKey: .strokes) ?? []
         )
     }
 
@@ -51,7 +112,7 @@ struct BackgroundRemovalArtifact: Codable, Equatable, Sendable {
     }
 
     func covers(_ range: TimeRangeValue, tolerance: Double = 0.001) -> Bool {
-        sourceRange.start <= range.start + tolerance
+        url.pathExtension.lowercased() == "png" || sourceRange.start <= range.start + tolerance
             && sourceRange.end >= range.end - tolerance
     }
 }

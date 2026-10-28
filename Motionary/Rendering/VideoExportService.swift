@@ -3,6 +3,7 @@
 @preconcurrency import AVFoundation
 import Foundation
 import Photos
+import UIKit
 
 enum ExportVideoCodec: String, CaseIterable, Identifiable {
     case h264
@@ -69,6 +70,7 @@ enum VideoExportError: LocalizedError {
     case unsupportedConfiguration(String)
     case exportFailed(String)
     case photoLibraryAccessDenied
+    case photoLibraryIncompatibleVideo
 
     var errorDescription: String? {
         switch self {
@@ -88,6 +90,8 @@ enum VideoExportError: LocalizedError {
             message
         case .photoLibraryAccessDenied:
             "Allow Motionary to add videos to your Photos library in Settings."
+        case .photoLibraryIncompatibleVideo:
+            "Photos does not support this video configuration on your device. Try HEVC for 4K, or save the exported video to Files."
         }
     }
 }
@@ -250,12 +254,15 @@ struct VideoExportService {
                 "The selected \(settings.container.title) container is unavailable: \(error.localizedDescription)"
             )
         }
-        let compression: [String: Any] = [
+        var compression: [String: Any] = [
             AVVideoAverageBitRateKey: settings.videoBitrate,
             AVVideoExpectedSourceFrameRateKey: settings.frameRate,
             AVVideoMaxKeyFrameIntervalKey: Int(settings.frameRate * 2),
             AVVideoAllowFrameReorderingKey: true
         ]
+        if settings.codec == .h264 {
+            compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+        }
         let videoSettings: [String: Any] = [
             AVVideoCodecKey: settings.codec.avCodec,
             AVVideoWidthKey: settings.width,
@@ -707,8 +714,31 @@ enum PhotoLibraryExportService {
             throw VideoExportError.photoLibraryAccessDenied
         }
 
-        try await PHPhotoLibrary.shared().performChanges {
-            PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+        guard await MainActor.run(body: { UIVideoAtPathIsCompatibleWithSavedPhotosAlbum(url.path) }) else {
+            throw VideoExportError.photoLibraryIncompatibleVideo
         }
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+            }
+        } catch {
+            let photosError = error as NSError
+            AppLogger.media.error("Photos import failed: \(photosError.domain, privacy: .public) \(photosError.code, privacy: .public)")
+            if photosError.domain == PHPhotosErrorDomain,
+                photosError.code == PHPhotosError.Code.invalidResource.rawValue
+            {
+                throw VideoExportError.photoLibraryIncompatibleVideo
+            }
+            throw error
+        }
+    }
+
+    static func preserveVideo(at url: URL, directory: URL? = nil) throws -> URL {
+        let folder = directory ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let destination = folder.appendingPathComponent(url.lastPathComponent)
+        try FileManager.default.copyItem(at: url, to: destination)
+        return destination
     }
 }

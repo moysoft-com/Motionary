@@ -4,6 +4,11 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct ExportRecoveryShare: Identifiable {
+    let url: URL
+    var id: URL { url }
+}
+
 enum CoreEditorPanel: Equatable {
     case timeline
     case text
@@ -40,6 +45,7 @@ struct ProjectEditorView: View {
     @State private var isAudioVideoPickerPresented = false
     @State private var isAudioFileImporterPresented = false
     @State private var isExportSettingsPresented = false
+    @State private var exportRecoveryShare: ExportRecoveryShare?
     @State private var activePanel: CoreEditorPanel = .timeline
     @State private var pixelsPerSecond: CGFloat = 88
     @State private var miniTimelinePixelsPerSecond: CGFloat = 88
@@ -244,9 +250,19 @@ struct ProjectEditorView: View {
             "Error",
             isPresented: Binding(
                 get: { viewModel.errorMessage != nil },
-                set: { if !$0 { viewModel.errorMessage = nil } }
+                set: {
+                    if !$0 {
+                        viewModel.errorMessage = nil
+                        viewModel.recoverableExportURL = nil
+                    }
+                }
             )
         ) {
+            if let url = viewModel.recoverableExportURL {
+                Button("Save or share video") {
+                    exportRecoveryShare = ExportRecoveryShare(url: url)
+                }
+            }
             Button("OK", role: .cancel) {}
         } message: {
             Text(viewModel.errorMessage ?? "")
@@ -267,6 +283,9 @@ struct ProjectEditorView: View {
             selection: $selectedAudioVideoItem,
             matching: .videos
         )
+        .sheet(item: $exportRecoveryShare) { export in
+            ActivityView(activityItems: [export.url])
+        }
         .sheet(isPresented: $isExportSettingsPresented) {
             ExportSettingsView(project: viewModel.project) { settings in
                 isExportSettingsPresented = false
@@ -679,7 +698,7 @@ private struct EditorPlaybackControlBar: View {
                     systemName: viewModel.isPlaying ? "pause.fill" : "play.fill",
                     title: viewModel.isPlaying ? "Pause" : "Play",
                     isProminent: true,
-                    isDisabled: viewModel.player == nil
+                    isDisabled: viewModel.player == nil && !viewModel.previewRecoveryCircuitIsOpen
                 ) {
                     if activePanel == .graph {
                         viewModel.toggleGraphPlayback()

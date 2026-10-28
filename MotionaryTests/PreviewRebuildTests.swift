@@ -1,8 +1,40 @@
 import AVFoundation
 import Foundation
+import CoreImage
+import UIKit
 import Testing
 
 @testable import Motionary
+
+/// Leaves seeks pending until the test delivers the AVFoundation callback.
+private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
+    private let callbackLock = NSLock()
+    private var callbacks: [(@Sendable (Bool) -> Void)] = []
+
+    override func seek(
+        to time: CMTime,
+        toleranceBefore: CMTime,
+        toleranceAfter: CMTime,
+        completionHandler: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        callbackLock.lock()
+        if let completionHandler { callbacks.append(completionHandler) }
+        callbackLock.unlock()
+    }
+
+    var pendingSeekCount: Int {
+        callbackLock.lock()
+        defer { callbackLock.unlock() }
+        return callbacks.count
+    }
+
+    func completeSeek(at index: Int, finished: Bool) {
+        callbackLock.lock()
+        let callback = callbacks[index]
+        callbackLock.unlock()
+        callback(finished)
+    }
+}
 
 @Suite(.serialized)
 struct PreviewRebuildTests {
@@ -94,6 +126,261 @@ struct PreviewRebuildTests {
         }
         #expect(item.status == .readyToPlay)
         #expect(CMTimeGetSeconds(player.currentTime()) > 0.1)
+    }
+
+    @MainActor
+    @Test func videoClockAndDependenciesCoverLayerEndsGapsAndAudioTail() async throws {
+        let videoURL = try await MediaConversionHelper.blankVideoClockURL(duration: 1, frameRate: 30)
+        let audioURL = try makeSilentAudioFile()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let first = TimelineClip(
+            name: "First video", source: ClipSource(url: videoURL, mediaType: .video, originalDuration: 1),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 0.2)
+        )
+        let second = TimelineClip(
+            name: "Later video", source: ClipSource(url: videoURL, mediaType: .video, originalDuration: 1),
+            timelineStart: 0.4, sourceRange: TimeRangeValue(start: 0, duration: 0.2)
+        )
+        let audio = TimelineClip(
+            name: "Longer audio", source: ClipSource(url: audioURL, mediaType: .audio, originalDuration: 1),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let project = EditorProject(
+            title: "Source boundaries",
+            renderSettings: RenderSettings(width: 96, height: 128, frameRate: 30),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [first, second]),
+                     TimelineTrack(name: "Audio", kind: .audio, clips: [audio])]
+        )
+        let rendered = try await CompositionRenderService().makeComposition(for: project)
+        let clock = try #require(rendered.videoClockTrackID)
+        let composition = try #require(rendered.videoComposition)
+        #expect(composition.sourceTrackIDForFrameTiming == clock)
+        let clockTrack = try #require(rendered.composition.track(withTrackID: clock))
+        let clockRange = try await clockTrack.load(.timeRange)
+        #expect(abs(CMTimeGetSeconds(clockRange.end) - 1) < 0.001)
+        let instructions = try composition.instructions.map {
+            try #require($0 as? MotionaryVideoCompositionInstruction)
+        }
+        #expect(CMTimeGetSeconds(try #require(instructions.last).timeRange.end) == 1)
+        for (left, right) in zip(instructions, instructions.dropFirst()) {
+            #expect(CMTimeCompare(left.timeRange.end, right.timeRange.start) == 0)
+        }
+        for time in [0.1, 0.3, 0.5, 0.8] {
+            let instruction = try #require(instructions.first {
+                CMTimeRangeContainsTime($0.timeRange, time: CMTime(seconds: time, preferredTimescale: 600))
+            })
+            let active = instruction.activeClips(at: time)
+            let required = Set((instruction.requiredSourceTrackIDs ?? []).compactMap { ($0 as? NSNumber)?.int32Value })
+            let expected = Set(active.map(\.trackID) + [clock])
+            #expect(required == expected)
+            #expect(active.count == ((time == 0.1 || time == 0.5) ? 1 : 0))
+        }
+        // Exercise the real compositor after a source ends and through the
+        // trailing audio interval, with a bounded asynchronous test deadline.
+        let generator = AVAssetImageGenerator(asset: rendered.composition)
+        generator.videoComposition = composition
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for time in [0.1, 0.3, 0.5, 0.8] {
+                    let frame = try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image
+                    #expect(frame.width == 96)
+                    #expect(frame.height == 128)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(10))
+                generator.cancelAllCGImageGeneration()
+                throw CancellationError()
+            }
+            defer { group.cancelAll() }
+            try await group.next()
+        }
+    }
+
+    @MainActor
+    @Test func endedImageRevealsUnderlyingShapeThenAudioTailBackground() async throws {
+        let imageURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 16, height: 16)).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        }
+        try #require(image.pngData()).write(to: imageURL)
+        let audioURL = try makeSilentAudioFile()
+        defer {
+            try? FileManager.default.removeItem(at: imageURL)
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        let still = TimelineClip(
+            name: "Short image", source: ClipSource(url: imageURL, mediaType: .image, originalDuration: 1),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 0.2)
+        )
+        let shape = ShapeTimelineItem(
+            name: "Underlying green", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1),
+                             width: 96, height: 128),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 0.6)
+        )
+        let audio = TimelineClip(
+            name: "Audio tail", source: ClipSource(url: audioURL, mediaType: .audio, originalDuration: 1),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let project = EditorProject(
+            title: "Image boundary",
+            renderSettings: RenderSettings(width: 96, height: 128, frameRate: 30,
+                                           backgroundColor: RGBAColor(red: 0, green: 0, blue: 0, alpha: 1)),
+            tracks: [TimelineTrack(name: "Image", kind: .visual, clips: [still]),
+                     TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)]),
+                     TimelineTrack(name: "Audio", kind: .audio, clips: [audio])]
+        )
+        let prepared = try #require(try await CompositionRenderService().preparePreview(
+            for: project, quality: .balanced, invalidation: [.previewFrame, .compositionTopology, .audioMix]
+        ))
+        let generator = AVAssetImageGenerator(asset: prepared.composition)
+        generator.videoComposition = prepared.videoComposition
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let context = CIContext()
+        for (time, expected) in [(0.1, [255, 255, 255]), (0.3, [0, 255, 0]), (0.8, [0, 0, 0])] {
+            let frame = try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image
+            var pixel = [UInt8](repeating: 0, count: 4)
+            context.render(CIImage(cgImage: frame), toBitmap: &pixel, rowBytes: 4,
+                           bounds: CGRect(x: 48, y: 64, width: 1, height: 1), format: .RGBA8,
+                           colorSpace: CGColorSpaceCreateDeviceRGB())
+            for channel in 0..<3 {
+                #expect(abs(Int(pixel[channel]) - expected[channel]) < 10)
+            }
+        }
+        let item = AVPlayerItem(asset: prepared.composition)
+        item.videoComposition = prepared.videoComposition
+        item.audioMix = prepared.audioMix
+        let player = AVPlayer(playerItem: item)
+        let observer = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { _ in }
+        defer { player.pause(); player.removeTimeObserver(observer) }
+        player.play()
+        for _ in 0..<200 {
+            if CMTimeGetSeconds(player.currentTime()) >= 0.8 || item.status == .failed { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(item.status == .readyToPlay)
+        #expect(CMTimeGetSeconds(player.currentTime()) >= 0.8)
+    }
+
+    @MainActor
+    @Test func supersededRebuildRetainsAudioAndTopologyInvalidations() {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        viewModel.schedulePreviewRebuild(delay: true, invalidation: [.audioMix, .compositionTopology])
+        let oldTask = viewModel.rebuildTask
+        viewModel.schedulePreviewRebuild(delay: true, invalidation: [.previewFrame])
+        #expect(oldTask?.isCancelled == true)
+        #expect(viewModel.pendingPreviewInvalidation.contains(.audioMix))
+        #expect(viewModel.pendingPreviewInvalidation.contains(.compositionTopology))
+        #expect(viewModel.pendingPreviewInvalidation.contains(.previewFrame))
+    }
+
+    @MainActor
+    @Test func compositionReplacementRejectsNotificationsFromPreviousGraphOnSameItem() async throws {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        viewModel.previewQuality = .balanced
+        await viewModel.rebuildPreview(invalidation: [.previewFrame, .compositionTopology, .audioMix],
+                                       generation: viewModel.previewGeneration)
+        let oldSession = viewModel.previewRenderSessionID
+        let item = try #require(viewModel.player?.currentItem)
+        await viewModel.rebuildPreview(invalidation: [.previewFrame], generation: viewModel.previewGeneration)
+        #expect(viewModel.player?.currentItem === item)
+        #expect(viewModel.previewRenderSessionID != oldSession)
+        let recoveryCount = viewModel.previewRecoveryAttemptCount
+        NotificationCenter.default.post(name: .motionaryVideoCompositorPersistentFailure,
+                                        object: nil, userInfo: ["renderSessionID": oldSession])
+        for _ in 0..<5 { await Task.yield() }
+        #expect(viewModel.previewRecoveryAttemptCount == recoveryCount)
+    }
+
+    @MainActor
+    @Test func staleRenderedFrameDoesNotMarkCurrentSessionHealthy() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        viewModel.replacePreviewPlayer(with: item)
+        viewModel.installPreviewItemHealthObservers(for: item)
+        NotificationCenter.default.post(name: .motionaryVideoCompositorRenderedFrame,
+                                        object: nil, userInfo: ["renderSessionID": UUID()])
+        for _ in 0..<5 { await Task.yield() }
+        #expect(viewModel.lastPreviewRenderedFrameAt == 0)
+        NotificationCenter.default.post(name: .motionaryVideoCompositorRenderedFrame,
+                                        object: nil, userInfo: ["renderSessionID": viewModel.previewRenderSessionID])
+        for _ in 0..<5 { await Task.yield() }
+        #expect(viewModel.lastPreviewRenderedFrameAt > 0)
+    }
+
+    @MainActor
+    @Test func cancelledSeekIsSupersededWithoutTriggeringRecovery() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        let oldSeek = Task { await viewModel.boundedSeek(
+            player: player, to: 0.1, toleranceBefore: .zero, toleranceAfter: .zero,
+            timeoutNanoseconds: 1_000_000_000
+        ) }
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        #expect(player.pendingSeekCount == 1)
+        let latestSeek = Task { await viewModel.boundedSeek(
+            player: player, to: 0.5, toleranceBefore: .zero, toleranceAfter: .zero,
+            timeoutNanoseconds: 1_000_000_000
+        ) }
+        for _ in 0..<100 where player.pendingSeekCount < 2 { await Task.yield() }
+        guard player.pendingSeekCount == 2 else {
+            Issue.record("Expected both seek requests to reach AVPlayer")
+            return
+        }
+        player.completeSeek(at: 0, finished: false)
+        #expect(await oldSeek.value == .superseded)
+        #expect(viewModel.isPreviewSeekInFlight)
+        player.completeSeek(at: 1, finished: true)
+        #expect(await latestSeek.value == .completed)
+        #expect(!viewModel.isPreviewSeekInFlight)
+        #expect(viewModel.previewRecoveryAttemptCount == 0)
+    }
+
+    @MainActor
+    @Test func seekInterruptionIsDistinctFromTimeoutAndLateCompletionIsIgnored() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        let interrupted = Task { await viewModel.boundedSeek(
+            player: player, to: 0, toleranceBefore: .zero, toleranceAfter: .zero,
+            timeoutNanoseconds: 1_000_000_000
+        ) }
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        guard player.pendingSeekCount == 1 else {
+            Issue.record("Expected seek request")
+            return
+        }
+        player.completeSeek(at: 0, finished: false)
+        #expect(await interrupted.value == .interrupted)
+        let timedOut = await viewModel.boundedSeek(
+            player: player, to: 0.2, toleranceBefore: .zero, toleranceAfter: .zero,
+            timeoutNanoseconds: 1_000_000
+        )
+        #expect(timedOut == .timedOut)
+        player.completeSeek(at: 1, finished: true)
+        #expect(!viewModel.isPreviewSeekInFlight)
+    }
+
+    @MainActor
+    @Test func playbackRetriesPreviewAfterRecoveryCircuitOpened() {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        viewModel.previewRecoveryCircuitIsOpen = true
+        viewModel.togglePlayback()
+        #expect(!viewModel.previewRecoveryCircuitIsOpen)
+        #expect(viewModel.pendingPlaybackResumeAfterPreviewRebuild)
+        #expect(viewModel.rebuildTask != nil)
     }
 
     @Test func renderInvalidationDetectsVisualOnlyChanges() async throws {
@@ -401,7 +688,7 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
-    @Test func playbackStartCancelsPendingDelayedPreviewRebuild() async throws {
+    @Test func playbackStartFlushesPendingEditBeforeResuming() async throws {
         let shape = ShapeTimelineItem(
             name: "Play Race",
             mediaID: MediaID(),
@@ -459,9 +746,13 @@ struct PreviewRebuildTests {
         viewModel.togglePlayback()
 
         #expect(delayedRebuild.isCancelled)
-        #expect(viewModel.rebuildTask == nil)
+        let flushedRebuild = try #require(viewModel.rebuildTask)
         #expect(viewModel.previewGeneration == previewGeneration + 2)
+        #expect(viewModel.pendingPlaybackResumeAfterPreviewRebuild)
+        #expect(!viewModel.isPlaying)
+        await flushedRebuild.value
         #expect(viewModel.isPlaying)
+        #expect(viewModel.pendingPreviewInvalidation.isEmpty)
         #expect(viewModel.currentTime == 0.25)
     }
 

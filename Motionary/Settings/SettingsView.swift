@@ -160,7 +160,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
             .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
-            .safeAreaBar(edge: .top) {
+            .motionaryTopBar {
                 HStack(spacing: 7) {
                     Text("Settings")
                         .font(.largeTitle.weight(.bold))

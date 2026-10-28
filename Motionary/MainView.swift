@@ -3,6 +3,7 @@
 import FirebaseAppCheck
 import FirebaseCore
 import SwiftUI
+import UIKit
 
 private final class MotionaryAppAttestProviderFactory: NSObject, AppCheckProviderFactory {
     func createProvider(with app: FirebaseApp) -> AppCheckProvider? {
@@ -71,6 +72,19 @@ struct MainView: App {
     @AppStorage(AppPreferences.appearanceKey)
     private var appearance = AppPreferences.defaultAppearance
 
+    init() {
+        let tabBarAppearance = UITabBarAppearance()
+        tabBarAppearance.configureWithDefaultBackground()
+        let accent = UIColor(MotionaryTheme.accent)
+
+        tabBarAppearance.stackedLayoutAppearance.selected.iconColor = accent
+        tabBarAppearance.inlineLayoutAppearance.selected.iconColor = accent
+        tabBarAppearance.compactInlineLayoutAppearance.selected.iconColor = accent
+
+        UITabBar.appearance().standardAppearance = tabBarAppearance
+        UITabBar.appearance().scrollEdgeAppearance = tabBarAppearance
+    }
+
     var body: some Scene {
         WindowGroup {
             #if DEBUG
@@ -86,16 +100,21 @@ struct MainView: App {
     }
 
     private var appTabs: some View {
-        TabView(selection: $selectedTab) {
-            Tab(value: 0) {
-                HomeView(newProjectRequest: newProjectRequest)
-                    .labelStyle(.automatic)
-            } label: {
-                Image("MotionarySF")
-            }
-
-            Tab("Settings", systemImage: "gearshape.fill", value: 1) {
-                SettingsView()
+        Group {
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                if #available(iOS 26.0, *) {
+                    tabView.tint(MotionaryTheme.accent)
+                        .scrollEdgeEffectStyle(.soft, for: .all)
+                } else {
+                    tabView.tint(MotionaryTheme.accent)
+                }
+            } else {
+                if #available(iOS 26.0, *) {
+                    tabView
+                        .scrollEdgeEffectStyle(.soft, for: .all)
+                } else {
+                    tabView
+                }
             }
         }
         .sheet(isPresented: $iconPickerPresented) {
@@ -109,6 +128,23 @@ struct MainView: App {
         }
         .labelStyle(.iconOnly)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
+    }
+
+    private var tabView: some View {
+        TabView(selection: $selectedTab) {
+            Tab(value: 0) {
+                HomeView(newProjectRequest: newProjectRequest)
+                    .tint(nil)
+                    .labelStyle(.automatic)
+            } label: {
+                Image("MotionarySF")
+            }
+
+            Tab("Settings", systemImage: "gearshape.fill", value: 1) {
+                SettingsView()
+                    .tint(nil)
+            }
+        }
     }
 
     private func handlePendingAction() {

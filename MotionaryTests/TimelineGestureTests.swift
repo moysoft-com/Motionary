@@ -149,6 +149,58 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    @Test func playingTimelineAdvancesWhilePinchingEvenWithoutScaleChanges() {
+        let playback = PlaybackState()
+        playback.currentTime = 2
+        playback.isPlaying = true
+        var zoom: CGFloat = 88
+        var scrubStarted = false
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: Binding(get: { zoom }, set: { zoom = $0 }),
+            currentTime: 2, duration: 10, contentRevision: 0,
+            contentSize: CGSize(width: 1_180, height: 200), isScrollDisabled: false,
+            playbackState: playback,
+            onScrubStart: { scrubStarted = true }, onScrubChanged: { _ in }, onScrubEnd: { _ in },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_180, height: 200)
+        scroll.contentOffset.x = 176
+        coordinator.attach(to: scroll)
+        defer { coordinator.stopInteractions(in: scroll) }
+
+        coordinator.updatePinch(state: .began, scale: 1, in: scroll)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 20, y: 0))
+        playback.currentTime = 3
+        coordinator.updatePinch(state: .changed, scale: 2, in: scroll)
+        #expect(abs(scroll.contentOffset.x - 528) < 0.01)
+
+        playback.currentTime = 4
+        coordinator.handlePlaybackFrame()
+        #expect(abs(scroll.contentOffset.x - 704) < 0.01)
+        #expect(playback.isPlaying)
+        #expect(!scrubStarted)
+
+        coordinator.updatePinch(state: .ended, scale: 2, in: scroll)
+        playback.currentTime = 5
+        coordinator.handlePlaybackFrame()
+        #expect(abs(scroll.contentOffset.x - 880) < 0.01)
+    }
+
+    @MainActor
+    @Test func pausedPinchKeepsItsOriginalTimeAnchor() {
+        let coordinator = makeScrollCoordinator { _ in }
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_180, height: 200)
+        scroll.contentOffset.x = 176
+        coordinator.updatePinch(state: .began, scale: 1, in: scroll)
+        coordinator.updatePinch(state: .changed, scale: 2, in: scroll)
+        #expect(abs(scroll.contentOffset.x - 352) < 0.01)
+        coordinator.updatePinch(state: .cancelled, scale: 2, in: scroll)
+        #expect(!coordinator.isUserInteracting)
+    }
+
+    @MainActor
     private func makeScrollCoordinator(_ record: @escaping (String) -> Void)
         -> TimelineScrollContainer<Color>.Coordinator
     {

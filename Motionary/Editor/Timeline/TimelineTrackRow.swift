@@ -193,24 +193,13 @@ private struct TimelineTrackHeader: View {
     }
 
     private var trackLabelOffset: CGFloat {
-        let viewportLeadingPadding: CGFloat = 10
-        let layerLeadingEdge = centerPadding - 5
-        let layerSpacing: CGFloat = 8
-        let maximumOffset = layerLeadingEdge - trackLabelWidth - layerSpacing
-        let stickyOffset = scrollPresentationState.horizontalOffset + viewportLeadingPadding
-        let transitionWidth: CGFloat = 24
-        let transitionHalfWidth = transitionWidth * 0.5
-        let transitionStart = maximumOffset - transitionHalfWidth
-        let transitionEnd = maximumOffset + transitionHalfWidth
-
-        guard stickyOffset > transitionStart else { return stickyOffset }
-        guard stickyOffset < transitionEnd else { return maximumOffset }
-
-        let linearProgress = (stickyOffset - transitionStart) / transitionWidth
-        return stickyOffset - transitionHalfWidth * linearProgress * linearProgress
+        TimelineTrackHeaderLayout(
+            centerPadding: centerPadding,
+            horizontalOffset: scrollPresentationState.horizontalOffset
+        ).contentOffset
     }
 
-    private var trackLabelWidth: CGFloat { 104 }
+    private var trackLabelWidth: CGFloat { TimelineTrackHeaderLayout.width }
 
     private var trackLabel: some View {
         HStack(spacing: 7) {
@@ -240,10 +229,31 @@ private struct TimelineTrackHeader: View {
                         Spacer()
                     }
                 }
-                .buttonStyle(.glassProminent)
+                .motionaryProminentButtonStyle()
             }
             .padding()
             .presentationCompactAdaptation(.popover)
         }
     }
+}
+
+/// Shared by the header's motion and its exemption from the viewport fade.
+struct TimelineTrackHeaderLayout {
+    static let width: CGFloat = 104
+    let centerPadding: CGFloat
+    let horizontalOffset: CGFloat
+
+    private var maximumOffset: CGFloat { centerPadding - 5 - Self.width - 8 }
+    private var stickyOffset: CGFloat { horizontalOffset + 10 }
+
+    var transitionProgress: CGFloat {
+        min(max((stickyOffset - (maximumOffset - 12)) / 24, 0), 1)
+    }
+
+    var contentOffset: CGFloat {
+        if transitionProgress >= 1 { return maximumOffset }
+        return stickyOffset - 12 * transitionProgress * transitionProgress
+    }
+
+    var viewportOffset: CGFloat { contentOffset - horizontalOffset }
 }

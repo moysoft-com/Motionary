@@ -151,6 +151,7 @@ struct RenderClipDescriptor: @unchecked Sendable {
     let backgroundMaskTrackID: CMPersistentTrackID?
     /// Non-video visual sources are decoded once by the frame engine and use
     /// the shared composition clock instead of a synthetic per-item movie.
+    let backgroundMaskImageURL: URL?
     let stillImageURL: URL?
     /// Immutable file identity prepared outside the frame-rendering path.
     let stillImageCacheIdentity: String?
@@ -180,6 +181,7 @@ struct RenderClipDescriptor: @unchecked Sendable {
     init(
         trackID: CMPersistentTrackID,
         backgroundMaskTrackID: CMPersistentTrackID?,
+        backgroundMaskImageURL: URL? = nil,
         stillImageURL: URL? = nil,
         stillImageCacheIdentity: String? = nil,
         clipID: UUID,
@@ -202,6 +204,7 @@ struct RenderClipDescriptor: @unchecked Sendable {
     ) {
         self.trackID = trackID
         self.backgroundMaskTrackID = backgroundMaskTrackID
+        self.backgroundMaskImageURL = backgroundMaskImageURL
         self.stillImageURL = stillImageURL
         self.stillImageCacheIdentity = stillImageCacheIdentity
         self.clipID = clipID
@@ -466,6 +469,28 @@ final class MotionaryVideoCompositionInstruction:
         self.requiredSourceTrackIDs = sourceTrackIDs
             .filter { $0 != kCMPersistentTrackID_Invalid }
             .map { NSNumber(value: $0) }
+        super.init()
+    }
+
+    /// Interval instructions share the immutable descriptor/index storage.
+    /// Only decoder dependencies change at source boundaries.
+    init(timeRange: CMTimeRange, template: MotionaryVideoCompositionInstruction,
+         sourceTrackIDs: [CMPersistentTrackID]) {
+        self.timeRange = timeRange
+        clips = template.clips
+        clipIntervals = template.clipIntervals
+        textClipsByStart = template.textClipsByStart
+        renderSize = template.renderSize
+        renderScale = template.renderScale
+        vectorRenderScale = template.vectorRenderScale
+        viewport = template.viewport
+        backgroundColor = template.backgroundColor
+        frameDuration = template.frameDuration
+        qualityProfile = template.qualityProfile
+        failurePolicy = template.failurePolicy
+        livePreviewState = template.livePreviewState
+        renderSessionID = template.renderSessionID
+        requiredSourceTrackIDs = sourceTrackIDs.map { NSNumber(value: $0) }
         super.init()
     }
 
@@ -761,6 +786,7 @@ final class CompositionRenderService {
     let livePreviewState = LivePreviewRenderState()
     @MainActor private var previewGraph: PreviewRenderGraph?
     @MainActor private var previewGraphRevision = 0
+    @MainActor private var previewPreparationGeneration = 0
 
     init(assetCache: MediaAssetCache = .shared) {
         self.assetCache = assetCache
@@ -770,6 +796,7 @@ final class CompositionRenderService {
     func invalidatePreviewGraph() {
         previewGraph = nil
         previewGraphRevision &+= 1
+        previewPreparationGeneration &+= 1
     }
 
     @MainActor
@@ -779,6 +806,8 @@ final class CompositionRenderService {
         invalidation: EditorInvalidation,
         renderSessionID: UUID = UUID()
     ) async throws -> PreparedPreview? {
+        previewPreparationGeneration &+= 1
+        let preparationGeneration = previewPreparationGeneration
         let signpostID = OSSignpostID(log: compositionMetricsLog)
         os_signpost(
             .begin,
@@ -823,6 +852,9 @@ final class CompositionRenderService {
                 renderSessionID: renderSessionID
             )
             try Task.checkCancellation()
+            guard preparationGeneration == previewPreparationGeneration else {
+                throw CancellationError()
+            }
             guard rendered.duration > 0 else {
                 previewGraph = nil
                 previewGraphRevision &+= 1
@@ -859,6 +891,10 @@ final class CompositionRenderService {
             )
         } else {
             descriptors = graph.renderDescriptors
+        }
+        try Task.checkCancellation()
+        guard preparationGeneration == previewPreparationGeneration else {
+            throw CancellationError()
         }
         let videoComposition =
             invalidation.contains(.previewFrame)
@@ -1212,11 +1248,9 @@ final class CompositionRenderService {
         }
 
         let duration = max(project.duration, 0)
-        if duration > 0,
-            renderClips.contains(where: {
-                $0.text != nil || $0.shape != nil || $0.stillImageURL != nil || $0.isAdjustmentLayer
-            })
-        {
+        // A clip is never a reliable project clock: it can end before audio,
+        // another layer, or a gap. Keep frame requests running to project end.
+        if duration > 0, !renderClips.isEmpty {
             videoClockTrackID = try await insertGeneratedVideoClock(
                 duration: duration,
                 frameRate: renderSettings.frameRate,
@@ -1295,23 +1329,59 @@ final class CompositionRenderService {
             livePreviewState: livePreviewState,
             renderSessionID: renderSessionID
         )
-        let configuration = AVVideoComposition.Configuration(
-            animationTool: nil,
-            colorPrimaries: nil,
-            colorTransferFunction: nil,
-            colorYCbCrMatrix: nil,
-            customVideoCompositorClass: MotionaryVideoCompositor.self,
-            frameDuration: CMTime(value: 1, timescale: renderSettings.frameRate),
-            instructions: [instruction],
-            outputBufferDescription: nil,
-            perFrameHDRDisplayMetadataPolicy: .propagate,
-            renderScale: 1,
-            renderSize: renderSettings.size,
-            sourceSampleDataTrackIDs: [],
-            sourceTrackIDForFrameTiming: sourceTrackIDForFrameTiming,
-            spatialVideoConfigurations: []
-        )
-        return AVVideoComposition(configuration: configuration)
+        // Request decoder frames only while their source is present. Asking
+        // for every clip over the entire timeline makes ended/future tracks
+        // dependencies of unrelated frames, including audio-only tails.
+        let boundaries = Array(Set(
+            [CMTime.zero, cmTime(duration)] + clips.flatMap { clip in
+                [cmTime(min(max(clip.timelineStart, 0), duration)),
+                 cmTime(min(max(clip.timelineStart + clip.duration, 0), duration))]
+            }
+        )).sorted { CMTimeCompare($0, $1) < 0 }
+        let clockID = sourceTrackIDForFrameTiming
+        let instructions = zip(boundaries, boundaries.dropFirst()).map { start, end in
+            let midpoint = (CMTimeGetSeconds(start) + CMTimeGetSeconds(end)) / 2
+            let active = instruction.clipIntervals.activeClipIndices(at: midpoint)
+                .map { instruction.clips[$0] }
+            return MotionaryVideoCompositionInstruction(
+                timeRange: CMTimeRange(start: start, end: end),
+                template: instruction,
+                sourceTrackIDs: self.sourceTrackIDs(for: active, videoClockTrackID: clockID)
+            )
+        }
+        if #available(iOS 26.0, *) {
+            let configuration = AVVideoComposition.Configuration(
+                animationTool: nil,
+                colorPrimaries: nil,
+                colorTransferFunction: nil,
+                colorYCbCrMatrix: nil,
+                customVideoCompositorClass: MotionaryVideoCompositor.self,
+                frameDuration: CMTime(value: 1, timescale: renderSettings.frameRate),
+                instructions: instructions,
+                outputBufferDescription: nil,
+                perFrameHDRDisplayMetadataPolicy: .propagate,
+                renderScale: 1,
+                renderSize: renderSettings.size,
+                sourceSampleDataTrackIDs: [],
+                sourceTrackIDForFrameTiming: sourceTrackIDForFrameTiming,
+                spatialVideoConfigurations: []
+            )
+            return AVVideoComposition(configuration: configuration)
+        }
+
+        // The configuration initializer arrived in iOS 26. Build the same
+        // composition through the native mutable API on earlier versions,
+        // then return an immutable snapshot for preview and export.
+        let composition = AVMutableVideoComposition()
+        composition.customVideoCompositorClass = MotionaryVideoCompositor.self
+        composition.frameDuration = CMTime(value: 1, timescale: renderSettings.frameRate)
+        composition.instructions = instructions
+        composition.perFrameHDRDisplayMetadataPolicy = .propagate
+        composition.renderScale = 1
+        composition.renderSize = renderSettings.size
+        composition.sourceSampleDataTrackIDs = []
+        composition.sourceTrackIDForFrameTiming = sourceTrackIDForFrameTiming
+        return composition.copy() as? AVVideoComposition
     }
 
     private func sourceTrackIDs(
@@ -1464,11 +1534,25 @@ final class CompositionRenderService {
                 for: mediaAsset.url
             )
         {
+            let settings = source.visuals.backgroundRemoval
+            let artifact = mediaAsset.backgroundRemovalArtifact
+            let maskURL = artifact.flatMap { artifact -> URL? in
+                guard artifact.algorithmVersion == BackgroundRemovalArtifact.currentAlgorithmVersion,
+                    artifact.url.pathExtension.lowercased() == "png",
+                    FileManager.default.fileExists(atPath: artifact.url.path)
+                else { return nil }
+                return artifact.url
+            }
+            if settings?.requiresForegroundMatte == true, maskURL == nil,
+                backgroundRemovalPolicy == .required {
+                throw CompositionRenderError.backgroundRemovalUnavailable(source.name)
+            }
             visualTrackIDs[source.id] = kCMPersistentTrackID_Invalid
             renderClips.append(
                 RenderClipDescriptor(
                     trackID: kCMPersistentTrackID_Invalid,
                     backgroundMaskTrackID: nil,
+                    backgroundMaskImageURL: maskURL,
                     stillImageURL: mediaAsset.url,
                     stillImageCacheIdentity: stillImageCacheIdentity,
                     clipID: source.id,
@@ -1480,7 +1564,7 @@ final class CompositionRenderService {
                     adjustments: source.visuals.adjustments,
                     effectStack: source.visuals.effectStack,
                     mask: source.visuals.mask,
-                    backgroundRemoval: nil,
+                    backgroundRemoval: settings,
                     blendMode: source.visuals.blendMode,
                     blendIntensity: source.visuals.blendIntensity,
                     shape: nil,
@@ -1555,7 +1639,7 @@ final class CompositionRenderService {
         let visuals = source.visuals
         var backgroundMaskTrackID: CMPersistentTrackID?
         var backgroundMaskSourceTransform = CGAffineTransform.identity
-        if source.shape == nil, visuals.backgroundRemoval != nil {
+        if source.shape == nil, visuals.backgroundRemoval?.requiresForegroundMatte == true {
             let artifact = mediaAsset.backgroundRemovalArtifact
             let artifactIsAvailable = artifact.map { artifact in
                 artifact.algorithmVersion == BackgroundRemovalArtifact.currentAlgorithmVersion
@@ -1619,7 +1703,7 @@ final class CompositionRenderService {
                 adjustments: visuals.adjustments,
                 effectStack: visuals.effectStack,
                 mask: visuals.mask,
-                backgroundRemoval: backgroundMaskTrackID == nil ? nil : visuals.backgroundRemoval,
+                backgroundRemoval: visuals.backgroundRemoval,
                 blendMode: visuals.blendMode,
                 blendIntensity: visuals.blendIntensity,
                 shape: source.shape,
@@ -1906,6 +1990,8 @@ final class CompositionRenderService {
                         RenderClipDescriptor(
                             trackID: trackID,
                             backgroundMaskTrackID: backgroundMaskTrackIDs[mediaItem.id],
+                            backgroundMaskImageURL: stillImageURL == nil ? nil
+                                : project.mediaLibrary[mediaItem.mediaID]?.backgroundRemovalArtifact?.url,
                             stillImageURL: stillImageURL,
                             stillImageCacheIdentity: stillImageCacheIdentity,
                             clipID: mediaItem.id,
@@ -1917,9 +2003,7 @@ final class CompositionRenderService {
                             adjustments: visuals.adjustments,
                             effectStack: visuals.effectStack,
                             mask: visuals.mask,
-                            backgroundRemoval: backgroundMaskTrackIDs[mediaItem.id] == nil
-                                ? nil
-                                : visuals.backgroundRemoval,
+                            backgroundRemoval: visuals.backgroundRemoval,
                             blendMode: visuals.blendMode,
                             blendIntensity: visuals.blendIntensity,
                             shape: nil,

@@ -32,9 +32,10 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         let data: Data
     }
 
-    private final class RequestFinisher: @unchecked Sendable {
+    final class RequestFinisher: @unchecked Sendable {
         private let lock = NSLock()
         private var didFinish = false
+        private var timeoutAction: (() -> Void)?
 
         @discardableResult
         func finish(_ action: () -> Void) -> Bool {
@@ -44,23 +45,29 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 return false
             }
             didFinish = true
+            timeoutAction = nil
             lock.unlock()
             action()
             return true
+        }
+
+        func setTimeoutAction(_ action: @escaping () -> Void) {
+            lock.lock()
+            if !didFinish { timeoutAction = action }
+            lock.unlock()
+        }
+
+        func timeOut() {
+            lock.lock()
+            let action = timeoutAction
+            lock.unlock()
+            if let action { finish(action) }
         }
 
         var isFinished: Bool {
             lock.lock()
             defer { lock.unlock() }
             return didFinish
-        }
-    }
-
-    private final class PixelBufferBox: @unchecked Sendable {
-        let pixelBuffer: CVPixelBuffer
-
-        init(_ pixelBuffer: CVPixelBuffer) {
-            self.pixelBuffer = pixelBuffer
         }
     }
 
@@ -159,24 +166,44 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                     guard let destination = request.renderContext.newPixelBuffer() else {
                         throw MetalRenderingError.invalidRenderTarget
                     }
-                    let destinationBox = PixelBufferBox(destination)
+                    if instruction.qualityProfile == .export {
+                        // Serialize export GPU work. Three concurrent FP16 effect
+                        // graphs can exceed a phone's memory budget at 4K.
+                        try renderer.render(
+                            plan: RenderPlanCompiler.compile(instruction),
+                            compositionTime: request.compositionTime,
+                            sourceFrame: { request.sourceFrame(byTrackID: $0) },
+                            destination: destination,
+                            isCancelled: { !self.isCurrent(generation) }
+                        )
+                        request.finish(withComposedVideoFrame: destination)
+                        return
+                    }
                     let finisher = RequestFinisher()
                     let timeoutMilliseconds = self.frameTimeoutMilliseconds(for: instruction)
-                    self.timeoutQueue.asyncAfter(deadline: .now() + .milliseconds(timeoutMilliseconds)) { [weak self] in
-                        guard let self, self.isCurrent(generation) else { return }
-                        finisher.finish {
-                            self.logFrameTimeoutIfNeeded(
-                                instruction: instruction,
-                                timeoutMilliseconds: timeoutMilliseconds
-                            )
-                            self.recordFrameFailure(MetalRenderingError.cancelled, instruction: instruction)
-                            self.renderFallbackFrame(
-                                into: destinationBox.pixelBuffer,
-                                instruction: instruction
-                            )
-                            self.recoverRendererAfterTimeout()
-                            request.finish(withComposedVideoFrame: destinationBox.pixelBuffer)
+                    finisher.setTimeoutAction { [weak self] in
+                        guard let self, self.isCurrent(generation) else {
+                            request.finishCancelledRequest()
+                            return
                         }
+                        self.logFrameTimeoutIfNeeded(
+                            instruction: instruction,
+                            timeoutMilliseconds: timeoutMilliseconds
+                        )
+                        self.recordFrameFailure(MetalRenderingError.cancelled, instruction: instruction)
+                        // The GPU may still own destination. Never write CPU
+                        // fallback pixels into it or hand it to AVPlayer early.
+                        guard let fallback = request.renderContext.newPixelBuffer() else {
+                            request.finish(with: MetalRenderingError.invalidRenderTarget)
+                            return
+                        }
+                        self.renderFallbackFrame(into: fallback, instruction: instruction)
+                        request.finish(withComposedVideoFrame: fallback)
+                    }
+                    // Completed requests must release their pixel buffers immediately;
+                    // the delayed timer must not retain every exported frame.
+                    self.timeoutQueue.asyncAfter(deadline: .now() + .milliseconds(timeoutMilliseconds)) { [weak finisher] in
+                        finisher?.timeOut()
                     }
                     let plan = RenderPlanCompiler.compile(instruction)
                     renderer.renderAsync(
@@ -201,7 +228,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         switch result {
                         case .success:
                             finisher.finish {
-                                self.recordSuccessfulFrame(instruction: instruction)
+                                self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime)
                                 self.storeLastGoodFrame(from: destination)
                                 request.finish(withComposedVideoFrame: destination)
                             }
@@ -226,6 +253,10 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 } catch {
                     self.recordFrameFailure(error, instruction: instruction)
                     self.logger.error("Frame rendering failed: \(error.localizedDescription, privacy: .public)")
+                    if instruction.qualityProfile == .export {
+                        request.finish(with: error)
+                        return
+                    }
                     if let destination = request.renderContext.newPixelBuffer() {
                         self.renderFallbackFrame(
                             into: destination,
@@ -252,7 +283,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         fallbackLock.unlock()
     }
 
-    private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction) {
+    private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction, time: CMTime) {
         let shouldNotify: Bool
         stateLock.lock()
         consecutiveRenderFailures = 0
@@ -266,7 +297,8 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             NotificationCenter.default.post(
                 name: .motionaryVideoCompositorRenderedFrame,
                 object: self,
-                userInfo: ["renderSessionID": instruction.renderSessionID]
+                userInfo: ["renderSessionID": instruction.renderSessionID,
+                           "compositionTime": CMTimeGetSeconds(time)]
             )
         }
     }
@@ -277,13 +309,15 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     ) {
         stateLock.lock()
         consecutiveRenderFailures += 1
+        let shouldNotify = consecutiveRenderFailures == 3 && instruction.qualityProfile != .export
         stateLock.unlock()
-    }
-
-    private func recoverRendererAfterTimeout() {
-        clearLastGoodFrame()
-        guard case .success(let renderer) = rendererResult else { return }
-        renderer.renderContextDidChange()
+        if shouldNotify {
+            NotificationCenter.default.post(
+                name: .motionaryVideoCompositorPersistentFailure,
+                object: self,
+                userInfo: ["renderSessionID": instruction.renderSessionID]
+            )
+        }
     }
 
     private func frameTimeoutMilliseconds(

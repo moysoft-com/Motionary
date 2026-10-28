@@ -260,20 +260,26 @@ final class MetalFrameRenderer: @unchecked Sendable {
 
                 image = try measured("Adjustments and Effects", id: signpostID) {
                     let adjusted = applyAdjustments(clip.adjustments, to: image, at: localTime)
-                    return try effectRegistry.render(
+                    let coordinates = LayerEffectCoordinates(
+                        isGeneratedLayer: isGeneratedLayer,
+                        outputScale: plan.renderScale,
+                        rasterScaleCorrection: sourceResult.rasterScaleCorrection
+                    )
+                    let effectOutput = try effectRegistry.render(
                         clip.effectStack,
-                        to: adjusted,
+                        to: adjusted.transformed(by: coordinates.inputTransform),
                         context: EffectRenderContext(
                             compositionTime: safeTime,
                             clipTime: localTime,
                             frameIndex: frameIndex,
                             itemID: clip.clipID,
-                            renderScale: plan.renderScale,
+                            renderScale: coordinates.renderScale,
                             quality: plan.quality
                         ),
                         resources: frameResources,
                         failurePolicy: plan.failurePolicy
                     )
+                    return effectOutput.transformed(by: coordinates.inputTransform.inverted())
                 }
                 image = measured("Mask and Transform", id: signpostID) {
                     var transformed = image
@@ -488,10 +494,16 @@ final class MetalFrameRenderer: @unchecked Sendable {
         )
         rasterizationLock.lock()
         defer { rasterizationLock.unlock() }
+        let usesProjectPixels = clip.effectStack.effects.contains(where: { $0.isEnabled })
+        let sourceScale = usesProjectPixels ? 1 : plan.renderScale
+        let sourceSize = CGSize(
+            width: plan.renderSize.width * sourceScale / max(plan.renderScale, 0.000_001),
+            height: plan.renderSize.height * sourceScale / max(plan.renderScale, 0.000_001)
+        )
         let textSample = textLayerRenderer.prepareSample(
             item: text,
-            renderSize: plan.renderSize,
-            renderScale: plan.renderScale,
+            renderSize: sourceSize,
+            renderScale: sourceScale,
             at: sourceTime,
             glyphReveal: animationSample.glyphReveal
         )
@@ -509,6 +521,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
         textAnimationSample: TextAnimationSample? = nil,
         baseSize: CGSize? = nil
     ) -> CGSize {
+        // Effect stacks rasterize their own project-space surfaces. Extra
+        // canvas-coverage supersampling only multiplies memory before that pass.
+        if clip.effectStack.effects.contains(where: { $0.isEnabled }) {
+            return CGSize(width: 1, height: 1)
+        }
         let scale = clip.transform.scale.value(at: time)
         let animationScale = textAnimationSample?.scale ?? 1
         let transformScale = CGSize(
@@ -569,7 +586,13 @@ final class MetalFrameRenderer: @unchecked Sendable {
             let geometry = preparation?.textSample?.geometry
         {
             return projectedPlacementBounds(
-                placementExtent: CGRect(origin: .zero, size: geometry.layerSize),
+                placementExtent: CGRect(
+                    origin: .zero,
+                    size: geometry.layerSize.applying(CGAffineTransform(
+                        scaleX: clip.effectStack.effects.contains(where: { $0.isEnabled }) ? plan.renderScale : 1,
+                        y: clip.effectStack.effects.contains(where: { $0.isEnabled }) ? plan.renderScale : 1
+                    ))
+                ),
                 clip: clip,
                 at: localTime,
                 renderSize: plan.renderSize,
@@ -594,11 +617,17 @@ final class MetalFrameRenderer: @unchecked Sendable {
         // the actual frame time. Text rasterization remains quantized only in
         // interactive quality because glyph layout is substantially heavier.
         let generatedSourceTime = generatedPreparation?.sourceTime ?? localTime
+        let usesProjectPixels = clip.effectStack.effects.contains(where: { $0.isEnabled })
+        let sourceScale = usesProjectPixels ? 1 : plan.renderScale
+        let sourceToOutput = CGAffineTransform(
+            scaleX: usesProjectPixels ? plan.renderScale : 1,
+            y: usesProjectPixels ? plan.renderScale : 1
+        )
         if let shape = clip.shape {
             let baseLayout = ShapeRasterLayout(
                 shape: shape,
                 at: generatedSourceTime,
-                logicalRenderScale: plan.renderScale,
+                logicalRenderScale: sourceScale,
                 rasterScaleMultiplier: 1
             )
             let generatedRasterScale = generatedLayerRasterScale(
@@ -622,7 +651,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 sourceImage = try frameShapeImage(
                     shape,
                     at: generatedSourceTime,
-                    renderScale: plan.renderScale,
+                    renderScale: sourceScale,
                     rasterScale: generatedRasterScale,
                     resources: frameResources
                 )
@@ -630,13 +659,13 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 sourceImage = try shapeImage(
                     shape,
                     at: generatedSourceTime,
-                    renderScale: plan.renderScale,
+                    renderScale: sourceScale,
                     rasterScale: generatedRasterScale,
                     resources: frameResources
                 )
             }
             return SourceResult(
-                image: sourceImage,
+                image: sourceImage.transformed(by: sourceToOutput),
                 textAnimationSample: nil,
                 rasterScaleCorrection: generatedScaleCorrection
             )
@@ -675,21 +704,28 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 resources: frameResources
             )
             return SourceResult(
-                image: image,
+                image: image.transformed(by: sourceToOutput),
                 textAnimationSample: sample,
                 rasterScaleCorrection: generatedScaleCorrection
             )
         }
         if let stillImageURL = clip.stillImageURL {
-            return SourceResult(
-                image: try stillImage(
-                    at: stillImageURL,
-                    cacheIdentity: clip.stillImageCacheIdentity,
-                    resources: frameResources
-                ),
-                textAnimationSample: nil,
-                rasterScaleCorrection: CGSize(width: 1, height: 1)
-            )
+            guard var image = try stillImage(
+                at: stillImageURL, cacheIdentity: clip.stillImageCacheIdentity,
+                resources: frameResources
+            ) else {
+                return SourceResult(image: nil, textAnimationSample: nil,
+                    rasterScaleCorrection: CGSize(width: 1, height: 1))
+            }
+            if let settings = clip.backgroundRemoval {
+                let matte: CIImage?
+                if settings.requiresForegroundMatte, let url = clip.backgroundMaskImageURL {
+                    matte = try stillImage(at: url, cacheIdentity: nil, resources: frameResources)?.applyingFilter("CIMaskToAlpha")
+                } else { matte = nil }
+                image = BackgroundRemovalImageRenderer.apply(settings, matte: matte, to: image, renderScale: plan.renderScale)
+            }
+            return SourceResult(image: image, textAnimationSample: nil,
+                rasterScaleCorrection: CGSize(width: 1, height: 1))
         }
         guard clip.trackID != kCMPersistentTrackID_Invalid,
             let sourceBuffer = sourceFrame(clip.trackID)
@@ -704,20 +740,14 @@ final class MetalFrameRenderer: @unchecked Sendable {
         var image = try frameResources.makeSourceImage(from: sourceBuffer)
             .transformed(by: clip.sourceTransform)
         if let settings = clip.backgroundRemoval {
-            if let maskTrackID = clip.backgroundMaskTrackID,
-                let maskBuffer = sourceFrame(maskTrackID)
-            {
-                let matte = try frameResources.makeSourceImage(from: maskBuffer)
+            let matte: CIImage?
+            if settings.requiresForegroundMatte,
+                let maskTrackID = clip.backgroundMaskTrackID,
+                let maskBuffer = sourceFrame(maskTrackID) {
+                matte = try frameResources.makeSourceImage(from: maskBuffer)
                     .transformed(by: clip.backgroundMaskSourceTransform)
-                image = applyBackgroundRemoval(
-                    settings,
-                    matte: matte,
-                    to: image,
-                    renderScale: plan.renderScale
-                )
-            } else {
-                image = transparentImage(croppedTo: image.extent)
-            }
+            } else { matte = nil }
+            image = BackgroundRemovalImageRenderer.apply(settings, matte: matte, to: image, renderScale: plan.renderScale)
         }
         return SourceResult(
             image: image,
@@ -743,20 +773,26 @@ final class MetalFrameRenderer: @unchecked Sendable {
         guard opacity > 0.000_001 else { return background }
         let source = background.cropped(to: canvasRect)
         let adjusted = applyAdjustments(clip.adjustments, to: source, at: localTime)
+        let coordinates = LayerEffectCoordinates(
+            isGeneratedLayer: true,
+            outputScale: plan.renderScale,
+            rasterScaleCorrection: CGSize(width: 1, height: 1)
+        )
         var processed = try effectRegistry.render(
             clip.effectStack,
-            to: adjusted,
+            to: adjusted.transformed(by: coordinates.inputTransform),
             context: EffectRenderContext(
                 compositionTime: compositionTime,
                 clipTime: localTime,
                 frameIndex: frameIndex,
                 itemID: clip.clipID,
-                renderScale: plan.renderScale,
+                renderScale: coordinates.renderScale,
                 quality: plan.quality
             ),
             resources: frameResources,
             failurePolicy: plan.failurePolicy
         )
+        .transformed(by: coordinates.inputTransform.inverted())
         .cropped(to: canvasRect)
         if clip.blendMode != .normal && clip.blendIntensity > 0.000_001 {
             processed = try MetalLayerCompositor.blend(
@@ -1179,7 +1215,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             effectKind: kind,
             seed: 0,
             time: Float(layout.logicalCornerRadius),
-            frameIndex: 0,
+            frameIndex: Float(layout.logicalRenderScale),
             direction: SIMD2(Float(layout.rasterScale.width), Float(layout.rasterScale.height)),
             parameters: SIMD4(
                 Float(shape.color.red),
@@ -1271,7 +1307,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             effectKind: kind,
             seed: 0,
             time: Float(layout.logicalCornerRadius),
-            frameIndex: 0,
+            frameIndex: Float(layout.logicalRenderScale),
             direction: SIMD2(Float(layout.rasterScale.width), Float(layout.rasterScale.height)),
             parameters: SIMD4(
                 Float(shape.color.red),
@@ -1348,7 +1384,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             effectKind: kind,
             seed: 0,
             time: Float(layout.logicalCornerRadius),
-            frameIndex: 0,
+            frameIndex: Float(layout.logicalRenderScale),
             direction: SIMD2(Float(layout.rasterScale.width), Float(layout.rasterScale.height)),
             parameters: SIMD4(
                 Float(shape.color.red),
@@ -1581,58 +1617,6 @@ final class MetalFrameRenderer: @unchecked Sendable {
         filter.backgroundImage = background
         filter.maskImage = maskImage
         return (filter.outputImage ?? image).cropped(to: extent)
-    }
-
-    private func applyBackgroundRemoval(
-        _ settings: BackgroundRemovalSettings,
-        matte: CIImage,
-        to image: CIImage,
-        renderScale: CGFloat
-    ) -> CIImage {
-        let extent = image.extent
-        guard extent.width > 1, extent.height > 1,
-            matte.extent.width > 1, matte.extent.height > 1
-        else { return transparentImage(croppedTo: extent) }
-        let normalizedMatte = matte.transformed(
-            by: CGAffineTransform(translationX: -matte.extent.minX, y: -matte.extent.minY)
-        )
-        var alignedMatte = normalizedMatte
-            .transformed(by: CGAffineTransform(
-                scaleX: extent.width / normalizedMatte.extent.width,
-                y: extent.height / normalizedMatte.extent.height
-            ))
-            .transformed(by: CGAffineTransform(
-                translationX: extent.minX,
-                y: extent.minY
-            ))
-            .cropped(to: extent)
-
-        let edgeRadius = Float(abs(settings.edgeRefinement) * 12 * Double(renderScale))
-        if edgeRadius > 0.05 {
-            if settings.edgeRefinement > 0 {
-                let morphology = CIFilter.morphologyMaximum()
-                morphology.inputImage = alignedMatte.clampedToExtent()
-                morphology.radius = edgeRadius
-                alignedMatte = (morphology.outputImage ?? alignedMatte).cropped(to: extent)
-            } else {
-                let morphology = CIFilter.morphologyMinimum()
-                morphology.inputImage = alignedMatte.clampedToExtent()
-                morphology.radius = edgeRadius
-                alignedMatte = (morphology.outputImage ?? alignedMatte).cropped(to: extent)
-            }
-        }
-        let featherRadius = Float(settings.feather * 24 * Double(renderScale))
-        if featherRadius > 0.05 {
-            let blur = CIFilter.gaussianBlur()
-            blur.inputImage = alignedMatte.clampedToExtent()
-            blur.radius = featherRadius
-            alignedMatte = (blur.outputImage ?? alignedMatte).cropped(to: extent)
-        }
-        let alphaBlend = CIFilter.blendWithAlphaMask()
-        alphaBlend.inputImage = image
-        alphaBlend.backgroundImage = transparentImage(croppedTo: extent)
-        alphaBlend.maskImage = alignedMatte
-        return (alphaBlend.outputImage ?? image).cropped(to: extent)
     }
 
     private func rasterMask(mask: ItemMask, maskRect: CGRect, extent: CGRect) -> CIImage {

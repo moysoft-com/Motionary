@@ -63,6 +63,7 @@ struct EditorWorkspacePillButton: View {
     let isSelected: Bool
     var isEnabled = true
     var indicatorColor: Color?
+    var horizontalPadding: CGFloat = 0
     var accessibilityValue: String?
     var haptic: () -> Void = { EditorHaptics.tap() }
     let action: () -> Void
@@ -90,12 +91,14 @@ struct EditorWorkspacePillButton: View {
                 }
             }
             .foregroundStyle(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
+            .padding(.horizontal, horizontalPadding)
             .frame(maxWidth: .infinity)
             .frame(height: MotionaryDesign.Control.compactHeight)
             .background(
                 isSelected ? MotionaryTheme.accent : MotionaryTheme.surface,
                 in: Capsule()
             )
+            .motionaryGlass()
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)

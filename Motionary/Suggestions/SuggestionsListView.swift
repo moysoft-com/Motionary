@@ -306,6 +306,7 @@ private struct SuggestionFilterBar: View {
                                 selectedFilter == filter ? MotionaryTheme.accent : Color.primary.opacity(0.07),
                                 in: Capsule(style: .continuous)
                             )
+                            .motionaryGlass()
                     }
                     .buttonStyle(.plain)
                     .accessibilityAddTraits(selectedFilter == filter ? .isSelected : [])

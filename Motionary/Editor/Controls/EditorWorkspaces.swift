@@ -563,7 +563,6 @@ struct EffectsWorkspaceView: View {
     @Binding var activeEffectID: UUID?
 
     @State private var isLibraryPresented = false
-    @State private var librarySelection: EffectModuleID = .cinematicBloom
     @State private var workspacePage: Int? = 0
     @State private var visibleEffectID: UUID?
     @State private var pullToAddEffectDistance: CGFloat = 0
@@ -686,7 +685,7 @@ struct EffectsWorkspaceView: View {
             }
         }
         .sheet(isPresented: $isLibraryPresented) {
-            EffectLibrarySheet(selectedModuleID: $librarySelection) { moduleID in
+            EffectLibrarySheet { moduleID in
                 if let effectID = viewModel.addEffect(moduleID: moduleID) {
                     openEffectDetail(effectID)
                 }
@@ -1359,96 +1358,100 @@ private struct EffectStackDisclosureRow: View {
 
 private struct EffectLibrarySheet: View {
     @Environment(\.dismiss) private var dismiss
-    @Binding var selectedModuleID: EffectModuleID
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var selectedModuleID: EffectModuleID?
     let onConfirm: (EffectModuleID) -> Void
 
     @State private var query = ""
     @State private var selectedCategory: EffectCategory?
 
     private let columns = [
-        GridItem(.adaptive(minimum: 126, maximum: 170), spacing: 12)
+        GridItem(.adaptive(minimum: 100), spacing: MotionaryDesign.Spacing.lg)
     ]
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                Text("Effect Library")
-                    .font(.headline.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        NavigationStack {
+            VStack(spacing: MotionaryDesign.Spacing.xl) {
+                EffectSearchField(text: $query)
+                    .padding(.horizontal, MotionaryDesign.Spacing.xxl)
 
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(MotionaryDesign.Typography.compactIcon)
-                        .frame(width: 34, height: 34)
-                        .background(MotionaryTheme.surface, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close effect library")
-
-                Button {
-                    onConfirm(selectedModuleID)
-                } label: {
-                    Label("Add", systemImage: "checkmark")
-                        .font(MotionaryDesign.Typography.pillLabel)
-                        .foregroundStyle(MotionaryTheme.foregroundOnAccent)
-                        .frame(width: 78, height: 34)
-                        .background(MotionaryTheme.accent, in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-
-            EffectSearchField(text: $query)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    EffectCategoryChip(
-                        title: "All",
-                        isSelected: selectedCategory == nil
-                    ) {
-                        selectedCategory = nil
-                    }
-                    ForEach(EffectCategory.allCases) { category in
-                        EffectCategoryChip(
-                            title: category.rawValue,
-                            isSelected: selectedCategory == category
-                        ) {
-                            selectedCategory = category
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: MotionaryDesign.Spacing.sm) {
+                        EffectCategoryChip(title: "All", isSelected: selectedCategory == nil) {
+                            selectedCategory = nil
+                        }
+                        ForEach(EffectCategory.allCases) { category in
+                            EffectCategoryChip(
+                                title: category.rawValue,
+                                isSelected: selectedCategory == category
+                            ) {
+                                selectedCategory = category
+                            }
                         }
                     }
+                    .padding(.horizontal, MotionaryDesign.Spacing.xxl)
+                    .padding(.vertical, 2)
                 }
-                .padding(.vertical, 1)
-            }
 
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(filteredModules) { module in
-                        EffectLibraryTile(
-                            module: module,
-                            isSelected: selectedModuleID == module.id
-                        ) {
-                            selectedModuleID = module.id
+                ScrollView {
+                    if filteredModules.isEmpty {
+                        ContentUnavailableView.search(text: query)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, MotionaryDesign.Spacing.xxl)
+                    } else {
+                        LazyVGrid(columns: columns, spacing: MotionaryDesign.Spacing.xl) {
+                            ForEach(filteredModules) { module in
+                                EffectLibraryTile(
+                                    module: module,
+                                    isSelected: selectedModuleID == module.id
+                                ) {
+                                    selectedModuleID = selectedModuleID == module.id ? nil : module.id
+                                }
+                            }
                         }
+                        .padding(.horizontal, MotionaryDesign.Spacing.xxl)
+                        .padding(.bottom, MotionaryDesign.Spacing.xxl)
                     }
                 }
-                .padding(.bottom, 12)
+                .scrollIndicators(.hidden)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .scrollIndicators(.hidden)
+            .padding(.top, MotionaryDesign.Spacing.lg)
+            .background {
+                MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea()
+            }
+            .navigationTitle("Effect Library")
+            .navigationBarTitleDisplayMode(.inline)
+            .tint(MotionaryTheme.accent)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", role: .cancel) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        guard let selectedModuleID else { return }
+                        onConfirm(selectedModuleID)
+                    }
+                        .disabled(selectedModuleID == nil)
+                        .fontWeight(.semibold)
+                        .accessibilityLabel("Add selected effect")
+                }
+            }
         }
-        .padding(MotionaryDesign.Spacing.xl)
-        .presentationDetents([.height(540), .large])
+        .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .onAppear { selectedModuleID = nil }
     }
 
     private var filteredModules: [EffectModuleDescriptor] {
-        EffectRegistry.shared.modules.filter { module in
+        let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return EffectRegistry.shared.modules.filter { module in
             let matchesCategory = selectedCategory.map { module.category == $0 } ?? true
             let matchesQuery =
-                query.isEmpty
-                || module.name.localizedCaseInsensitiveContains(query)
-                || module.summary.localizedCaseInsensitiveContains(query)
-                || module.category.rawValue.localizedCaseInsensitiveContains(query)
+                search.isEmpty
+                || module.name.localizedCaseInsensitiveContains(search)
+                || module.summary.localizedCaseInsensitiveContains(search)
+                || module.category.rawValue.localizedCaseInsensitiveContains(search)
             return matchesCategory && matchesQuery
         }
     }
@@ -1478,9 +1481,14 @@ private struct EffectSearchField: View {
                 .accessibilityLabel("Clear search")
             }
         }
-        .padding(.horizontal, 10)
-        .frame(height: 38)
-        .background(MotionaryTheme.surfaceSubtle, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, EditorWorkspaceControlStyle.horizontalPadding)
+        .frame(height: EditorWorkspaceControlStyle.height)
+        .foregroundStyle(MotionaryTheme.textPrimary)
+        .background(
+            MotionaryDesign.Surface.control(),
+            in: Capsule()
+        )
+        .motionaryGlass()
     }
 }
 
@@ -1490,18 +1498,13 @@ private struct EffectCategoryChip: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(MotionaryDesign.Typography.pillLabel)
-                .foregroundStyle(isSelected ? MotionaryTheme.foregroundOnAccent : MotionaryTheme.textPrimary)
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(
-                    isSelected ? MotionaryTheme.accent : MotionaryTheme.surface,
-                    in: Capsule()
-                )
-        }
-        .buttonStyle(.plain)
+        EditorWorkspacePillButton(
+            title: title,
+            isSelected: isSelected,
+            horizontalPadding: MotionaryDesign.Spacing.lg,
+            action: action
+        )
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -1511,32 +1514,41 @@ private struct EffectLibraryTile: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
+        Button {
+            EditorHaptics.tap()
+            action()
+        } label: {
+            VStack(alignment: .center) {
                 EffectPreviewTileImage(moduleID: module.id, isSelected: isSelected)
                     .aspectRatio(1, contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
+                    .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(
+                            cornerRadius: MotionaryDesign.Radius.panel,
+                            style: .continuous
+                        )
+                        .strokeBorder(
+                            MotionaryTheme.accent,
+                            lineWidth: isSelected ? 4 : 0
+                        )
+                        .opacity(isSelected ? 1 : 0)
+                    }
+                    .animation(.smooth(duration: 0.25), value: isSelected)
+                    .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
                 Text(module.name)
-                    .font(MotionaryDesign.Typography.pillLabel)
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(MotionaryTheme.textPrimary)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .frame(height: 30, alignment: .topLeading)
+                    .lineLimit(1, reservesSpace: true)
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
-            .padding(8)
-            .background(
-                isSelected ? MotionaryTheme.accent.opacity(0.22) : MotionaryTheme.surfaceSubtle,
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isSelected ? MotionaryTheme.accent : MotionaryTheme.separator, lineWidth: 1)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(module.name)
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityHint(module.summary)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }
 
@@ -1545,6 +1557,7 @@ private struct EffectPreviewTileImage: View {
     let isSelected: Bool
 
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var renderedPreview: UIImage?
     @State private var originalPreview: UIImage?
 
@@ -1556,7 +1569,7 @@ private struct EffectPreviewTileImage: View {
                     .frame(width: size.width, height: size.height)
                     .clipped()
 
-                if isSelected, originalPreview != nil, renderedPreview != nil {
+                if isSelected, !reduceMotion, originalPreview != nil, renderedPreview != nil {
                     TimelineView(.animation) { timeline in
                         let progress = splitProgress(at: timeline.date)
                         ZStack {
@@ -2570,6 +2583,8 @@ struct SelectedLayerMiniTimeline: View {
                     contentSize: CGSize(width: contentWidth, height: geometry.size.height),
                     isScrollDisabled: false,
                     allowsVerticalScrolling: false,
+                    playbackState: playbackState,
+                    playerProvider: { viewModel.player },
                     onScrubStart: { viewModel.beginScrub() },
                     onScrubChanged: { time in
                         viewModel.updateScrub(to: time)
@@ -2647,6 +2662,7 @@ struct SelectedLayerMiniTimeline: View {
                     }
                     .frame(width: contentWidth, height: geometry.size.height, alignment: .leading)
                 }
+                .mask { TimelineHorizontalEdgeMask(fadeWidth: 24) }
                 .overlay {
                     Rectangle()
                         .fill(MotionaryTheme.selected)
@@ -2655,8 +2671,8 @@ struct SelectedLayerMiniTimeline: View {
                 }
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.compactPanel, style: .continuous))
-        .motionaryGlass(cornerRadius: MotionaryDesign.Radius.compactPanel)
+        .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
+        .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
         .background {
             TimelineDisplayLink(
                 player: viewModel.player,

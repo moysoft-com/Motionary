@@ -27,28 +27,28 @@
 	<key>UIApplicationShortcutItems</key>
 	<array>
 		<dict>
-			<key>UIApplicationShortcutItemType</key>
-			<string>com.moysoft.motionary.new-project</string>
-			<key>UIApplicationShortcutItemTitle</key>
-			<string>New Project</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>plus</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>New Project</string>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.moysoft.motionary.new-project</string>
 		</dict>
 		<dict>
-			<key>UIApplicationShortcutItemType</key>
-			<string>com.moysoft.motionary.settings</string>
-			<key>UIApplicationShortcutItemTitle</key>
-			<string>Settings</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>gearshape</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Settings</string>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.moysoft.motionary.settings</string>
 		</dict>
 		<dict>
-			<key>UIApplicationShortcutItemType</key>
-			<string>com.moysoft.motionary.change-icon</string>
-			<key>UIApplicationShortcutItemTitle</key>
-			<string>Change App Icon</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
 			<string>arrow.triangle.2.circlepath</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Change App Icon</string>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.moysoft.motionary.change-icon</string>
 		</dict>
 	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

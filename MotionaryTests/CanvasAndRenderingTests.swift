@@ -47,6 +47,231 @@ private final class DiagnosticsRecorder: @unchecked Sendable {
 
 @Suite(.serialized)
 struct CanvasAndRenderingTests {
+    @Test func completedRenderRequestsReleaseTimeoutCapturesImmediately() {
+        let finisher = MotionaryVideoCompositor.RequestFinisher()
+        weak var capturedObject: NSObject?
+        do {
+            let object = NSObject()
+            capturedObject = object
+            finisher.setTimeoutAction { _ = object.description }
+        }
+        #expect(capturedObject != nil)
+        #expect(finisher.finish {})
+        #expect(capturedObject == nil)
+        finisher.timeOut()
+        #expect(!finisher.finish {})
+    }
+
+    @MainActor
+    @Test(arguments: [false, true], [EffectModuleID.cinematicBloom, .analogGlitch, .fineGrain])
+    func renderedSpatialEffectsMatchProjectPixelsAtDifferentResolutions(onAdjustmentLayer: Bool, moduleID: EffectModuleID) throws {
+        let effects = try [moduleID].map {
+            try #require(EffectRegistry.shared.makeEffect(moduleID: $0))
+        }
+        let stack = EffectStack(effects: effects)
+        func descriptor(shape: ClipShape?, stack: EffectStack, adjustment: Bool) -> RenderClipDescriptor {
+            RenderClipDescriptor(
+                trackID: kCMPersistentTrackID_Invalid,
+                backgroundMaskTrackID: nil,
+                clipID: UUID(),
+                timelineStart: 0,
+                duration: 1,
+                sourceTransform: .identity,
+                backgroundMaskSourceTransform: .identity,
+                transform: ClipTransform(),
+                adjustments: AdjustmentSettings(),
+                effectStack: stack,
+                mask: nil,
+                backgroundRemoval: nil,
+                blendMode: .normal,
+                blendIntensity: 1,
+                shape: shape,
+                text: nil,
+                role: adjustment ? .adjustment : .content,
+                renderOrder: adjustment ? 1 : 0
+            )
+        }
+        let shape = ClipShape(kind: .rectangle, color: .white, width: 32, height: 24)
+        var clips = [descriptor(shape: shape, stack: onAdjustmentLayer ? EffectStack() : stack, adjustment: false)]
+        if onAdjustmentLayer {
+            clips.append(descriptor(shape: nil, stack: stack, adjustment: true))
+        }
+        let renderer = try MetalFrameRenderer()
+        let context = CIContext()
+        var reference: CIImage?
+        for dimension in [64, 64, 128, 64, 256, 64] {
+            var buffer: CVPixelBuffer?
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault, dimension, dimension, kCVPixelFormatType_32BGRA,
+                [kCVPixelBufferMetalCompatibilityKey: true,
+                 kCVPixelBufferIOSurfacePropertiesKey: [String: String]()] as CFDictionary,
+                &buffer
+            )
+            #expect(status == kCVReturnSuccess)
+            let destination = try #require(buffer)
+            try renderer.render(
+                plan: FrameRenderPlan(
+                    renderSize: CGSize(width: dimension, height: dimension),
+                    renderScale: CGFloat(dimension) / 64,
+                    backgroundColor: .black,
+                    frameDuration: 1 / 30,
+                    clips: clips,
+                    quality: .export,
+                    failurePolicy: .failOnUnavailableEffects
+                ),
+                compositionTime: .zero,
+                sourceFrame: { _ in nil },
+                destination: destination,
+                isCancelled: { false }
+            )
+            let actual = CIImage(cvPixelBuffer: destination)
+            if let reference {
+                let scale = CGFloat(dimension) / 64
+                let expected = reference.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                let bounds = CGRect(x: 0, y: 0, width: dimension, height: dimension)
+                var pixels = [UInt8](repeating: 0, count: dimension * dimension * 4)
+                var expectedPixels = pixels
+                context.render(actual, toBitmap: &pixels, rowBytes: dimension * 4,
+                               bounds: bounds, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+                context.render(expected, toBitmap: &expectedPixels, rowBytes: dimension * 4,
+                               bounds: bounds, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+                let error = zip(expectedPixels, pixels).reduce(0.0) { $0 + abs(Double($1.0) - Double($1.1)) }
+                    / Double(pixels.count)
+                #expect(error < 4, "Rendered effect appearance changed at \(dimension)px: mean error \(error)")
+            } else {
+                reference = actual
+            }
+        }
+    }
+
+    @MainActor
+    @Test(arguments: [720, 1080, 2160])
+    func effectStackExportsAtHDAnd4K(height: Int) async throws {
+        let effects = try [EffectModuleID.cinematicBloom, .analogGlitch, .fineGrain].map {
+            try #require(EffectRegistry.shared.makeEffect(moduleID: $0))
+        }
+        let shape = ShapeTimelineItem(
+            name: "Export regression",
+            mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: .white, width: 140, height: 80),
+            timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1),
+            visuals: TimelineItemVisuals(effectStack: EffectStack(effects: effects))
+        )
+        let project = EditorProject(
+            title: "Effect export regression",
+            renderSettings: RenderSettings(width: 320, height: 180, frameRate: 10),
+            tracks: [TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])]
+        )
+        let width = height * 16 / 9
+        let settings = VideoExportSettings(
+            width: width, height: height, frameRate: 10,
+            videoBitrate: 8_000_000, audioBitrate: 96_000,
+            codec: .h264, container: .mp4
+        )
+        let url = try await VideoExportService().export(project: project, settings: settings, progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let size = try await track.load(.naturalSize)
+        #expect(Int(size.width) == width)
+        #expect(Int(size.height) == height)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.maximumSize = CGSize(width: 320, height: 180)
+        let frame = try await generator.image(at: .zero).image
+        let pixel = try rgbaPixel(in: frame, x: frame.width / 2, y: frame.height / 2)
+        #expect(pixel[0] > 100 && pixel[1] > 100 && pixel[2] > 100)
+    }
+
+    @Test func photosRejectionPreservesTheCompletedVideo() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let input = folder.appendingPathComponent("export.mp4")
+        let data = Data([1, 2, 3, 4])
+        try data.write(to: input)
+        let saved = try PhotoLibraryExportService.preserveVideo(at: input, directory: folder.appendingPathComponent("saved"))
+        try FileManager.default.removeItem(at: input)
+        #expect(try Data(contentsOf: saved) == data)
+        #expect(saved.pathExtension == "mp4")
+    }
+
+    @MainActor
+    @Test(arguments: [false, true])
+    func encodedExportBrightnessDoesNotChangeWithResolution(withGlitch: Bool) async throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 128, height: 128), format: format).image { context in
+            for (index, gray) in [0.18, 0.35, 0.55, 0.75].enumerated() {
+                UIColor(white: gray, alpha: 1).setFill()
+                context.fill(CGRect(x: (index % 2) * 64, y: (index / 2) * 64, width: 64, height: 64))
+            }
+        }
+        let input = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
+        try #require(image.pngData()).write(to: input)
+        defer { try? FileManager.default.removeItem(at: input) }
+        let source = ClipSource(url: input, mediaType: .image, originalDuration: 0.3,
+                                naturalSize: CGSizeValue(width: 128, height: 128))
+        let clip = TimelineClip(name: "Gray values", source: source, timelineStart: 0,
+                                sourceRange: TimeRangeValue(start: 0, duration: 0.3))
+        var tracks = [TimelineTrack(name: "Image", kind: .visual, clips: [clip])]
+        if withGlitch {
+            let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .analogGlitch))
+            let adjustment = AdjustmentTimelineItem(timelineStart: 0, duration: 0.3,
+                visuals: TimelineItemVisuals(effectStack: EffectStack(effects: [effect])))
+            tracks.insert(TimelineTrack(name: "Glitch", kind: .visual, items: [.adjustment(adjustment)]), at: 0)
+        }
+        let project = EditorProject(title: "Brightness", renderSettings: RenderSettings(width: 128, height: 128, frameRate: 10), tracks: tracks)
+        var reference: [[UInt8]]?
+        for dimension in [128, 64, 256, 512] {
+            let settings = VideoExportSettings(width: dimension, height: dimension, frameRate: 10,
+                videoBitrate: 8_000_000, audioBitrate: 96_000, codec: .h264, container: .mp4)
+            let url = try await VideoExportService().export(project: project, settings: settings, progress: { _ in })
+            defer { try? FileManager.default.removeItem(at: url) }
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+            let frame = try await generator.image(at: .zero).image
+            let samples = try [(1, 1), (3, 1), (1, 3), (3, 3)].map { x, y in
+                try rgbaPixel(in: frame, x: frame.width * x / 4, y: frame.height * y / 4)
+            }
+            if let reference {
+                for (expected, actual) in zip(reference, samples) {
+                    for channel in 0..<3 {
+                        #expect(abs(Int(expected[channel]) - Int(actual[channel])) <= 5,
+                                "Brightness changed at \(dimension)px: \(reference) -> \(samples)")
+                    }
+                }
+            } else { reference = samples }
+        }
+    }
+
+    @Test func mediaEffectsStayInSourcePixelsAcrossOutputResolutions() {
+        for outputScale: CGFloat in [0.5, 1, 2, 4] {
+            let coordinates = LayerEffectCoordinates(
+                isGeneratedLayer: false,
+                outputScale: outputScale,
+                rasterScaleCorrection: CGSize(width: 1, height: 1)
+            )
+            #expect(coordinates.renderScale == 1)
+            #expect(coordinates.inputTransform == .identity)
+        }
+    }
+
+    @Test func generatedEffectRadiusSurvivesOutputAndNonUniformRasterScaling() {
+        for outputScale: CGFloat in [0.5, 1, 2] {
+            let correction = CGSize(width: 0.25, height: 0.5)
+            let coordinates = LayerEffectCoordinates(
+                isGeneratedLayer: true,
+                outputScale: outputScale,
+                rasterScaleCorrection: correction
+            )
+            let radius = 36 * coordinates.renderScale
+            let restored = CGSize(width: radius, height: radius)
+                .applying(coordinates.inputTransform.inverted())
+            #expect(restored.width * correction.width / outputScale == 36)
+            #expect(restored.height * correction.height / outputScale == 36)
+        }
+    }
+
     @Test func canvasPositionSnappingUsesReleaseHysteresis() {
         let targets = PreviewSnapTargets(x: [100], y: [])
         let acquired = PreviewSnapEngine.position(
@@ -1467,6 +1692,80 @@ struct CanvasAndRenderingTests {
             )
 
             #expect(averageAlpha(in: transparentHalf, of: output) < 1)
+        }
+    }
+
+    @MainActor
+    @Test(arguments: BackgroundRemovalMode.allCases)
+    func backgroundCutoutSurvivesCompositionAndEncodedExport(mode: BackgroundRemovalMode) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format).image { context in
+            UIColor.green.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 32, height: 64))
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 32, y: 0, width: 32, height: 64))
+        }
+        let url = directory.appendingPathComponent("source.png")
+        try #require(image.pngData()).write(to: url)
+        let source = ClipSource(url: url, mediaType: .image, originalDuration: 0.4,
+            naturalSize: CGSizeValue(width: 64, height: 64))
+        let clip = TimelineClip(name: "Cutout", source: source, timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 0.4))
+        var project = EditorProject(title: "Cutout", renderSettings: RenderSettings(width: 64, height: 64, frameRate: 10),
+            tracks: [TimelineTrack(name: "Layer 1", kind: .visual, clips: [clip])])
+        let uncutProject = project
+        var item = try #require(project.item(id: clip.id))
+        var visuals = try #require(item.editableVisuals)
+        visuals.backgroundRemoval = BackgroundRemovalSettings(mode: mode, strokes: [
+            BackgroundBrushStroke(points: [BackgroundBrushPoint(x: 0.25, y: 0.5)], diameter: 0.4, restores: false)
+        ])
+        item.editableVisuals = visuals
+        project.replaceItem(id: clip.id, with: item)
+        if mode == .automatic {
+            let mask = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64), format: format).image { context in
+                UIColor.black.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+                UIColor.white.setFill()
+                context.fill(CGRect(x: 32, y: 0, width: 32, height: 64))
+            }
+            let maskURL = directory.appendingPathComponent("matte.png")
+            try #require(mask.pngData()).write(to: maskURL)
+            let mediaID = try #require(project.mediaLibrary.keys.first)
+            project.mediaLibrary[mediaID]?.backgroundRemovalArtifact = BackgroundRemovalArtifact(
+                url: maskURL, sourceRange: clip.sourceRange, sourceFingerprint: "fixture")
+        }
+        let settings = VideoExportSettings(width: 64, height: 64, frameRate: 10,
+            videoBitrate: 500_000, audioBitrate: 96_000, codec: .h264, container: .mp4)
+        let output = try await VideoExportService().export(project: project, settings: settings, progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: output) }
+        let frame = try await AVAssetImageGenerator(asset: AVURLAsset(url: output))
+            .image(at: CMTime(seconds: 0.2, preferredTimescale: 600)).image
+        let removed = try rgbaPixel(in: frame, x: 16, y: 32)
+        let retained = try rgbaPixel(in: frame, x: 48, y: 32)
+        #expect(removed[0] < 25 && removed[1] < 25 && removed[2] < 25)
+        #expect(retained[0] > 180 && retained[1] < 40 && retained[2] < 40)
+        if mode != .automatic {
+            let rawVideo = try await VideoExportService().export(project: uncutProject, settings: settings, progress: { _ in })
+            defer { try? FileManager.default.removeItem(at: rawVideo) }
+            let mediaID = try #require(project.mediaLibrary.keys.first)
+            project.mediaLibrary[mediaID]?.url = rawVideo
+            project.mediaLibrary[mediaID]?.mediaType = .video
+            if case .media(var media) = project.item(id: clip.id) {
+                media.mediaType = .video
+                project.replaceItem(id: media.id, with: .media(media))
+            }
+            let videoOutput = try await VideoExportService().export(project: project, settings: settings, progress: { _ in })
+            defer { try? FileManager.default.removeItem(at: videoOutput) }
+            let videoFrame = try await AVAssetImageGenerator(asset: AVURLAsset(url: videoOutput))
+                .image(at: CMTime(seconds: 0.2, preferredTimescale: 600)).image
+            let keyed = try rgbaPixel(in: videoFrame, x: 16, y: 32)
+            let subject = try rgbaPixel(in: videoFrame, x: 48, y: 32)
+            #expect(keyed[0] < 25 && keyed[1] < 25 && keyed[2] < 25)
+            #expect(subject[0] > 180 && subject[1] < 40 && subject[2] < 40)
         }
     }
 

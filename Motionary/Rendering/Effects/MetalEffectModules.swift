@@ -177,8 +177,13 @@ private enum MetalEffectSupport {
         let localImage = image.transformed(
             by: CGAffineTransform(translationX: -extent.minX, y: -extent.minY)
         )
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        // CI only writes the image's extent. Pooled textures contain previous
+        // pixels, so explicitly cover padding with transparent pixels as well.
+        let paddedImage = localImage.composited(over: CIImage(color: .clear).cropped(to: bounds))
+            .cropped(to: bounds)
         resources.owner.ciContext.render(
-            localImage,
+            paddedImage,
             to: texture,
             commandBuffer: resources.commandBuffer,
             bounds: CGRect(x: 0, y: 0, width: width, height: height),

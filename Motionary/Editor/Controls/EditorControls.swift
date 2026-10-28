@@ -217,6 +217,7 @@ struct CoreToolBar: View {
             }
             .padding(MotionaryDesign.Spacing.sm)
         }
+        .modifier(ToolbarScrollEdgeFade())
         .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
         .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
         .task(id: audioExtractionTaskID) {
@@ -483,5 +484,65 @@ private struct AudioImportMenu: View {
         .buttonStyle(.plain)
         .disabled(viewModel.isPerformingLongTask)
         .accessibilityLabel("Import audio")
+    }
+}
+
+private struct ToolbarScrollEdgeFade: ViewModifier {
+    @State private var edgeStrength: CGPoint = .zero
+    private let fadeWidth: CGFloat = 24
+
+    func body(content: Content) -> some View {
+        content
+            .onScrollGeometryChange(for: CGPoint.self) { geometry in
+                let leadingDistance = geometry.contentOffset.x + geometry.contentInsets.leading
+                let trailingDistance = geometry.contentSize.width + geometry.contentInsets.trailing
+                    - geometry.containerSize.width - geometry.contentOffset.x
+                return CGPoint(
+                    x: strength(for: leadingDistance),
+                    y: strength(for: trailingDistance)
+                )
+            } action: { _, strength in
+                edgeStrength = strength
+            }
+            .mask {
+                ToolbarScrollFadeMask(leading: edgeStrength.x, trailing: edgeStrength.y)
+                    .animation(.easeOut(duration: 0.12), value: edgeStrength)
+            }
+    }
+
+    private func strength(for distance: CGFloat) -> CGFloat {
+        let progress = min(max(distance / fadeWidth, 0), 1)
+        return progress * progress * (3 - 2 * progress)
+    }
+}
+
+private struct ToolbarScrollFadeMask: View, Animatable {
+    var leading: CGFloat
+    var trailing: CGFloat
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(leading, trailing) }
+        set {
+            leading = newValue.first
+            trailing = newValue.second
+        }
+    }
+
+    var body: some View {
+        TimelineHorizontalEdgeMask(fadeWidth: 24, cornerRadius: MotionaryDesign.Radius.panel)
+            .overlay {
+                // Restore alpha independently at each end, including its rounded corners.
+                // Interpolating through the middle keeps the top/bottom contour continuous.
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(Double(1 - leading)), location: 0),
+                        .init(color: .white.opacity(Double(1 - leading)), location: 0.25),
+                        .init(color: .white.opacity(Double(1 - trailing)), location: 0.75),
+                        .init(color: .white.opacity(Double(1 - trailing)), location: 1)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            }
     }
 }

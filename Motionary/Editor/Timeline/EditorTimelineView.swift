@@ -84,8 +84,20 @@ struct CoreTimelineLayout: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            timelineScroll
-            rulerOverlay
+            ZStack(alignment: .topLeading) {
+                timelineScroll
+                rulerOverlay
+            }
+            .mask {
+                TimelineTrackViewportMask(
+                    scrollState: scrollPresentationState,
+                    tracks: snapshot.tracks,
+                    centerPadding: centerPadding,
+                    trackHeight: trackHeight,
+                    rowStride: trackHeight + rowSpacing,
+                    activeTrackDrag: activeTrackDrag
+                )
+            }
             playhead
             pullToAddIndicator
         }
@@ -358,5 +370,95 @@ struct TimelineDisplayLink: UIViewRepresentable {
                 preferred: Float(native)
             )
         }
+    }
+}
+
+/// Alpha-only fade following the panel contour, with a wider horizontal transition.
+struct TimelineHorizontalEdgeMask: View {
+    var fadeWidth: CGFloat = 28
+    var cornerRadius: CGFloat = 20
+    var verticalFade: CGFloat = 6
+
+    var body: some View {
+        Canvas { context, size in
+            let horizontalInset = min(max(fadeWidth, 0), size.width * 0.5)
+            let verticalInset = min(max(verticalFade, 0), size.height * 0.5)
+            let radius = min(max(cornerRadius, 0), min(size.width, size.height) * 0.5)
+            var previousOpacity = 0.0
+
+            // Nested contours sample the same ease-out curve on every edge.
+            // Source-over increments preserve that curve without darkening the surface.
+            for step in 1...64 {
+                let progress = Double(step) / 64
+                let opacity = 1 - pow(1 - progress, 2)
+                let layerOpacity = (opacity - previousOpacity) / (1 - previousOpacity)
+                let insetProgress = CGFloat(step - 1) / 64
+                let rect = CGRect(origin: .zero, size: size).insetBy(
+                    dx: horizontalInset * insetProgress,
+                    dy: verticalInset * insetProgress
+                )
+                let contour = RoundedRectangle(
+                    cornerRadius: radius * (1 - insetProgress),
+                    style: .continuous
+                ).path(in: rect)
+                context.fill(contour, with: .color(.white.opacity(layerOpacity)))
+                previousOpacity = opacity
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct TimelineTrackViewportMask: View {
+    @ObservedObject var scrollState: TimelineScrollPresentationState
+    let tracks: [TimelineTrack]
+    let centerPadding: CGFloat
+    let trackHeight: CGFloat
+    let rowStride: CGFloat
+    let activeTrackDrag: TimelineTrackDragState?
+
+    var body: some View {
+        let header = TimelineTrackHeaderLayout(
+            centerPadding: centerPadding,
+            horizontalOffset: scrollState.horizontalOffset
+        )
+        TimelineHorizontalEdgeMask()
+            .overlay(alignment: .topLeading) {
+                GeometryReader { geometry in
+                    ZStack(alignment: .topLeading) {
+                        ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
+                            let reorder = reorderOffset(for: track.id, index: index)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(.white.opacity(Double(1 - header.transitionProgress)))
+                                .frame(width: TimelineTrackHeaderLayout.width, height: trackHeight)
+                                .offset(
+                                    x: header.viewportOffset,
+                                    y: 38 + CGFloat(index) * rowStride + reorder - scrollState.verticalOffset
+                                )
+                                .animation(
+                                    activeTrackDrag?.trackID == track.id
+                                        ? nil
+                                        : .interactiveSpring(response: 0.22, dampingFraction: 0.86),
+                                    value: reorder
+                                )
+                        }
+                    }
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+                    .mask(alignment: .bottom) {
+                        Rectangle().frame(height: max(geometry.size.height - 38, 0))
+                    }
+                }
+            }
+            .allowsHitTesting(false)
+    }
+
+    private func reorderOffset(for trackID: UUID, index: Int) -> CGFloat {
+        guard let drag = activeTrackDrag else { return 0 }
+        if drag.trackID == trackID { return drag.translationY }
+        if drag.sourceIndex < drag.targetIndex,
+            index > drag.sourceIndex, index <= drag.targetIndex { return -rowStride }
+        if drag.targetIndex < drag.sourceIndex,
+            index >= drag.targetIndex, index < drag.sourceIndex { return rowStride }
+        return 0
     }
 }

@@ -339,18 +339,29 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             )
         }
 
-        @objc private func handlePlaybackFrame() {
+        @objc func handlePlaybackFrame() {
             guard parent.playbackState?.isPlaying == true,
-                !isUserInteracting,
-                let scrollView,
-                let player = parent.playerProvider?()
+                !isUserInteracting || isPinching,
+                let scrollView
             else { return }
-            let seconds = CMTimeGetSeconds(player.currentTime())
-            guard seconds.isFinite else { return }
-            scroll(
-                to: min(max(seconds, 0), parent.maximumTimelineTime),
-                in: scrollView
-            )
+            let time = currentPlaybackTime
+            if isPinching {
+                pinchAnchorTime = time
+                keepPinchAnchorCentered(pixelsPerSecond: parent.pixelsPerSecond, in: scrollView)
+            } else {
+                scroll(to: time, in: scrollView)
+            }
+        }
+
+        private var currentPlaybackTime: Double {
+            if let player = parent.playerProvider?() {
+                let time = CMTimeGetSeconds(player.currentTime())
+                if time.isFinite {
+                    return min(max(time, 0), parent.maximumTimelineTime)
+                }
+            }
+            let time = parent.playbackState?.currentTime ?? parent.currentTime
+            return min(max(time, 0), parent.maximumTimelineTime)
         }
 
         func updateAutoScroll(in scrollView: UIScrollView) {
@@ -481,6 +492,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func beginScroll(in scrollView: UIScrollView, translation: CGPoint) {
+            guard !isPinching, scrollView.panGestureRecognizer.numberOfTouches < 2 else { return }
             isUserInteracting = true
             scrollStartX = scrollView.contentOffset.x
             // Horizontal and vertical scrolling can share the same pan. Only a
@@ -608,6 +620,14 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             in scrollView: UIScrollView,
             force: Bool = false
         ) {
+            let verticalOffset = scrollView.contentOffset.y
+            if isUpdatingUIView {
+                DispatchQueue.main.async { [weak state = parent.scrollPresentationState] in
+                    state?.update(verticalOffset: verticalOffset)
+                }
+            } else {
+                parent.scrollPresentationState?.update(verticalOffset: verticalOffset)
+            }
             guard let viewportState = parent.viewportState,
                 let configuration = parent.virtualizationConfiguration,
                 scrollView.bounds.width > 0,
@@ -705,7 +725,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
             guard let scrollView = recognizer.view as? UIScrollView else { return }
 
-            switch recognizer.state {
+            updatePinch(state: recognizer.state, scale: recognizer.scale, in: scrollView)
+        }
+
+        func updatePinch(state: UIGestureRecognizer.State, scale: CGFloat, in scrollView: UIScrollView) {
+            switch state {
             case .began:
                 if isUserInteracting { finishScrub(scrollView) }
                 isPinching = true
@@ -716,9 +740,9 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                     parent.maximumTimelineTime
                 )
             case .changed:
-                applyPinchScale(recognizer.scale, in: scrollView)
+                applyPinchScale(scale, in: scrollView)
             case .ended, .cancelled, .failed:
-                applyPinchScale(recognizer.scale, in: scrollView)
+                applyPinchScale(scale, in: scrollView)
                 isPinching = false
                 isUserInteracting = false
             default:
@@ -769,6 +793,9 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             pixelsPerSecond: CGFloat,
             in scrollView: UIScrollView
         ) {
+            if parent.playbackState?.isPlaying == true {
+                pinchAnchorTime = currentPlaybackTime
+            }
             let targetX = CGFloat(pinchAnchorTime) * pixelsPerSecond
             // `parent.contentSize` is updated by SwiftUI on the next render pass. During a
             // pinch it therefore still describes the previous scale. Derive the horizontal

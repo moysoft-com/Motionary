@@ -117,6 +117,15 @@ extension EditorViewModel {
     }
 
     func togglePlayback() {
+        if previewRecoveryCircuitIsOpen {
+            pendingPlaybackResumeAfterPreviewRebuild = true
+            schedulePreviewRebuild(
+                seekTo: currentTime,
+                delay: false,
+                invalidation: [.previewFrame, .compositionTopology, .audioMix]
+            )
+            return
+        }
         guard let player else { return }
         playbackCommandGeneration &+= 1
         let commandGeneration = playbackCommandGeneration
@@ -133,7 +142,20 @@ extension EditorViewModel {
             return
         }
 
-        cancelPendingPreviewRebuildBeforePlaybackStart()
+        // A delayed rebuild may contain the last committed edit. Playing the
+        // retained graph after discarding it would present stale geometry or
+        // timing until another edit happens to trigger a rebuild.
+        if rebuildTask != nil {
+            pendingPlaybackResumeAfterPreviewRebuild = true
+            if !isRenderingPreview {
+                schedulePreviewRebuild(
+                    seekTo: currentTime,
+                    delay: false,
+                    invalidation: pendingPreviewInvalidation.union([.previewFrame])
+                )
+            }
+            return
+        }
 
         let endTolerance = max(keyframeTimeTolerance, 0.05)
         if duration > 0, currentTime >= max(duration - endTolerance, 0) {
@@ -147,16 +169,18 @@ extension EditorViewModel {
                     to: 0,
                     toleranceBefore: .zero,
                     toleranceAfter: .zero,
-                    timeoutNanoseconds: 700_000_000
+                    timeoutNanoseconds: 5_000_000_000
                 )
                 guard self.player === player,
                     self.playbackCommandGeneration == commandGeneration
                 else { return }
-                guard didSeek else {
-                    self.schedulePreviewRecovery(
-                        reason: .seekTimeout,
-                        resumePlayback: true
-                    )
+                guard didSeek == .completed else {
+                    if didSeek == .timedOut {
+                        self.schedulePreviewRecovery(
+                            reason: .seekTimeout,
+                            resumePlayback: true
+                        )
+                    }
                     return
                 }
                 player.play()
@@ -200,6 +224,9 @@ extension EditorViewModel {
             ])
             rebuildTask?.cancel()
             rebuildTask = nil
+            previewGeneration &+= 1
+            isRenderingPreview = false
+            previewState.status = .cancelled
         }
         let invalidation = flushDeferredPreviewRebuild(
             seekTo: currentTime,
@@ -219,6 +246,7 @@ extension EditorViewModel {
     func startPlaybackWatchdog() {
         playbackWatchdogTask?.cancel()
         let generation = playbackCommandGeneration
+        let startedAt = CFAbsoluteTimeGetCurrent()
         playbackWatchdogTask = Task { [weak self] in
             var lastObservedTime: Double?
             var lastProgressAt = ContinuousClock.now
@@ -233,6 +261,11 @@ extension EditorViewModel {
                         let player = self.player,
                         self.duration > 0
                     else { return false }
+                    if self.isPreviewSeekInFlight {
+                        lastProgressAt = ContinuousClock.now
+                        lastObservedTime = nil
+                        return true
+                    }
                     let seconds = CMTimeGetSeconds(player.currentTime())
                     guard seconds.isFinite else {
                         self.schedulePreviewRecovery(
@@ -244,6 +277,13 @@ extension EditorViewModel {
                     if seconds >= self.lastPlayableTime - 0.05 {
                         return true
                     }
+                    if player.currentItem?.videoComposition != nil,
+                        CFAbsoluteTimeGetCurrent() - max(self.lastPreviewRenderedFrameAt, startedAt) > 3.5,
+                        seconds > (self.lastPreviewRenderedTimelineTime ?? seconds - 1) + 0.3
+                    {
+                        self.schedulePreviewRecovery(reason: .compositorFailure, resumePlayback: true)
+                        return false
+                    }
                     if let lastObservedTime,
                         seconds > lastObservedTime + 0.015
                     {
@@ -252,13 +292,6 @@ extension EditorViewModel {
                     } else if lastObservedTime == nil {
                         lastProgressAt = ContinuousClock.now
                     } else if lastProgressAt.duration(to: ContinuousClock.now) > .milliseconds(1400) {
-                        if self.lastPreviewRenderedFrameAt > 0 {
-                            player.pause()
-                            self.isPlaying = false
-                            self.pendingPlaybackResumeAfterPreviewRebuild = false
-                            self.stopPlaybackWatchdog()
-                            return false
-                        }
                         self.schedulePreviewRecovery(
                             reason: .playbackStalled,
                             resumePlayback: true
@@ -278,17 +311,6 @@ extension EditorViewModel {
     func stopPlaybackWatchdog() {
         playbackWatchdogTask?.cancel()
         playbackWatchdogTask = nil
-    }
-
-    private func cancelPendingPreviewRebuildBeforePlaybackStart() {
-        guard rebuildTask != nil, !isRenderingPreview else { return }
-        rebuildTask?.cancel()
-        rebuildTask = nil
-        previewGeneration &+= 1
-        previewProgress = 0
-        if case .building = previewState.status {
-            previewState.status = .idle
-        }
     }
 
     func toggleGraphPlayback() {
@@ -386,6 +408,7 @@ extension EditorViewModel {
         let clamped = clampedTimelineTime(time)
         updateCurrentTime(clamped)
         seekPlayer(to: clamped, exact: exact)
+        if isPlaying { startPlaybackWatchdog() }
     }
 
     func seekPlayer(to time: Double, exact: Bool) {
@@ -399,9 +422,9 @@ extension EditorViewModel {
                 to: clamped,
                 toleranceBefore: tolerance,
                 toleranceAfter: tolerance,
-                timeoutNanoseconds: 900_000_000
+                timeoutNanoseconds: 5_000_000_000
             )
-            guard !didSeek, self.player === player else { return }
+            guard didSeek == .timedOut, self.player === player else { return }
             self.schedulePreviewRecovery(
                 reason: .seekTimeout,
                 resumePlayback: self.isPlaying || self.pendingPlaybackResumeAfterPreviewRebuild
@@ -426,6 +449,9 @@ extension EditorViewModel {
             ])
             rebuildTask?.cancel()
             rebuildTask = nil
+            previewGeneration &+= 1
+            isRenderingPreview = false
+            previewState.status = .cancelled
         }
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
@@ -466,11 +492,12 @@ extension EditorViewModel {
                 to: self.clampedPlayableTime(clamped),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero,
-                timeoutNanoseconds: 900_000_000
+                timeoutNanoseconds: 5_000_000_000
             )
             guard self.scrubSessionGeneration == generation else { return }
+            guard didSeek != .superseded else { return }
             self.finishScrub(at: clamped, generation: generation)
-            if !didSeek, self.player === player {
+            if didSeek == .timedOut, self.player === player {
                 self.schedulePreviewRecovery(
                     reason: .seekTimeout,
                     resumePlayback: false

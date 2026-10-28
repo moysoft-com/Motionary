@@ -44,7 +44,7 @@ extension EditorViewModel {
     }
 
     private func scheduleLatestScrubSeek() {
-        guard pendingScrubSeekTime != nil else { return }
+        guard pendingScrubSeekTime != nil, !isScrubSeekInFlight else { return }
         guard scrubSeekTask == nil else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
@@ -98,7 +98,7 @@ extension EditorViewModel {
                 to: target,
                 toleranceBefore: tolerance,
                 toleranceAfter: tolerance,
-                timeoutNanoseconds: 700_000_000
+                timeoutNanoseconds: 2_500_000_000
             )
             os_signpost(
                 .end,
@@ -109,7 +109,7 @@ extension EditorViewModel {
             guard self.scrubSeekGeneration == seekGeneration else { return }
             self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
             self.isScrubSeekInFlight = false
-            guard didSeek else {
+            guard didSeek != .timedOut else {
                 if self.player === player {
                     self.schedulePreviewRecovery(
                         reason: .seekTimeout,

@@ -102,7 +102,10 @@ kernel void motionaryShapeKernel(
     float2 rasterScale = max(uniforms.direction, float2(0.0001f));
     float2 logicalSize = size / rasterScale;
     float2 point = (float2(gid) + 0.5f - size * 0.5f) / rasterScale;
-    float2 halfSize = max(logicalSize * 0.5f - 1.0f / rasterScale, float2(0.5f) / rasterScale);
+    // Shape uniforms use frameIndex for the project-to-output scale. Keep
+    // the transparent edge inset in project units as output resolution changes.
+    float logicalRenderScale = max(uniforms.frameIndex, 0.0001f);
+    float2 halfSize = max(logicalSize * 0.5f - logicalRenderScale / rasterScale, float2(0.5f) / rasterScale);
     float distance = -1.0f;
     if (uniforms.effectKind == 1u) {
         float radius = min(max(uniforms.time, 0.0f), min(halfSize.x, halfSize.y));

@@ -381,12 +381,13 @@ extension EditorViewModel {
         delay: Bool = true,
         invalidation: EditorInvalidation = [.previewFrame]
     ) {
-        var effectiveInvalidation = invalidation
+        var effectiveInvalidation = invalidation.union(pendingPreviewInvalidation)
         if previewRecoveryCircuitIsOpen {
             resetPreviewRecoveryCircuit()
             effectiveInvalidation.formUnion([.previewFrame, .compositionTopology, .audioMix])
         }
 
+        pendingPreviewInvalidation.formUnion(effectiveInvalidation)
         if isScrubbing {
             deferredPreviewInvalidation.formUnion(effectiveInvalidation)
             return
@@ -609,6 +610,7 @@ extension EditorViewModel {
         pendingLiveAudioPreviewItemID = nil
         liveAudioPreviewTaskGeneration &+= 1
         if cancelLivePreviewRefresh {
+            livePreviewFrameRefreshGeneration &+= 1
             livePreviewFrameRefreshTask?.cancel()
             livePreviewFrameRefreshTask = nil
             pendingLivePreviewFrameRefresh = false
@@ -766,6 +768,8 @@ extension EditorViewModel {
         }
 
         pendingLivePreviewFrameRefresh = false
+        livePreviewFrameRefreshGeneration &+= 1
+        let generation = livePreviewFrameRefreshGeneration
         livePreviewFrameRefreshInFlight = true
         lastLivePreviewFrameRefresh = CFAbsoluteTimeGetCurrent()
         let target = clampedPlayableTime(currentTime)
@@ -777,11 +781,13 @@ extension EditorViewModel {
                 to: target,
                 toleranceBefore: .zero,
                 toleranceAfter: .zero,
-                timeoutNanoseconds: 900_000_000
+                timeoutNanoseconds: 5_000_000_000
             )
-            guard self.player === player else { return }
+            guard self.player === player,
+                self.livePreviewFrameRefreshGeneration == generation
+            else { return }
             self.livePreviewFrameRefreshInFlight = false
-            if !didSeek {
+            if didSeek == .timedOut {
                 self.schedulePreviewRecovery(
                     reason: .seekTimeout,
                     resumePlayback: false

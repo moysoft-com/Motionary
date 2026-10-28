@@ -74,130 +74,148 @@ struct BlendWorkspaceView: View {
 struct RemoveBackgroundWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let item: TimelineItem?
+    @State private var brushSession: BackgroundBrushSession?
 
     var body: some View {
         EditorWorkspaceShell(
-            title: "Remove BG",
-            systemImage: "person.crop.square",
-            isEnabled: isEnabled,
-            emptyState: mediaItem == nil
-                ? EditorWorkspaceEmptyState(
-                    title: "Select an image or video clip to remove its background.",
-                    systemImage: "person.crop.square"
-                )
-                : nil,
+            title: "Remove BG", systemImage: "person.crop.square", isEnabled: isEnabled,
+            emptyState: mediaItem == nil ? EditorWorkspaceEmptyState(
+                title: "Select an image or video clip to remove its background.",
+                systemImage: "person.crop.square"
+            ) : nil,
             disablesContentWhenUnavailable: true
         ) {
             VStack(spacing: 14) {
-                let isRemovalEnabled = mediaItem?.visuals.backgroundRemoval != nil
-                EditorWorkspaceOnOffControl(
-                    title: "Remove background",
-                    isOn: isRemovalEnabled,
-                    isEnabled: isRemovalEnabled || !viewModel.isPerformingLongTask
-                ) { enabled in
-                    if enabled {
-                        viewModel.enableSelectedBackgroundRemoval()
-                    } else {
-                        viewModel.disableSelectedBackgroundRemoval()
+                EditorWorkspaceHorizontalStrip {
+                    ForEach(BackgroundRemovalMode.allCases) { mode in
+                        EditorWorkspaceTileButton(
+                            title: mode.title, systemImage: mode.systemImage,
+                            isSelected: settings?.mode == mode
+                        ) { viewModel.setSelectedBackgroundRemovalMode(mode) }
+                        .disabled(viewModel.isPerformingLongTask)
                     }
                 }
-
-                if let settings = mediaItem?.visuals.backgroundRemoval {
-                    HStack(spacing: 10) {
-                        Label(
-                            viewModel.selectedBackgroundRemovalArtifactIsReady ? "Ready" : "Retry needed",
-                            systemImage: viewModel.selectedBackgroundRemovalArtifactIsReady
-                                ? "checkmark.circle.fill"
-                                : "exclamationmark.triangle.fill"
-                        )
-                        .font(MotionaryDesign.Typography.statusLabel)
-                        .foregroundStyle(
-                            viewModel.selectedBackgroundRemovalArtifactIsReady
-                                ? MotionaryTheme.textSecondary
-                                : Color.orange
-                        )
-
-                        Spacer()
-
-                        EditorWorkspaceIconButton(
-                            systemName: "arrow.clockwise",
-                            accessibilityLabel: viewModel.selectedBackgroundRemovalArtifactIsReady
-                                ? "Regenerate matte"
-                                : "Retry matte",
-                            isEnabled: !viewModel.isPerformingLongTask
-                        ) {
-                            viewModel.regenerateSelectedBackgroundRemoval()
+                EditorWorkspaceOnOffControl(
+                    title: "Remove background", isOn: settings != nil,
+                    isEnabled: !viewModel.isPerformingLongTask
+                ) { enabled in
+                    if enabled { viewModel.enableSelectedBackgroundRemoval() }
+                    else { viewModel.disableSelectedBackgroundRemoval() }
+                }
+                if let settings {
+                    if settings.mode == .automatic {
+                        HStack {
+                            Label(viewModel.selectedBackgroundRemovalArtifactIsReady ? "Ready" : "Retry needed",
+                                systemImage: viewModel.selectedBackgroundRemovalArtifactIsReady
+                                    ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                .font(MotionaryDesign.Typography.statusLabel)
+                                .foregroundStyle(MotionaryTheme.textSecondary)
+                            Spacer()
+                            EditorWorkspaceIconButton(systemName: "arrow.clockwise",
+                                accessibilityLabel: "Regenerate matte",
+                                isEnabled: !viewModel.isPerformingLongTask
+                            ) { viewModel.regenerateSelectedBackgroundRemoval() }
                         }
-
                     }
-                    backgroundScrubber(
-                        title: "Edge",
-                        systemImage: "circle.dotted",
-                        value: settings.edgeRefinement,
-                        range: -1...1,
-                        format: { String(format: "%+.0f%%", $0 * 100) },
-                        update: {
-                            viewModel.setSelectedBackgroundRemovalSettings(
-                                edgeRefinement: $0,
-                                interactive: true
-                            )
+                    if settings.mode == .chromaKey { chromaControls(settings) }
+                    if settings.mode == .custom {
+                        EditorWorkspaceCommandButton(title: "Edit cutout", systemImage: "paintbrush.pointed") {
+                            openBrush(settings)
                         }
-                    )
-
-                    backgroundScrubber(
-                        title: "Feather",
-                        systemImage: "circle.lefthalf.filled",
-                        value: settings.feather,
-                        range: 0...1,
-                        format: { "\(Int(($0 * 100).rounded()))%" },
-                        update: {
-                            viewModel.setSelectedBackgroundRemovalSettings(
-                                feather: $0,
-                                interactive: true
-                            )
-                        }
-                    )
+                        EditorWorkspaceMessage(
+                            text: "Brush to erase or restore areas. On videos, your cutout stays fixed across the clip.",
+                            systemImage: "hand.draw"
+                        )
+                    }
+                    backgroundScrubber(title: "Edge", systemImage: "circle.dotted",
+                        value: settings.edgeRefinement, range: -1...1,
+                        format: { String(format: "%+.0f%%", $0 * 100) }
+                    ) { viewModel.setSelectedBackgroundRemovalSettings(edgeRefinement: $0, interactive: true) }
+                    backgroundScrubber(title: "Feather", systemImage: "circle.lefthalf.filled",
+                        value: settings.feather, range: 0...1
+                    ) { viewModel.setSelectedBackgroundRemovalSettings(feather: $0, interactive: true) }
+                    EditorWorkspaceOnOffControl(title: "Invert cutout", isOn: settings.isInverted) {
+                        viewModel.setSelectedBackgroundRemovalSettings(isInverted: $0)
+                    }
                 } else {
                     EditorWorkspaceMessage(
-                        text: "Foreground subjects are detected locally. The original media stays untouched.",
+                        text: "Isolate a subject automatically, key out a color, or draw your own cutout.",
                         systemImage: "person.crop.square"
                     )
                 }
             }
         }
+        .sheet(item: $brushSession) { session in
+            BackgroundBrushEditor(session: session) { strokes in
+                guard viewModel.selectedTimelineItemID == session.id else { return }
+                viewModel.setSelectedBackgroundRemovalSettings(strokes: strokes)
+            }
+        }
     }
 
+    private var settings: BackgroundRemovalSettings? { mediaItem?.visuals.backgroundRemoval }
     private var mediaItem: MediaTimelineItem? {
         guard case .media(let media) = item,
-            media.mediaType == .image || media.mediaType == .video
-        else { return nil }
+            media.mediaType == .image || media.mediaType == .video else { return nil }
         return media
     }
-
     private var isEnabled: Bool {
         guard let item else { return false }
         return viewModel.selectedTimelineItemID == item.id
-            && viewModel.currentTime >= item.timelineStart
-            && viewModel.currentTime < item.timelineEnd
+            && viewModel.currentTime >= item.timelineStart && viewModel.currentTime < item.timelineEnd
+    }
+
+    private func openBrush(_ settings: BackgroundRemovalSettings) {
+        guard let media = mediaItem, let asset = viewModel.project.mediaLibrary[media.mediaID] else { return }
+        brushSession = BackgroundBrushSession(
+            id: media.id,
+            url: viewModel.projectStore.resolvedMediaURL(asset.url, projectID: viewModel.projectID),
+            sourceTime: media.sourceRange.start + media.speedMap.sourceTime(
+                at: max(viewModel.currentTime - media.timelineStart, 0),
+                sourceDuration: media.sourceRange.duration
+            ), settings: settings
+        )
+    }
+
+    private func chromaControls(_ settings: BackgroundRemovalSettings) -> some View {
+        VStack(spacing: 14) {
+            EditorWorkspaceSection(title: "Key color") {
+                HStack(spacing: 8) {
+                    keyPreset("Green", color: RGBAColor(red: 0, green: 1, blue: 0), settings: settings)
+                    keyPreset("Blue", color: RGBAColor(red: 0, green: 0, blue: 1), settings: settings)
+                    keyPreset("White", color: .white, settings: settings)
+                    keyPreset("Black", color: .black, settings: settings)
+                }
+                EditorWorkspaceColorRow(title: "Custom color", color: settings.keyColor.swiftUIColor,
+                    systemImage: "eyedropper", supportsOpacity: false
+                ) { viewModel.setSelectedBackgroundRemovalSettings(keyColor: RGBAColor($0)) }
+            }
+            backgroundScrubber(title: "Tolerance", systemImage: "scope",
+                value: settings.tolerance, range: 0...1
+            ) { viewModel.setSelectedBackgroundRemovalSettings(tolerance: $0, interactive: true) }
+            backgroundScrubber(title: "Softness", systemImage: "drop.halffull",
+                value: settings.softness, range: 0...1
+            ) { viewModel.setSelectedBackgroundRemovalSettings(softness: $0, interactive: true) }
+            backgroundScrubber(title: "Spill", systemImage: "paintbrush",
+                value: settings.spillSuppression, range: 0...1
+            ) { viewModel.setSelectedBackgroundRemovalSettings(spillSuppression: $0, interactive: true) }
+        }
+    }
+
+    private func keyPreset(_ title: String, color: RGBAColor, settings: BackgroundRemovalSettings) -> some View {
+        EditorWorkspaceSelectionButton(title: title, systemImage: nil, isSelected: settings.keyColor == color) {
+            viewModel.setSelectedBackgroundRemovalSettings(keyColor: color)
+        }
     }
 
     private func backgroundScrubber(
-        title: String,
-        systemImage: String,
-        value: Double,
-        range: ClosedRange<Double>,
-        format: @escaping (Double) -> String,
+        title: String, systemImage: String, value: Double, range: ClosedRange<Double>,
+        format: @escaping (Double) -> String = { "\(Int(($0 * 100).rounded()))%" },
         update: @escaping (Double) -> Void
     ) -> some View {
-        EditorValueScrubber(
-            title: title,
-            systemImage: systemImage,
-            value: value,
-            range: range,
-            step: 0.01,
-            format: format,
-            onBegan: viewModel.beginInteractiveEdit,
-            onChanged: update,
+        EditorValueScrubber(title: title, systemImage: systemImage, value: value,
+            range: range, step: 0.01, format: format,
+            onBegan: viewModel.beginInteractiveEdit, onChanged: update,
             onEnded: { viewModel.finishInteractiveEdit() }
         )
         .disabled(!viewModel.selectedBackgroundRemovalArtifactIsReady)

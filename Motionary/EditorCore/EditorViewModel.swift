@@ -115,6 +115,7 @@ final class EditorViewModel: ObservableObject {
     }
     @Published var confirmationMessage: String?
     @Published var errorMessage: String?
+    @Published var recoverableExportURL: URL?
     @Published private(set) var effectRenderDiagnostics: [EffectRenderDiagnostic] = []
     @Published var analysisState: EditorAnalysisState?
     @Published var invalidBackgroundRemovalMediaIDs: Set<MediaID> = []
@@ -216,6 +217,9 @@ final class EditorViewModel: ObservableObject {
     var lastIssuedScrubSeekTime: Double?
     var scrubSeekLatencyEstimate: CFTimeInterval = 0
     var scrubSessionGeneration = 0
+    var previewSeekGeneration = 0
+    var isPreviewSeekInFlight = false
+    var livePreviewFrameRefreshGeneration = 0
     var scrubSeekGeneration = 0
     var playbackCommandGeneration = 0
     var playerItemGeneration = 0
@@ -226,6 +230,7 @@ final class EditorViewModel: ObservableObject {
     var previewRecoveryCircuitIsOpen = false
     var previewRenderSessionID = UUID()
     var lastPreviewRenderedFrameAt: CFAbsoluteTime = 0
+    var lastPreviewRenderedTimelineTime: Double?
     var pendingPlaybackResumeAfterPreviewRebuild = false
     var interactiveEditSnapshot: EditorProject?
     var timelineClipCache: [UUID: [TimelineClip]] = [:]
@@ -238,6 +243,7 @@ final class EditorViewModel: ObservableObject {
     var timelineEvaluationIndex: TimelineEvaluationIndex?
     var pendingTimelineInvalidationScope: TimelineInvalidationScope?
     var selectedTimelineRange: Range<Double>?
+    var pendingPreviewInvalidation: EditorInvalidation = []
     var deferredPreviewInvalidation: EditorInvalidation = []
     var lastScrubUIUpdate: CFAbsoluteTime = 0
     var stateCancellables: Set<AnyCancellable> = []
