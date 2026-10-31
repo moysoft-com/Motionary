@@ -25,6 +25,8 @@ struct EditorAnalysisState: Equatable {
 @MainActor
 /// Coordinates all editor state transitions and delegates media, rendering, export, and persistence work to services.
 final class EditorViewModel: ObservableObject {
+    let scratchAudio = TimelineScratchAudio()
+    let livePreviewPresentation = LivePreviewPresentation()
     let playbackState = PlaybackState()
     let selectionState = SelectionState()
     let timelineState = TimelineState()
@@ -116,6 +118,7 @@ final class EditorViewModel: ObservableObject {
     @Published var confirmationMessage: String?
     @Published var errorMessage: String?
     @Published var recoverableExportURL: URL?
+    @Published var exportedVideoURL: URL?
     @Published private(set) var effectRenderDiagnostics: [EffectRenderDiagnostic] = []
     @Published var analysisState: EditorAnalysisState?
     @Published var invalidBackgroundRemovalMediaIDs: Set<MediaID> = []
@@ -216,6 +219,7 @@ final class EditorViewModel: ObservableObject {
     var isScrubSeekInFlight = false
     var lastIssuedScrubSeekTime: Double?
     var scrubSeekLatencyEstimate: CFTimeInterval = 0
+    var scrubIsFinishing = false
     var scrubSessionGeneration = 0
     var previewSeekGeneration = 0
     var isPreviewSeekInFlight = false

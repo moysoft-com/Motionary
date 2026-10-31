@@ -558,14 +558,20 @@ struct AdjustWorkspaceView: View {
 }
 
 struct EffectsWorkspaceView: View {
+    @Environment(\.editorUsesSideWorkspace) private var usesSideWorkspace
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var viewModel: EditorViewModel
     let clip: TimelineClip?
     @Binding var activeEffectID: UUID?
+    var onPullProgressChanged: ((CGFloat) -> Void)? = nil
 
     @State private var isLibraryPresented = false
     @State private var workspacePage: Int? = 0
+    @State private var sideListPage: Int? = 0
     @State private var visibleEffectID: UUID?
     @State private var pullToAddEffectDistance: CGFloat = 0
+    @GestureState private var effectPullIsHorizontal: Bool?
+    @State private var effectPagerIsOverscrolled = false
     @State private var pullToAddEffectBounceTrigger = false
     @State private var suppressActiveEffectCloseAnimation = false
     @State private var listWorkspaceMaxX: CGFloat?
@@ -580,85 +586,29 @@ struct EffectsWorkspaceView: View {
         let canAddEffects = isEnabled && clip?.mediaType != .audio
         GeometryReader { geometry in
             ZStack {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 12) {
-                        EditorWorkspaceShell(
-                            title: "Effects",
-                            systemImage: "wand.and.stars",
-                            isEnabled: isEnabled,
-                            emptyState: clip == nil
-                                ? EditorWorkspaceEmptyState(title: "Select a clip", systemImage: "cursorarrow.click.2")
-                                : nil,
-                            contentStyle: .fixed,
-                            accessory: {
-                                Button {
-                                    guard canAddEffects else { return }
-                                    EditorHaptics.tap()
-                                    isLibraryPresented = true
-                                } label: {
-                                    Image(systemName: "plus")
-                                        .resizable()
-                                        .scaledToFit()
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .workspaceHeaderAccessoryFrame()
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!canAddEffects)
-                                .opacity(canAddEffects ? 1 : 0.3)
-                                .accessibilityLabel("Add effect")
-                            },
-                            content: {
-                                if let clip {
-                                    ScrollView {
-                                        effectsContent(clip: clip, isEnabled: isEnabled)
-                                            .padding(.bottom, 6)
-                                    }
-                                    .scrollIndicators(.hidden)
-                                    .scrollDismissesKeyboard(.interactively)
-                                    .scrollDisabled(effectDrag != nil)
-                                }
-                            }
-                        )
-                        .frame(width: geometry.size.width)
-                        .effectPagerOpacity(pageWidth: geometry.size.width)
-                        .background {
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: EffectsListWorkspaceMaxXPreferenceKey.self,
-                                    value: proxy.frame(in: .global).maxX
-                                )
-                            }
-                        }
-                        .id(0)
-
-                        if let clip,
-                            let visibleEffectID,
+                if usesSideWorkspace {
+                    ZStack {
+                        if let clip, let visibleEffectID,
                             let effect = clip.effectStack.effects.first(where: { $0.id == visibleEffectID })
                         {
                             EffectDetailWorkspaceView(
-                                viewModel: viewModel,
-                                clip: clip,
-                                effect: effect,
-                                isEnabled: isEnabled,
-                                onBack: { closeEffectDetail() }
+                                viewModel: viewModel, clip: clip, effect: effect,
+                                isEnabled: isEnabled, onBack: { closeEffectDetail() }
                             )
-                            .frame(width: geometry.size.width)
-                            .effectPagerOpacity(pageWidth: geometry.size.width)
-                            .id(1)
+                            .id(effect.id)
+                            .transition(effectNavigationTransition(isDetail: true))
+                        } else {
+                            effectPager(size: geometry.size, isEnabled: isEnabled, canAddEffects: canAddEffects)
+                                .transition(effectNavigationTransition(isDetail: false))
                         }
                     }
-                    .scrollTargetLayout()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .animation(reduceMotion ? nil : EditorWorkspaceNavigation.animation, value: visibleEffectID)
+                } else {
+                    effectPager(size: geometry.size, isEnabled: isEnabled, canAddEffects: canAddEffects)
                 }
-                .scrollIndicators(.hidden)
-                .scrollClipDisabled()
-                .scrollTargetBehavior(.viewAligned)
-                .scrollPosition(id: $workspacePage)
-                .scrollDisabled(effectDrag != nil)
-                .coordinateSpace(name: EffectsWorkspacePagerOpacity.coordinateSpaceName)
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .simultaneousGesture(pullToAddEffectGesture(isEnabled: isEnabled))
 
-                if isPagerTransitioning {
+                if isPagerTransitioning && !usesSideWorkspace {
                     Color.clear
                         .contentShape(Rectangle())
                         .frame(width: geometry.size.width, height: geometry.size.height)
@@ -674,12 +624,23 @@ struct EffectsWorkspaceView: View {
                 )
             }
         }
-        .onPreferenceChange(EffectsListWorkspaceMaxXPreferenceKey.self) { maxX in
-            DispatchQueue.main.async {
-                listWorkspaceMaxX = maxX
+        .contentShape(Rectangle())
+        .simultaneousGesture(pullToAddEffectGesture(isEnabled: canAddEffects && effectDrag == nil))
+        .onChange(of: usesSideWorkspace) { _, _ in
+            pagerTransitionToken = UUID()
+            isPagerTransitioning = false
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                workspacePage = visibleEffectID == nil ? 0 : 1
             }
         }
+        .onPreferenceChange(EffectsListWorkspaceMaxXPreferenceKey.self) { maxX in
+            guard listWorkspaceMaxX != maxX else { return }
+            listWorkspaceMaxX = maxX
+        }
         .onPreferenceChange(EffectsPagerMinXPreferenceKey.self) { minX in
+            guard !isLibraryPresented, pagerMinX != minX else { return }
             DispatchQueue.main.async {
                 pagerMinX = minX
             }
@@ -713,6 +674,12 @@ struct EffectsWorkspaceView: View {
         }
         .onChange(of: activeEffectID) { _, effectID in
             DispatchQueue.main.async {
+                if usesSideWorkspace {
+                    visibleEffectID = effectID
+                    viewModel.activeKeyframeTarget = effectID.map { .effectMix($0) }
+                    workspacePage = effectID == nil ? 0 : 1
+                    return
+                }
                 if let effectID {
                     visibleEffectID = effectID
                     viewModel.activeKeyframeTarget = .effectMix(effectID)
@@ -731,6 +698,7 @@ struct EffectsWorkspaceView: View {
         }
         .onChange(of: workspacePage) { _, page in
             DispatchQueue.main.async {
+                guard !usesSideWorkspace else { return }
                 if page == 0, visibleEffectID != nil {
                     suppressActiveEffectCloseAnimation = true
                     activeEffectID = nil
@@ -738,11 +706,103 @@ struct EffectsWorkspaceView: View {
                     scheduleVisibleEffectRemoval()
                 } else if page == 1, activeEffectID == nil {
                     workspacePage = 0
-                } else if page == nil {
-                    workspacePage = visibleEffectID == nil ? 0 : 1
                 }
             }
         }
+    }
+
+    /// Both layouts use this original native scroller for pull-to-add. Only
+    /// the compact layout also uses its second page for effect navigation.
+    private func effectPager(size: CGSize, isEnabled: Bool, canAddEffects: Bool) -> some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 12) {
+                effectList(isEnabled: isEnabled, canAddEffects: canAddEffects)
+                .frame(width: size.width)
+                .effectPagerOpacity(pageWidth: size.width)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: EffectsListWorkspaceMaxXPreferenceKey.self,
+                            value: proxy.frame(in: .global).maxX
+                        )
+                    }
+                }
+                .id(0)
+
+                if !usesSideWorkspace, let clip,
+                    let visibleEffectID,
+                    let effect = clip.effectStack.effects.first(where: { $0.id == visibleEffectID })
+                {
+                    EffectDetailWorkspaceView(
+                        viewModel: viewModel,
+                        clip: clip,
+                        effect: effect,
+                        isEnabled: isEnabled,
+                        onBack: { closeEffectDetail() }
+                    )
+                    .frame(width: size.width)
+                    .effectPagerOpacity(pageWidth: size.width)
+                    .id(1)
+                }
+            }
+            .scrollTargetLayout()
+        }
+        .scrollIndicators(.hidden)
+        .scrollClipDisabled()
+        .scrollTargetBehavior(.viewAligned)
+        .scrollPosition(id: usesSideWorkspace ? $sideListPage : $workspacePage)
+        .scrollDisabled(effectDrag != nil)
+        .coordinateSpace(name: EffectsWorkspacePagerOpacity.coordinateSpaceName)
+        .frame(width: size.width, height: size.height)
+        .scrollBounceBehavior(.always, axes: .horizontal)
+        .onScrollGeometryChange(for: Bool.self) { geometry in
+            geometry.contentOffset.x > max(
+                geometry.contentSize.width + geometry.contentInsets.trailing - geometry.containerSize.width,
+                -geometry.contentInsets.leading
+            ) + 0.5
+        } action: { _, overscrolled in
+            effectPagerIsOverscrolled = overscrolled
+        }
+    }
+
+    private func effectList(isEnabled: Bool, canAddEffects: Bool) -> some View {
+        EditorWorkspaceShell(
+            title: "Effects",
+            systemImage: "wand.and.stars",
+            isEnabled: isEnabled,
+            emptyState: clip == nil
+                ? EditorWorkspaceEmptyState(title: "Select a clip", systemImage: "cursorarrow.click.2")
+                : nil,
+            contentStyle: .fixed,
+            accessory: {
+                Button {
+                    guard canAddEffects else { return }
+                    EditorHaptics.tap()
+                    isLibraryPresented = true
+                } label: {
+                    Image(systemName: "plus")
+                        .resizable()
+                        .scaledToFit()
+                        .font(.system(size: 16, weight: .semibold))
+                        .workspaceHeaderAccessoryFrame()
+                }
+                .buttonStyle(.plain)
+                .disabled(!canAddEffects)
+                .opacity(canAddEffects ? 1 : 0.3)
+                .accessibilityLabel("Add effect")
+            },
+            content: {
+                if let clip {
+                    ScrollView {
+                        effectsContent(clip: clip, isEnabled: isEnabled)
+                            .padding(.bottom, 6)
+                    }
+                    .scrollIndicators(.hidden)
+                    .scrollDismissesKeyboard(.interactively)
+                    .scrollDisabled(effectDrag != nil)
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -870,9 +930,14 @@ struct EffectsWorkspaceView: View {
 
     private func pullToAddEffectGesture(isEnabled: Bool) -> some Gesture {
         DragGesture(minimumDistance: 8)
+            .updating($effectPullIsHorizontal) { gesture, direction, _ in
+                if direction == nil {
+                    direction = abs(gesture.translation.width) > abs(gesture.translation.height) * 1.2
+                }
+            }
             .onChanged { gesture in
                 guard isEnabled, activeEffectID == nil, visibleEffectID == nil else { return }
-                guard abs(gesture.translation.width) > abs(gesture.translation.height),
+                guard effectPullIsHorizontal == true, effectPagerIsOverscrolled,
                     gesture.translation.width < 0
                 else {
                     pullToAddEffectDistance = 0
@@ -881,6 +946,7 @@ struct EffectsWorkspaceView: View {
                 let distance = min(-gesture.translation.width, effectPullToAddThreshold * 1.35)
                 let wasReady = pullToAddEffectDistance >= effectPullToAddThreshold
                 pullToAddEffectDistance = distance
+                onPullProgressChanged?(min(distance / effectPullToAddThreshold, 1))
                 let isReady = distance >= effectPullToAddThreshold
                 if isReady && !wasReady {
                     pullToAddEffectBounceTrigger.toggle()
@@ -894,10 +960,16 @@ struct EffectsWorkspaceView: View {
                     }
                 }
                 guard isEnabled, activeEffectID == nil, visibleEffectID == nil else { return }
-                guard abs(gesture.translation.width) > abs(gesture.translation.height),
+                guard pullToAddEffectDistance >= effectPullToAddThreshold,
                     -gesture.translation.width >= effectPullToAddThreshold
                 else { return }
-                isLibraryPresented = true
+                // Finish the pull's spring transaction before asking UIKit
+                // to present its independently animated sheet.
+                DispatchQueue.main.async {
+                    withTransaction(Transaction(animation: nil)) {
+                        isLibraryPresented = true
+                    }
+                }
             }
     }
 
@@ -917,7 +989,7 @@ struct EffectsWorkspaceView: View {
                 Circle()
                     .fill(progress >= 1 ? MotionaryTheme.accent : Color.gray)
             }
-            .opacity(min(max((progress - 0.45) / 0.55, 0), 1))
+            .opacity(min(max((progress - 0.18) / 0.82, 0), 1))
             .scaleEffect(progress)
             .position(x: gapCenterX, y: size.height * 0.5)
             .allowsHitTesting(false)
@@ -932,6 +1004,12 @@ struct EffectsWorkspaceView: View {
             .first ?? fallback
     }
 
+    private func effectNavigationTransition(isDetail: Bool) -> AnyTransition {
+        // Fixed roles make both halves retrace their path on back navigation:
+        // detail enters/exits at the right, list exits/returns at the left.
+        reduceMotion ? .opacity : .offset(x: isDetail ? 24 : -24).combined(with: .opacity)
+    }
+
     private func openEffectDetail(_ effectID: UUID) {
         visibleEffectID = effectID
         activeEffectID = effectID
@@ -942,11 +1020,22 @@ struct EffectsWorkspaceView: View {
     private func closeEffectDetail() {
         activeEffectID = nil
         viewModel.activeKeyframeTarget = nil
+        if usesSideWorkspace {
+            visibleEffectID = nil
+            workspacePage = 0
+            return
+        }
         animateWorkspacePage(to: 0)
         scheduleVisibleEffectRemoval()
     }
 
     private func animateWorkspacePage(to page: Int) {
+        guard !usesSideWorkspace else {
+            pagerTransitionToken = UUID()
+            isPagerTransitioning = false
+            workspacePage = page
+            return
+        }
         let token = UUID()
         pagerTransitionToken = token
         isPagerTransitioning = true
@@ -971,7 +1060,7 @@ struct EffectsWorkspaceView: View {
     }
 
     private func scheduleVisibleEffectRemoval() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             guard activeEffectID == nil, workspacePage != 1 else { return }
             visibleEffectID = nil
             workspacePage = 0
@@ -1178,16 +1267,22 @@ private struct EffectDetailWorkspaceView: View {
                     onBack()
                     EditorHaptics.tap()
                 } label: {
-                    Label(displayName, systemImage: "chevron.left")
+                    Image(systemName: "chevron.left")
                         .font(MotionaryDesign.Typography.workspaceHeader)
-                        .labelStyle(.titleAndIcon)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.78)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 22)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Back to effects")
+                .accessibilityIdentifier("motionary-effect-detail-back")
+
+                Text(displayName)
+                    .font(MotionaryDesign.Typography.workspaceHeader)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("motionary-effect-detail-title")
 
                 EffectKeyframeButton(
                     viewModel: viewModel,
@@ -1399,13 +1494,15 @@ private struct EffectLibrarySheet: View {
                             .frame(maxWidth: .infinity)
                             .padding(.top, MotionaryDesign.Spacing.xxl)
                     } else {
-                        LazyVGrid(columns: columns, spacing: MotionaryDesign.Spacing.xl) {
-                            ForEach(filteredModules) { module in
-                                EffectLibraryTile(
-                                    module: module,
-                                    isSelected: selectedModuleID == module.id
-                                ) {
-                                    selectedModuleID = selectedModuleID == module.id ? nil : module.id
+                        EffectLibraryGlassGroup {
+                            LazyVGrid(columns: columns, spacing: MotionaryDesign.Spacing.xl) {
+                                ForEach(filteredModules) { module in
+                                    EffectLibraryTile(
+                                        module: module,
+                                        isSelected: selectedModuleID == module.id
+                                    ) {
+                                        selectedModuleID = selectedModuleID == module.id ? nil : module.id
+                                    }
                                 }
                             }
                         }
@@ -1422,7 +1519,6 @@ private struct EffectLibrarySheet: View {
             }
             .navigationTitle("Effect Library")
             .navigationBarTitleDisplayMode(.inline)
-            .tint(MotionaryTheme.accent)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel", role: .cancel) { dismiss() }
@@ -1453,6 +1549,18 @@ private struct EffectLibrarySheet: View {
                 || module.summary.localizedCaseInsensitiveContains(search)
                 || module.category.rawValue.localizedCaseInsensitiveContains(search)
             return matchesCategory && matchesQuery
+        }
+    }
+}
+
+private struct EffectLibraryGlassGroup<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: MotionaryDesign.Spacing.xl) { content() }
+        } else {
+            content()
         }
     }
 }
@@ -1598,7 +1706,16 @@ private struct EffectPreviewTileImage: View {
             .background(.black)
         }
         .accessibilityIdentifier("effect-preview-\(moduleID.rawValue)")
-        .task(id: moduleID) {
+        .task(id: moduleID, priority: .utility) {
+            if let previews = await EffectThumbnailCache.shared.cachedPreviews(
+                for: moduleID, scale: displayScale
+            ) {
+                guard !Task.isCancelled else { return }
+                originalPreview = previews.original
+                renderedPreview = previews.rendered
+                return
+            }
+            guard !Task.isCancelled else { return }
             let previews = await EffectThumbnailCache.shared.previews(
                 for: moduleID,
                 scale: displayScale
@@ -1616,7 +1733,10 @@ private struct EffectPreviewTileImage: View {
                 Image(uiImage: image)
                     .resizable()
             } else {
-                Image("EffectsShowcase")
+                Image(
+                    EffectRegistry.shared.descriptor(for: moduleID)?.category.showcaseImageAssetName
+                        ?? EffectCategory.lens.showcaseImageAssetName
+                )
                     .resizable()
             }
         }
@@ -1644,14 +1764,21 @@ private actor EffectThumbnailCache {
 
     private var entries: [Key: EffectThumbnailPair] = [:]
 
+    func cachedPreviews(for moduleID: EffectModuleID, scale: CGFloat) -> EffectThumbnailPair? {
+        entries[Key(moduleID: moduleID, scaleHundredths: Int((max(scale, 1) * 100).rounded()))]
+    }
+
     func previews(for moduleID: EffectModuleID, scale: CGFloat) -> EffectThumbnailPair {
         let key = Key(
             moduleID: moduleID,
             scaleHundredths: Int((max(scale, 1) * 100).rounded())
         )
         if let cached = entries[key] { return cached }
+        // A dismissed sheet must not leave its queued thumbnail work running
+        // through the next editor/presentation animation.
+        guard !Task.isCancelled else { return EffectThumbnailPair(original: nil, rendered: nil) }
         let result = EffectThumbnailPair(
-            original: EffectThumbnailRenderer.originalPreview(scale: scale),
+            original: EffectThumbnailRenderer.originalPreview(for: moduleID, scale: scale),
             rendered: EffectThumbnailRenderer.preview(for: moduleID, scale: scale)
         )
         entries[key] = result
@@ -2538,203 +2665,27 @@ struct HorizontalScrubInteraction: UIViewRepresentable {
 
 struct SelectedLayerMiniTimeline: View {
     @ObservedObject var viewModel: EditorViewModel
-    @ObservedObject private var playbackState: PlaybackState
     @Binding var contextClipID: UUID?
     @Binding var pixelsPerSecond: CGFloat
     let activeSection: KeyframeSection?
     let activeEffectID: UUID?
     let graphSegment: KeyframeSegment?
-    @State private var displayTime: Double = 0
-
-    init(
-        viewModel: EditorViewModel,
-        contextClipID: Binding<UUID?>,
-        pixelsPerSecond: Binding<CGFloat>,
-        activeSection: KeyframeSection?,
-        activeEffectID: UUID?,
-        graphSegment: KeyframeSegment?
-    ) {
-        self.viewModel = viewModel
-        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
-        _contextClipID = contextClipID
-        _pixelsPerSecond = pixelsPerSecond
-        self.activeSection = activeSection
-        self.activeEffectID = activeEffectID
-        self.graphSegment = graphSegment
-    }
 
     var body: some View {
-        GeometryReader { geometry in
-            if let contextClipID,
-                let track = viewModel.project.tracks.first(where: {
-                    $0.items.contains { $0.id == contextClipID }
-                })
-            {
-                let centerPadding = geometry.size.width * 0.5
-                let contentWidth =
-                    max(CGFloat(viewModel.duration) * pixelsPerSecond, 1)
-                    + centerPadding * 2
-                TimelineScrollContainer(
-                    pixelsPerSecond: $pixelsPerSecond,
-                    currentTime: displayTime,
-                    duration: viewModel.duration,
-                    maximumTimelineTime: viewModel.lastPlayableTime,
-                    contentRevision: miniTimelineContentRevision,
-                    contentSize: CGSize(width: contentWidth, height: geometry.size.height),
-                    isScrollDisabled: false,
-                    allowsVerticalScrolling: false,
-                    playbackState: playbackState,
-                    playerProvider: { viewModel.player },
-                    onScrubStart: { viewModel.beginScrub() },
-                    onScrubChanged: { time in
-                        viewModel.updateScrub(to: time)
-                    },
-                    onScrubEnd: { time in
-                        viewModel.endScrub(at: time)
-                    },
-                    onPullToAddChanged: { _ in },
-                    onPullToAddEnded: { _ in }
-                ) {
-                    ZStack(alignment: .leading) {
-                        Color.clear
-                        ForEach(track.items) { item in
-                            let width = max(CGFloat(item.placementDuration) * pixelsPerSecond, 6)
-                            ZStack {
-                                if item.id == contextClipID {
-                                    RoundedRectangle(
-                                        cornerRadius: MotionaryDesign.Radius.button,
-                                        style: .continuous
-                                    )
-                                        .fill(MotionaryTheme.selected)
-                                        .frame(width: width + 4, height: 42)
-                                        .overlay {
-                                            RoundedRectangle(
-                                                cornerRadius: MotionaryDesign.Radius.button,
-                                                style: .continuous
-                                            )
-                                                .stroke(MotionaryTheme.selected, lineWidth: 2)
-                                        }
-                                        .allowsHitTesting(false)
-                                }
-
-                                TimelineItemVisualFill(
-                                    item: item,
-                                    media: item.legacyClip().flatMap {
-                                        viewModel.project.mediaDescriptor(for: $0)
-                                    },
-                                    mediaClip: item.legacyClip(),
-                                    width: width,
-                                    height: 38,
-                                    pixelsPerSecond: pixelsPerSecond,
-                                    sampleWidth: nil,
-                                    sampleOffsetX: 0
-                                )
-                                .frame(width: width, height: 38)
-                                .foregroundStyle(Color.black.opacity(0.88))
-                                .background {
-                                    RoundedRectangle(
-                                        cornerRadius: MotionaryDesign.Radius.control,
-                                        style: .continuous
-                                    )
-                                        .fill(timelineItemTint(for: item))
-                                }
-                                .clipShape(
-                                    RoundedRectangle(
-                                        cornerRadius: MotionaryDesign.Radius.control,
-                                        style: .continuous
-                                    )
-                                )
-
-                                MiniTimelineKeyframes(
-                                    item: item,
-                                    currentTime: viewModel.currentTime,
-                                    tolerance: viewModel.keyframeTimeTolerance,
-                                    width: width,
-                                    activeSection: activeSection,
-                                    activeEffectID: activeEffectID,
-                                    graphSegment: graphSegment
-                                )
-                            }
-                            .frame(width: width, height: 42)
-                            .opacity(item.id == contextClipID ? 1 : 0.22)
-                            .offset(x: centerPadding + CGFloat(item.timelineStart) * pixelsPerSecond)
-                        }
-                    }
-                    .frame(width: contentWidth, height: geometry.size.height, alignment: .leading)
-                }
-                .mask { TimelineHorizontalEdgeMask(fadeWidth: 24) }
-                .overlay {
-                    Rectangle()
-                        .fill(MotionaryTheme.selected)
-                        .frame(width: 2)
-                        .allowsHitTesting(false)
-                }
-            }
+        if let contextClipID {
+            CoreTimelineView(
+                viewModel: viewModel, pixelsPerSecond: $pixelsPerSecond,
+                workspaceContext: TimelineWorkspaceContext(
+                    itemID: contextClipID, activeSection: activeSection,
+                    activeEffectID: activeEffectID, graphSegment: graphSegment,
+                    showsOnlySelectedTrack: true
+                )
+            )
         }
-        .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
-        .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
-        .background {
-            TimelineDisplayLink(
-                player: viewModel.player,
-                isPlaying: viewModel.isPlaying
-            ) { time in
-                let resolvedTime = min(max(time, 0), max(viewModel.duration, 0))
-                DispatchQueue.main.async {
-                    displayTime = resolvedTime
-                }
-            }
-            .allowsHitTesting(false)
-        }
-        .onAppear {
-            DispatchQueue.main.async {
-                displayTime = viewModel.currentTime
-            }
-        }
-        .onChange(of: playbackState.currentTime) { _, time in
-            guard !viewModel.isPlaying else { return }
-            DispatchQueue.main.async {
-                displayTime = time
-            }
-        }
-    }
-
-    private var miniTimelineContentRevision: Int {
-        let frameRate = Double(max(viewModel.project.renderSettings.frameRate, 1))
-        let playheadFrame =
-            viewModel.isPlaying
-            ? 0
-            : Int((viewModel.currentTime * frameRate).rounded())
-        let sectionValue: Int
-        switch activeSection {
-        case .shape: sectionValue = 1
-        case .transform: sectionValue = 2
-        case .adjust: sectionValue = 3
-        case .effects: sectionValue = 4
-        case .audio: sectionValue = 5
-        case .speed: sectionValue = 6
-        case .textType: sectionValue = 7
-        case .textStyle: sectionValue = 8
-        case nil: sectionValue = 0
-        }
-        let graphValue: Int
-        if let graphSegment {
-            graphValue =
-                Int((graphSegment.startTime * frameRate).rounded()) &* 31
-                &+ Int((graphSegment.endTime * frameRate).rounded()) &* 131
-                &+ sectionValue &* 521
-                &+ (graphSegment.effectID?.hashValue ?? 0)
-        } else {
-            graphValue = 0
-        }
-        return viewModel.timelineContentRevision &* 10_007
-            &+ playheadFrame &* 101
-            &+ sectionValue &* 1_009
-            &+ (activeEffectID?.hashValue ?? 0)
-            &+ graphValue
     }
 }
 
-private struct MiniTimelineKeyframes: View {
+struct TimelineContextKeyframes: View {
     let item: TimelineItem
     let currentTime: Double
     let tolerance: Double
@@ -2742,6 +2693,7 @@ private struct MiniTimelineKeyframes: View {
     let activeSection: KeyframeSection?
     let activeEffectID: UUID?
     let graphSegment: KeyframeSegment?
+    var height: CGFloat = 38
 
     var body: some View {
         ZStack {
@@ -2755,7 +2707,7 @@ private struct MiniTimelineKeyframes: View {
                 }
             }
         }
-        .frame(width: width, height: 38)
+        .frame(width: width, height: height)
     }
 
     @ViewBuilder
@@ -2780,7 +2732,7 @@ private struct MiniTimelineKeyframes: View {
                     )
             }
             .frame(width: size, height: size)
-            .position(x: markerX(for: time), y: 19)
+            .position(x: markerX(for: time), y: height * 0.5)
             .zIndex(isActiveSection ? 2 : 1)
     }
 
@@ -2790,7 +2742,7 @@ private struct MiniTimelineKeyframes: View {
         return Capsule()
             .fill(MotionaryTheme.accent.opacity(0.9))
             .frame(width: max(endX - startX, 2), height: 2)
-            .position(x: (startX + endX) * 0.5, y: 19)
+            .position(x: (startX + endX) * 0.5, y: height * 0.5)
             .shadow(color: MotionaryTheme.accent.opacity(0.55), radius: 2)
             .zIndex(0)
     }

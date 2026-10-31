@@ -10,6 +10,7 @@ import Testing
 private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
     private let callbackLock = NSLock()
     private var callbacks: [(@Sendable (Bool) -> Void)] = []
+    private var requests: [(time: Double, tolerance: Double)] = []
 
     override func seek(
         to time: CMTime,
@@ -18,8 +19,15 @@ private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
         completionHandler: (@Sendable (Bool) -> Void)? = nil
     ) {
         callbackLock.lock()
+        requests.append((CMTimeGetSeconds(time), CMTimeGetSeconds(toleranceBefore)))
         if let completionHandler { callbacks.append(completionHandler) }
         callbackLock.unlock()
+    }
+
+    var seekRequests: [(time: Double, tolerance: Double)] {
+        callbackLock.lock()
+        defer { callbackLock.unlock() }
+        return requests
     }
 
     var pendingSeekCount: Int {
@@ -300,6 +308,41 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
+    @Test func compositorNotificationsDoNotWaitForMainThread() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        viewModel.replacePreviewPlayer(with: item)
+        viewModel.installPreviewItemHealthObservers(for: item)
+        let session = viewModel.previewRenderSessionID
+
+        for name in [Notification.Name.motionaryVideoCompositorRenderedFrame,
+                     .motionaryVideoCompositorPersistentFailure] {
+            let posted = DispatchSemaphore(value: 0)
+            // Exercise failure delivery without starting an unrelated recovery.
+            let notificationSession = name == .motionaryVideoCompositorRenderedFrame ? session : UUID()
+            DispatchQueue.global().async {
+                NotificationCenter.default.post(
+                    name: name, object: nil, userInfo: ["renderSessionID": notificationSession]
+                )
+                posted.signal()
+            }
+            // Model Core Animation holding the main thread while a GPU callback
+            // posts. Posting must return before the main actor can run UI work.
+            func waitForPost() -> DispatchTimeoutResult {
+                posted.wait(timeout: .now() + 1)
+            }
+            let result = waitForPost()
+            #expect(result == .success)
+        }
+        for _ in 0..<100 {
+            if viewModel.lastPreviewRenderedFrameAt > 0 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(viewModel.lastPreviewRenderedFrameAt > 0)
+    }
+
+    @MainActor
     @Test func staleRenderedFrameDoesNotMarkCurrentSessionHealthy() async {
         let viewModel = makeGeneratedLayerViewModel()
         defer { viewModel.stop() }
@@ -314,6 +357,180 @@ struct PreviewRebuildTests {
                                         object: nil, userInfo: ["renderSessionID": viewModel.previewRenderSessionID])
         for _ in 0..<5 { await Task.yield() }
         #expect(viewModel.lastPreviewRenderedFrameAt > 0)
+    }
+
+    @MainActor
+    @Test func scrubbingCoalescesDecoderWorkAndFinishesExactly() async throws {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        viewModel.beginScrub()
+        // Expensive decoding keeps bounded pacing while new inputs replace
+        // the single pending destination instead of queuing stale seeks.
+        viewModel.scrubSeekLatencyEstimate = 0.2
+        viewModel.lastScrubUIUpdate = CFAbsoluteTimeGetCurrent()
+        viewModel.updateScrub(to: 0.1)
+        for _ in 0..<100 where player.pendingSeekCount < 1 { try await Task.sleep(for: .milliseconds(2)) }
+        guard player.pendingSeekCount == 1 else { Issue.record("First scrub seek missing"); return }
+        viewModel.updateScrub(to: 0.2)
+        viewModel.updateScrub(to: 0.7)
+        viewModel.updateScrub(to: 0.8)
+        #expect(player.pendingSeekCount == 1)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<100 where player.pendingSeekCount < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        guard player.pendingSeekCount == 2 else { Issue.record("Latest scrub seek was delayed"); return }
+        #expect(player.seekRequests.map(\.time) == [0.1, 0.8])
+        // Movement retains decoder-friendly tolerance; only release is exact.
+        #expect(player.seekRequests.allSatisfy { $0.tolerance >= 1 / 30 })
+        viewModel.updateScrub(to: 0.8)
+        #expect(viewModel.pendingScrubSeekTime == nil)
+        player.completeSeek(at: 1, finished: true)
+        for _ in 0..<100 where viewModel.isScrubSeekInFlight { await Task.yield() }
+        viewModel.updateScrub(to: 0.8)
+        #expect(player.pendingSeekCount == 2)
+        viewModel.endScrub(at: 0.9)
+        for _ in 0..<100 where player.pendingSeekCount < 3 { await Task.yield() }
+        guard player.pendingSeekCount == 3 else { Issue.record("Final exact seek missing"); return }
+        #expect(player.seekRequests[2].time == 0.9)
+        #expect(player.seekRequests[2].tolerance == 0)
+        player.completeSeek(at: 2, finished: true)
+        for _ in 0..<100 where viewModel.isScrubbing { await Task.yield() }
+        #expect(!viewModel.isScrubbing)
+        #expect(viewModel.currentTime == 0.9)
+    }
+
+    @MainActor
+    @Test func scrubEndingBeforeQueuedSeekStartsCannotOverrideFinalPosition() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        viewModel.beginScrub()
+        viewModel.updateScrub(to: 0.1)
+        viewModel.endScrub(at: 0.9)
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        guard player.pendingSeekCount == 1 else { Issue.record("Final seek missing"); return }
+        #expect(player.seekRequests[0].time == 0.9)
+        #expect(player.seekRequests[0].tolerance == 0)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<100 where viewModel.isScrubbing { await Task.yield() }
+        #expect(!viewModel.isScrubbing)
+        #expect(viewModel.currentTime == 0.9)
+    }
+
+    @MainActor
+    @Test func previousScrubFinalSeekCannotOverrideANewGesture() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        viewModel.beginScrub()
+        viewModel.endScrub(at: 0.9)
+        // Complete one session and start another before either queued task
+        // runs. Only the new session may send a seek to AVPlayer.
+        viewModel.beginScrub()
+        viewModel.updateScrub(to: 0.2)
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        guard player.pendingSeekCount == 1 else { Issue.record("New scrub seek missing"); return }
+        #expect(player.seekRequests[0].time == 0.2)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<100 where viewModel.isScrubSeekInFlight { await Task.yield() }
+        #expect(viewModel.currentTime == 0.2)
+        #expect(viewModel.isScrubbing)
+    }
+
+    @MainActor
+    @Test func realPlayerScrubbingUsesDecoderFriendlyTolerance() async throws {
+        let url = try await MediaConversionHelper.blankVideoClockURL(duration: 2, frameRate: 30)
+        let clip = TimelineClip(
+            name: "Decoded scrub", source: ClipSource(url: url, mediaType: .video, originalDuration: 2,
+                                                      naturalSize: CGSizeValue(width: 16, height: 16)),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let viewModel = makeViewModel(clip: clip)
+        defer { viewModel.stop() }
+        let prepared = try #require(try await viewModel.renderService.preparePreview(
+            for: viewModel.project, quality: .interactive,
+            invalidation: [.previewFrame, .compositionTopology], renderSessionID: viewModel.previewRenderSessionID
+        ))
+        let item = AVPlayerItem(asset: prepared.composition)
+        item.videoComposition = prepared.videoComposition
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        item.add(output)
+        viewModel.player = AVPlayer(playerItem: item)
+        viewModel.beginScrub()
+        var durations: [Double] = []
+        for index in 0..<12 {
+            let target = index.isMultiple(of: 2) ? 0.1 + Double(index) * 0.03 : 1.5 - Double(index) * 0.03
+            let start = ProcessInfo.processInfo.systemUptime
+            viewModel.updateScrub(to: target)
+            for _ in 0..<1000 {
+                if !viewModel.isScrubSeekInFlight && viewModel.scrubSeekTask == nil { break }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            #expect(!viewModel.isScrubSeekInFlight)
+            #expect(viewModel.scrubSeekTask == nil)
+            #expect(viewModel.previewRecoveryAttemptCount == 0)
+            durations.append((ProcessInfo.processInfo.systemUptime - start) * 1000)
+        }
+        #expect(item.status != .failed)
+        #expect(viewModel.currentTime > 1)
+        Attachment.record("Real AVPlayer / H.264 clock / 12 alternating scrub targets, completion ms: \(durations)",
+                          named: "scrub-decoder-regression.txt")
+    }
+
+    @MainActor
+    @Test func playTakesOverAnActiveScrubWithoutARebuildOrLatePositionJump() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        viewModel.beginScrub()
+        viewModel.updateScrub(to: 0.2)
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        guard player.pendingSeekCount == 1 else { Issue.record("Scrub seek missing"); return }
+        viewModel.updateScrub(to: 0.7)
+        viewModel.togglePlayback()
+        #expect(!viewModel.isScrubbing)
+        #expect(viewModel.playbackState.isStartingPlayback)
+        #expect(viewModel.rebuildTask == nil)
+        viewModel.updateScrub(to: 0.1)
+        viewModel.endScrub(at: 0.2)
+        #expect(viewModel.currentTime == 0.7)
+        for _ in 0..<100 where player.pendingSeekCount < 2 { await Task.yield() }
+        guard player.pendingSeekCount == 2 else { Issue.record("Play handoff seek missing"); return }
+        #expect(player.seekRequests[1].time == 0.7)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<5 { await Task.yield() }
+        #expect(viewModel.currentTime == 0.7)
+        #expect(!viewModel.isPlaying)
+        player.completeSeek(at: 1, finished: true)
+        for _ in 0..<100 where !viewModel.isPlaying { await Task.yield() }
+        #expect(viewModel.isPlaying)
+        #expect(!viewModel.playbackState.isStartingPlayback)
+        viewModel.updateScrub(to: 0.1)
+        #expect(viewModel.currentTime == 0.7)
+    }
+
+    @MainActor
+    @Test func secondPlayPressCancelsPendingScrubHandoff() async {
+        let viewModel = makeGeneratedLayerViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        viewModel.player = player
+        viewModel.beginScrub()
+        viewModel.updateScrub(to: 0.5)
+        viewModel.togglePlayback()
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        guard player.pendingSeekCount == 1 else { Issue.record("Handoff seek missing"); return }
+        viewModel.togglePlayback()
+        #expect(!viewModel.playbackState.isStartingPlayback)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<10 { await Task.yield() }
+        #expect(!viewModel.isPlaying)
     }
 
     @MainActor
@@ -1272,6 +1489,54 @@ struct PreviewRebuildTests {
         #expect(!viewModel.pendingLivePreviewFrameRefresh)
         #expect(!viewModel.livePreviewFrameRefreshInFlight)
         #expect(viewModel.undoStack.isEmpty)
+    }
+
+    @MainActor
+    @Test func directLiveFramesCoalesceWithoutSeeksAndCannotCoverScrubbing() async throws {
+        let viewModel = makeViewModel()
+        defer { viewModel.stop() }
+        let player = ControlledSeekPlayer()
+        player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        viewModel.player = player
+        var callbacks: [(CVPixelBuffer?) -> Void] = []
+        viewModel.renderService.livePreviewState.installPausedFrameRenderer { _, _, completion in
+            callbacks.append(completion)
+            return true
+        }
+        let itemID = UUID()
+        viewModel.updateLivePreviewTransform(ClipTransform(), for: itemID, immediate: false)
+        #expect(callbacks.count == 1)
+        #expect(viewModel.livePreviewFrameRefreshTask == nil)
+        var latest = ClipTransform()
+        latest.positionX.baseValue = 20
+        viewModel.updateLivePreviewTransform(latest, for: itemID, immediate: false)
+        #expect(callbacks.count == 1)
+        #expect(player.pendingSeekCount == 0)
+        #expect(viewModel.pendingLivePreviewFrameRefresh)
+        var buffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(kCFAllocatorDefault, 16, 16,
+                                   kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let frame = try #require(buffer)
+        callbacks[0](frame)
+        for _ in 0..<100 {
+            if callbacks.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(callbacks.count == 2)
+        #expect(viewModel.livePreviewFrameRefreshTask == nil)
+        #expect(viewModel.livePreviewPresentation.frame === frame)
+        #expect(player.pendingSeekCount == 0)
+        #expect(viewModel.renderService.livePreviewState.transform(for: itemID) == latest)
+
+        viewModel.beginScrub()
+        #expect(viewModel.livePreviewPresentation.frame == nil)
+        // Even if the user has already finished scrubbing before GPU work
+        // completes, its older generation must never reappear over the player.
+        viewModel.isScrubbing = false
+        callbacks[1](frame)
+        await Task.yield()
+        #expect(viewModel.livePreviewPresentation.frame == nil)
+        #expect(!viewModel.livePreviewFrameRefreshInFlight)
     }
 
     @MainActor

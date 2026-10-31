@@ -3,11 +3,13 @@ import Foundation
 import Metal
 import simd
 
-private enum MetalEffectSupport {
+enum MetalEffectSupport {
     static func renderSinglePass(
         _ image: CIImage,
         kind: MotionaryMetalEffectKind,
         parameters: SIMD4<Float>,
+        center: SIMD2<Float> = SIMD2(0.5, 0.5),
+        secondaryParameters: SIMD4<Float>? = nil,
         margin: CGFloat,
         effect: EffectInstance,
         context: EffectRenderContext,
@@ -23,14 +25,34 @@ private enum MetalEffectSupport {
             size: SIMD2(UInt32(inputTexture.width), UInt32(inputTexture.height)),
             effectKind: kind.rawValue,
             seed: context.deterministicSeed(storedSeed: effect.seed, effectID: effect.id),
-            time: Float(context.compositionTime),
+            time: Float(context.clipTime),
             frameIndex: Float(context.frameIndex),
-            direction: .zero,
-            parameters: parameters
+            direction: SIMD2(
+                Float(EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.edgeMode.rawValue ?? 0),
+                0
+            ),
+            parameters: parameters,
+            sourceBounds: SIMD4(
+                Float((image.extent.minX - extent.minX) / extent.width),
+                Float((image.extent.minY - extent.minY) / extent.height),
+                Float(image.extent.width / extent.width),
+                Float(image.extent.height / extent.height)
+            ),
+            parameters2: secondaryParameters ?? SIMD4(center.x, center.y, 0, 0)
         )
+        let mapTexture: MTLTexture?
+        if EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.usesDisplacementMap == true {
+            let map = try resources.makeScratchTexture(width: inputTexture.width, height: inputTexture.height)
+            try encode(pipelineName: "motionaryDisplacementMapKernel", textures: [(map, 0)],
+                uniforms: uniforms, width: map.width, height: map.height,
+                label: "Displacement Map", resources: resources)
+            mapTexture = map
+        } else {
+            mapTexture = nil
+        }
         try encode(
             pipelineName: "motionaryEffectKernel",
-            textures: [(inputTexture, 0), (outputTexture, 1)],
+            textures: [(inputTexture, 0), (outputTexture, 1), (mapTexture ?? inputTexture, 2)],
             uniforms: uniforms,
             width: outputTexture.width,
             height: outputTexture.height,
@@ -38,6 +60,7 @@ private enum MetalEffectSupport {
             resources: resources
         )
         resources.releaseScratchTexture(inputTexture)
+        if let mapTexture { resources.releaseScratchTexture(mapTexture) }
         return EffectRenderResult(
             image: try makeImage(from: outputTexture, positionedAt: extent, resources: resources),
             requiredMargin: margin
@@ -507,7 +530,7 @@ struct LightLeakEffectRenderer: EffectRenderModule {
             image,
             kind: .lightLeak,
             parameters: SIMD4(
-                Float(scalar(.angle, in: effect, at: context.clipTime)),
+                Float(cyclicDegrees(.angle, in: effect, at: context.clipTime)),
                 Float(scalar(.warmth, in: effect, at: context.clipTime)),
                 Float(scalar(.spread, in: effect, at: context.clipTime)),
                 0
@@ -546,7 +569,7 @@ struct BarrelWarpEffectRenderer: EffectRenderModule {
             kind: .barrelWarp,
             parameters: SIMD4(
                 Float(scalar(.warp, in: effect, at: context.clipTime)),
-                Float(scalar(.softness, in: effect, at: context.clipTime)),
+                0,
                 0,
                 0
             ),

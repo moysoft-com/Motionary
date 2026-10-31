@@ -13,6 +13,12 @@ protocol EffectRenderModule: Sendable {
 }
 
 extension EffectRenderModule {
+    func cyclicDegrees(_ parameterID: EffectParameterID, in effect: EffectInstance, at time: Double) -> Double {
+        // Reduce in Double before conversion to GPU floats or radians. Keep
+        // authored values unwrapped so multi-turn keyframes interpolate normally.
+        scalar(parameterID, in: effect, at: time).truncatingRemainder(dividingBy: 360)
+    }
+
     func scalar(
         _ parameterID: EffectParameterID,
         in effect: EffectInstance,
@@ -80,6 +86,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
         failurePolicy: RenderFailurePolicy
     ) throws -> CIImage {
         var current = input
+        var prefix: [EffectInstance] = []
         for storedEffect in stack.effects where storedEffect.isEnabled {
             let effect: EffectInstance
             do {
@@ -121,13 +128,23 @@ final class EffectRenderRegistry: @unchecked Sendable {
 
             let mix = EffectRegistry.shared.resolvedMix(in: effect, at: context.clipTime)
             guard mix > 0.000_1 else { continue }
+            var moduleContext = context
+            moduleContext.temporalPrefix = EffectStack(effects: prefix)
+            moduleContext.temporalSourceExtent = input.extent
             let result = try module.render(
                 current,
                 effect: effect,
-                context: context,
+                context: moduleContext,
                 resources: resources
             )
-            current = Self.mix(current, with: result.image, amount: mix)
+            if EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.usesTemporalFrames != true {
+                prefix.append(effect)
+            }
+            // Margins and unfolded tiles are sampling support, not layer content.
+            // Keep every pass in the authored bounds so subsequent effects cannot
+            // treat reflected padding as part of the object's image.
+            current = Self.mix(current, with: result.image.cropped(to: input.extent), amount: mix)
+                .cropped(to: input.extent)
         }
         return current
     }

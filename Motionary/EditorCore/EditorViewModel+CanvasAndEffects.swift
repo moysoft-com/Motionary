@@ -251,6 +251,7 @@ extension EditorViewModel {
         project.renumberTracks()
         project.synchronizeMediaLibrary()
         guard project != snapshot else {
+            livePreviewPresentation.frame = nil
             clearPendingLiveVisualOverrides()
             pendingTimelineInvalidationScope = nil
             refreshSelectedTimelineRange()

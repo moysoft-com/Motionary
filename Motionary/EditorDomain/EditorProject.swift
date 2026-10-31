@@ -5,12 +5,13 @@ import Foundation
 
 /// Persisted aggregate containing canvas settings, tracks, clips, and migration metadata.
 struct EditorProject: Identifiable, Codable, Equatable {
-    static let currentSchemaVersion = 11
+    static let currentSchemaVersion = 12
 
     var id: UUID
     var schemaVersion: Int
     var title: String
     var renderSettings: RenderSettings
+    var exportSettings: VideoExportSettings?
     var mediaLibrary: [MediaID: MediaAsset]
     var tracks: [TimelineTrack]
     var sequences: [UUID: CompoundSequence]
@@ -23,6 +24,7 @@ struct EditorProject: Identifiable, Codable, Equatable {
         case schemaVersion
         case title
         case renderSettings
+        case exportSettings
         case mediaLibrary
         case tracks
         case sequences
@@ -38,11 +40,18 @@ struct EditorProject: Identifiable, Codable, Equatable {
             .max() ?? 0
     }
 
+    mutating func synchronizeExportFrameRate() {
+        guard var exportSettings else { return }
+        exportSettings.frameRate = min(max(renderSettings.frameRate, 1), 120)
+        self.exportSettings = exportSettings
+    }
+
     init(
         id: UUID = UUID(),
         schemaVersion: Int = EditorProject.currentSchemaVersion,
         title: String,
         renderSettings: RenderSettings = RenderSettings(),
+        exportSettings: VideoExportSettings? = nil,
         mediaLibrary: [MediaID: MediaAsset] = [:],
         tracks: [TimelineTrack] = EditorProject.defaultTracks(),
         sequences: [UUID: CompoundSequence] = [:],
@@ -54,6 +63,10 @@ struct EditorProject: Identifiable, Codable, Equatable {
         self.schemaVersion = schemaVersion
         self.title = title
         self.renderSettings = renderSettings
+        self.exportSettings = exportSettings?.normalized
+        if let exportSettings = self.exportSettings {
+            self.renderSettings.frameRate = exportSettings.frameRate
+        }
         self.mediaLibrary = mediaLibrary
         self.tracks = tracks
         self.sequences = sequences
@@ -81,6 +94,11 @@ struct EditorProject: Identifiable, Codable, Equatable {
         title = try container.decode(String.self, forKey: .title)
         renderSettings = try container.decodeIfPresent(RenderSettings.self, forKey: .renderSettings)
             ?? RenderSettings()
+        exportSettings = try container.decodeIfPresent(VideoExportSettings.self, forKey: .exportSettings)
+            .map(\.normalized)
+        if let exportSettings {
+            renderSettings.frameRate = exportSettings.frameRate
+        }
         mediaLibrary = try container.decodeIfPresent([MediaID: MediaAsset].self, forKey: .mediaLibrary) ?? [:]
         tracks = try container.decodeIfPresent([TimelineTrack].self, forKey: .tracks) ?? Self.defaultTracks()
         sequences = try container.decodeIfPresent([UUID: CompoundSequence].self, forKey: .sequences) ?? [:]
@@ -92,10 +110,13 @@ struct EditorProject: Identifiable, Codable, Equatable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        var persistedExportSettings = exportSettings?.normalized
+        persistedExportSettings?.frameRate = min(max(renderSettings.frameRate, 1), 120)
         try container.encode(id, forKey: .id)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
         try container.encode(title, forKey: .title)
         try container.encode(renderSettings, forKey: .renderSettings)
+        try container.encodeIfPresent(persistedExportSettings, forKey: .exportSettings)
         try container.encode(mediaLibrary, forKey: .mediaLibrary)
         try container.encode(tracks, forKey: .tracks)
         try container.encode(sequences, forKey: .sequences)

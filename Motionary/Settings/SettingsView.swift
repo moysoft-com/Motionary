@@ -19,6 +19,9 @@ struct SettingsView: View {
     @AppStorage(AppPreferences.duplicateClipsToNewLayerKey)
     private var duplicateClipsToNewLayer = AppPreferences.defaultDuplicateClipsToNewLayer
 
+    @AppStorage(AppPreferences.djScratchingKey)
+    private var djScratching = AppPreferences.defaultDJScratching
+
     @State private var isResetConfirmationPresented = false
 
     var body: some View {
@@ -48,10 +51,14 @@ struct SettingsView: View {
                             colors: [.purple]
                         )
                     }
+                    Toggle(isOn: $djScratching) {
+                        SettingsLabel("DJ scratching", systemImage: "opticaldisc", colors: [.purple])
+                    }
+                    .accessibilityIdentifier("settings.timeline.djScratching")
                 } header: {
                     Text("Timeline")
                 } footer: {
-                    Text("Places duplicated clips on a new layer at the same time position.")
+                    Text("Places duplicated clips on a new layer at the same time position. DJ scratching plays timeline audio while scrubbing, with direction and pitch following your movement.")
                 }
 
                 Section {
@@ -201,6 +208,7 @@ struct SettingsView: View {
         exportCodec = AppPreferences.defaultExportCodec
         exportContainer = AppPreferences.defaultExportContainer
         duplicateClipsToNewLayer = AppPreferences.defaultDuplicateClipsToNewLayer
+        djScratching = AppPreferences.defaultDJScratching
     }
 }
 

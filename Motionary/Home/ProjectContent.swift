@@ -32,6 +32,7 @@ struct ProjectContent: Codable, Equatable {
         self.schemaVersion = EditorProject.currentSchemaVersion
         var currentProject = editorProject
         currentProject.schemaVersion = EditorProject.currentSchemaVersion
+        currentProject.synchronizeExportFrameRate()
         self.editorProject = currentProject
     }
 

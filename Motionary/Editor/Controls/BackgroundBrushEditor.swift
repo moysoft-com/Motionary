@@ -116,7 +116,6 @@ struct BackgroundBrushEditor: View {
                 preview = result
             }
         }
-        .tint(MotionaryTheme.accent)
     }
 
     private struct PreviewKey: Equatable {

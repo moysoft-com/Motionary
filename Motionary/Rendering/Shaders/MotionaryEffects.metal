@@ -10,6 +10,8 @@ struct MotionaryEffectUniforms {
     float frameIndex;
     float2 direction;
     float4 parameters;
+    float4 sourceBounds;
+    float4 parameters2;
 };
 
 struct MotionaryYUVUniforms {
@@ -128,18 +130,53 @@ kernel void motionaryShapeKernel(
     outputTexture.write(half4(half3(linear * alpha), half(alpha)), gid);
 }
 
-kernel void motionaryEffectKernel(
-    texture2d<float, access::sample> inputTexture [[texture(0)]],
-    texture2d<half, access::write> outputTexture [[texture(1)]],
+// Shared boundary handling for every single-pass effect. Unfold mirrors each
+// neighboring tile, keeping displaced samples continuous at image boundaries.
+static float4 sampleEffectInput(texture2d<float, access::sample> texture, float2 uv, uint mode, float4 bounds) {
+    constexpr sampler edgeSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    if (mode == 0u) { return texture.sample(linearSampler, uv); }
+    float2 local = (uv - bounds.xy) / max(bounds.zw, float2(0.00001f));
+    if (mode == 2u) { local = fract(local); }
+    if (mode == 3u) { local = 1.0f - abs(fract(local * 0.5f) * 2.0f - 1.0f); }
+    float2 halfTexel = 0.5f / float2(texture.get_width(), texture.get_height());
+    float2 firstCenter = ceil(bounds.xy / (2.0f * halfTexel)) * (2.0f * halfTexel) + halfTexel;
+    float2 lastCenter = floor((bounds.xy + bounds.zw) / (2.0f * halfTexel)) * (2.0f * halfTexel) - halfTexel;
+    float2 coordinate = clamp(bounds.xy + local * bounds.zw, firstCenter, max(firstCenter, lastCenter));
+    return texture.sample(edgeSampler, coordinate);
+}
+
+kernel void motionaryDisplacementMapKernel(
+    texture2d<half, access::write> mapTexture [[texture(0)]],
     constant MotionaryEffectUniforms &uniforms [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (any(gid >= uniforms.size)) { return; }
     float2 size = float2(uniforms.size);
+    float2 centered = (float2(gid) + 0.5f) / size - 0.5f;
+    float2 point = centered * size / min(size.x, size.y) * uniforms.parameters.y * 6.2831853f;
+    float phase = uniforms.time * uniforms.parameters.z;
+    float detail = uniforms.parameters.w;
+    float2 map = float2(sin(point.y + phase + sin(point.x * 0.63f)),
+                        cos(point.x - phase + cos(point.y * 0.71f)));
+    map += float2(sin(point.x * 2.1f + point.y), cos(point.y * 1.9f - point.x)) * detail * 0.5f;
+    map /= 1.0f + detail * 0.5f;
+    mapTexture.write(half4(half2(map), 0.0h, 1.0h), gid);
+}
+
+kernel void motionaryEffectKernel(
+    texture2d<float, access::sample> inputTexture [[texture(0)]],
+    texture2d<half, access::write> outputTexture [[texture(1)]],
+    texture2d<float, access::sample> displacementTexture [[texture(2)]],
+    constant MotionaryEffectUniforms &uniforms [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (any(gid >= uniforms.size)) { return; }
+    uint edgeMode = uint(uniforms.direction.x);
+    float2 size = float2(uniforms.size);
     float2 uv = (float2(gid) + 0.5f) / size;
     float2 centered = uv - 0.5f;
     float radial = length(centered) * 2.0f;
-    float4 source = inputTexture.sample(linearSampler, uv);
+    float4 source = sampleEffectInput(inputTexture, uv, edgeMode, uniforms.sourceBounds);
     float alpha = source.a;
     float3 color = unpremultiplied(source);
     float p0 = uniforms.parameters.x;
@@ -149,9 +186,9 @@ kernel void motionaryEffectKernel(
     switch (uniforms.effectKind) {
         case 0u: { // Prism Split
             float edge = smoothstep(max(0.05f, 0.78f - p1 * 0.55f), 1.15f, radial);
-            float2 shift = normalize(centered + float2(0.0001f)) * ((0.5f + p0 * 18.0f) / size) * edge;
-            float4 redSample = inputTexture.sample(linearSampler, uv + shift);
-            float4 blueSample = inputTexture.sample(linearSampler, uv - shift);
+            float2 shift = normalize(centered + float2(0.0001f)) * (0.002f + p0 * 0.045f) * edge;
+            float4 redSample = sampleEffectInput(inputTexture, uv + shift, edgeMode, uniforms.sourceBounds);
+            float4 blueSample = sampleEffectInput(inputTexture, uv - shift, edgeMode, uniforms.sourceBounds);
             float3 red = unpremultiplied(redSample);
             float3 blue = unpremultiplied(blueSample);
             color = float3(red.r, color.g, blue.b);
@@ -164,9 +201,9 @@ kernel void motionaryEffectKernel(
             float gate = smoothstep(0.68f, 0.98f, rowNoise);
             float drift = (rowNoise - 0.5f) * gate * (2.0f + p0 * 30.0f) / size.x;
             float channelShift = (0.6f + p0 * 5.0f) / size.x;
-            float3 left = unpremultiplied(inputTexture.sample(linearSampler, uv + float2(drift + channelShift, 0.0f)));
-            float3 right = unpremultiplied(inputTexture.sample(linearSampler, uv + float2(drift - channelShift, 0.0f)));
-            float3 middle = unpremultiplied(inputTexture.sample(linearSampler, uv + float2(drift, 0.0f)));
+            float3 left = unpremultiplied(sampleEffectInput(inputTexture, uv + float2(drift + channelShift, 0.0f), edgeMode, uniforms.sourceBounds));
+            float3 right = unpremultiplied(sampleEffectInput(inputTexture, uv + float2(drift - channelShift, 0.0f), edgeMode, uniforms.sourceBounds));
+            float3 middle = unpremultiplied(sampleEffectInput(inputTexture, uv + float2(drift, 0.0f), edgeMode, uniforms.sourceBounds));
             float scanline = sin((float(gid.y) + 0.5f) * 3.14159265f) * (0.025f + p1 * 0.10f);
             color = float3(left.r, middle.g, right.b) * (1.0f - scanline);
             break;
@@ -175,10 +212,10 @@ kernel void motionaryEffectKernel(
             float luma = luminance(color);
             float3 silver = mix(color, float3(luma), 0.35f + p1 * 0.62f);
             silver = (silver - 0.5f) * (1.0f + p0 * 1.15f) + 0.5f;
-            float detail = luminance(unpremultiplied(inputTexture.sample(linearSampler, uv + float2(1.0f / size.x, 0.0f))))
-                + luminance(unpremultiplied(inputTexture.sample(linearSampler, uv - float2(1.0f / size.x, 0.0f))))
-                + luminance(unpremultiplied(inputTexture.sample(linearSampler, uv + float2(0.0f, 1.0f / size.y))))
-                + luminance(unpremultiplied(inputTexture.sample(linearSampler, uv - float2(0.0f, 1.0f / size.y))))
+            float detail = luminance(unpremultiplied(sampleEffectInput(inputTexture, uv + float2(1.0f / size.x, 0.0f), edgeMode, uniforms.sourceBounds)))
+                + luminance(unpremultiplied(sampleEffectInput(inputTexture, uv - float2(1.0f / size.x, 0.0f), edgeMode, uniforms.sourceBounds)))
+                + luminance(unpremultiplied(sampleEffectInput(inputTexture, uv + float2(0.0f, 1.0f / size.y), edgeMode, uniforms.sourceBounds)))
+                + luminance(unpremultiplied(sampleEffectInput(inputTexture, uv - float2(0.0f, 1.0f / size.y), edgeMode, uniforms.sourceBounds)))
                 - luma * 4.0f;
             color = silver - detail * p2 * 0.18f;
             break;
@@ -206,10 +243,10 @@ kernel void motionaryEffectKernel(
         }
         case 5u: { // Portra Soft
             float luma = luminance(color);
-            color = mix(color, float3(luma), p2 * 0.10f);
+            color = mix(color, float3(luma), p2 * 0.40f);
             color += float3(0.055f + p1 * 0.035f, 0.018f, -0.025f) * smoothstep(0.3f, 1.0f, luma);
-            color = mix(color, sqrt(max(color, float3(0.0f))), p0 * 0.15f);
-            color = saturation(color, 0.92f + p2 * 0.12f);
+            color = mix(color, sqrt(max(color, float3(0.0f))), p0 * 0.38f);
+            color = saturation(color, 1.0f - p2 * 0.35f);
             break;
         }
         case 6u: { // Cool Fade
@@ -248,9 +285,9 @@ kernel void motionaryEffectKernel(
         case 10u: { // Chromatic Aberration
             float edge = smoothstep(max(0.02f, 0.92f - p1 * 0.62f), 1.18f, radial);
             float2 direction = normalize(centered + float2(0.0001f));
-            float2 shift = direction * edge * (0.4f + p0 * 12.0f) / size;
-            float4 redSample = inputTexture.sample(linearSampler, uv + shift);
-            float4 blueSample = inputTexture.sample(linearSampler, uv - shift);
+            float2 shift = direction * edge * (0.001f + p0 * 0.028f);
+            float4 redSample = sampleEffectInput(inputTexture, uv + shift, edgeMode, uniforms.sourceBounds);
+            float4 blueSample = sampleEffectInput(inputTexture, uv - shift, edgeMode, uniforms.sourceBounds);
             color.r = unpremultiplied(redSample).r;
             color.b = unpremultiplied(blueSample).b;
             alpha = max(alpha, max(redSample.a, blueSample.a));
@@ -260,10 +297,72 @@ kernel void motionaryEffectKernel(
             float r2 = dot(centered, centered);
             float strength = p0 * 0.42f;
             float2 warped = centered * (1.0f + strength * r2 * 4.0f);
-            float falloff = 1.0f - smoothstep(0.72f + p1 * 0.18f, 1.18f, length(warped) * 2.0f);
-            float4 warpedSample = inputTexture.sample(linearSampler, warped + 0.5f);
+            float4 warpedSample = sampleEffectInput(inputTexture, warped + 0.5f, edgeMode, uniforms.sourceBounds);
             color = unpremultiplied(warpedSample);
-            alpha = warpedSample.a * falloff;
+            alpha = warpedSample.a;
+            break;
+        }
+        case 12u: { // Wave Warp: metric in fractions of the shorter image side.
+            float2 metric = size / min(size.x, size.y);
+            float2 axis = float2(cos(p2), sin(p2));
+            float2 normal = float2(-axis.y, axis.x);
+            float phase = dot(centered * metric, axis) * 6.2831853f / max(p1, 0.02f)
+                + uniforms.time * uniforms.parameters.w * 6.2831853f;
+            float2 warped = uv + normal * sin(phase) * p0 / metric;
+            float4 sampled = sampleEffectInput(inputTexture, warped, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            break;
+        }
+        case 13u: { // Twirl with a smooth, bounded influence radius.
+            float2 metric = size / min(size.x, size.y);
+            float2 delta = (uv - uniforms.parameters2.xy) * metric;
+            float influence = max(1.0f - length(delta) / max(p1, 0.001f), 0.0f);
+            float angle = p0 * influence * influence;
+            float2 rotated = float2(cos(angle) * delta.x - sin(angle) * delta.y,
+                                    sin(angle) * delta.x + cos(angle) * delta.y);
+            float4 sampled = sampleEffectInput(inputTexture, uniforms.parameters2.xy + rotated / metric, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            break;
+        }
+        case 14u: { // Pixelate, square cells even on non-square media.
+            float cell = max(1.0f, p0 * min(size.x, size.y));
+            float2 snapped = (floor((float2(gid) + 0.5f) / cell) + 0.5f) * cell / size;
+            float4 sampled = sampleEffectInput(inputTexture, snapped, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            break;
+        }
+        case 15u: { // Posterize in perceptual rather than linear-light steps.
+            float levels = max(round(p0), 2.0f) - 1.0f;
+            float3 perceptual = pow(max(color, float3(0)), float3(1.0f / 2.2f));
+            color = pow(round(clamp(perceptual, 0.0f, 1.0f) * levels) / levels, float3(2.2f));
+            break;
+        }
+        case 18u: { // Mirror / Kaleidoscope
+            float2 metric = size / min(size.x, size.y);
+            float2 delta = (uv - uniforms.parameters2.xy) * metric;
+            float sector = 6.2831853f / max(round(p0), 1.0f);
+            float angle = atan2(delta.y, delta.x) - p1;
+            angle = abs(fract(angle / sector + 0.5f) * sector - sector * 0.5f);
+            float2 folded = float2(cos(angle + p1), sin(angle + p1)) * length(delta);
+            float4 sampled = sampleEffectInput(inputTexture, uniforms.parameters2.xy + folded / metric, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            break;
+        }
+        case 19u: { // The auxiliary map contains independent signed X/Y displacement.
+            float2 metric = size / min(size.x, size.y);
+            float2 map = displacementTexture.sample(linearSampler, uv).rg;
+            float4 sampled = sampleEffectInput(inputTexture, uv + map * p0 / metric, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            break;
+        }
+        case 24u: { // Duotone: editable sRGB colors, mixed in linear light.
+            float4 low = uniforms.parameters;
+            float4 high = uniforms.parameters2;
+            float3 lowLinear = select(pow((low.rgb + 0.055f) / 1.055f, float3(2.4f)), low.rgb / 12.92f, low.rgb <= 0.04045f);
+            float3 highLinear = select(pow((high.rgb + 0.055f) / 1.055f, float3(2.4f)), high.rgb / 12.92f, high.rgb <= 0.04045f);
+            float luma = clamp(luminance(color), 0.0f, 1.0f);
+            color = mix(lowLinear, highLinear, luma);
+            alpha *= mix(low.a, high.a, luma);
             break;
         }
         default:
@@ -350,7 +449,7 @@ kernel void motionaryGlowCompositeKernel(
     } else if (uniforms.effectKind == 22u) {
         strength = 0.48f;
     } else if (uniforms.effectKind == 23u) {
-        strength = 1.15f;
+        strength = 2.8f;
     }
     float3 result = screen(base, halo * strength);
     float alpha = source.a + (1.0f - source.a) * clamp(glow.a * strength, 0.0f, 1.0f);

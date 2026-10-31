@@ -8,6 +8,17 @@ enum AppPreferences {
     static let exportQualityKey = "exportQuality"
     static let exportCodecKey = "exportCodec"
     static let exportContainerKey = "exportContainer"
+    static let djScratchingKey = "djScratching"
+    static let defaultDJScratching = false
+
+    static var djScratching: Bool {
+        djScratchingValue(in: .standard)
+    }
+
+    static func djScratchingValue(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: djScratchingKey) as? Bool ?? defaultDJScratching
+    }
+
     static let duplicateClipsToNewLayerKey = "duplicateClipsToNewLayer"
 
     static let defaultAppearance = AppAppearance.system.rawValue
@@ -25,15 +36,15 @@ enum AppPreferences {
         return defaults.bool(forKey: duplicateClipsToNewLayerKey)
     }
 
-    static func reset() {
-        let defaults = UserDefaults.standard
+    static func reset(defaults: UserDefaults = .standard) {
         [
             appearanceKey,
             newProjectFrameRateKey,
             exportQualityKey,
             exportCodecKey,
             exportContainerKey,
-            duplicateClipsToNewLayerKey
+            duplicateClipsToNewLayerKey,
+            djScratchingKey
         ].forEach(defaults.removeObject(forKey:))
     }
 }

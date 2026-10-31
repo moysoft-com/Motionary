@@ -372,3 +372,98 @@ struct EditorWorkspaceMessage: View {
             )
     }
 }
+
+private struct EditorSideWorkspaceKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var editorUsesSideWorkspace: Bool {
+        get { self[EditorSideWorkspaceKey.self] }
+        set { self[EditorSideWorkspaceKey.self] = newValue }
+    }
+}
+
+/// Shared by panel navigation and the effect inspector's nested navigation.
+enum EditorWorkspaceNavigation {
+    static let animation = Animation.timingCurve(0.22, 1, 0.36, 1, duration: 0.38)
+
+    static func transition(reduceMotion: Bool) -> AnyTransition {
+        reduceMotion ? .opacity : .asymmetric(
+            insertion: .offset(x: 24).combined(with: .opacity),
+            removal: .opacity
+        )
+    }
+}
+
+/// Keeps the native preview mounted while independent workspace containers
+/// enter and leave. The inspector slides from the edge instead of travelling
+/// diagonally from the timeline's former position.
+struct EditorPreviewWorkspaceLayout<Preview: View, Controls: View, Workspace: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let usesSideWorkspace: Bool
+    let hidesPreview: Bool
+    let previewHeight: CGFloat
+    let inspectorWidth: CGFloat
+    let controlHeight: CGFloat
+    var keepsTimelineVisible = false
+    var animatesWorkspaceChanges = false
+    var workspaceID: AnyHashable? = nil
+    @ViewBuilder var preview: () -> Preview
+    @ViewBuilder var controls: () -> Controls
+    @ViewBuilder var workspace: () -> Workspace
+
+    private var navigationAnimation: Animation? {
+        animatesWorkspaceChanges && !reduceMotion
+            ? EditorWorkspaceNavigation.animation
+            : nil
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let compactPreviewHeight = hidesPreview ? 0 : previewHeight + controlHeight + 10
+            let previewWidth = usesSideWorkspace ? max(size.width - inspectorWidth - 16, 0) : size.width
+            ZStack(alignment: .topLeading) {
+                // The player always occupies this same structural position.
+                VStack(spacing: 10) {
+                    preview()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    controls()
+                        .frame(height: controlHeight)
+                }
+                .frame(width: previewWidth,
+                       height: usesSideWorkspace || keepsTimelineVisible ? size.height : compactPreviewHeight)
+                .opacity(hidesPreview ? 0 : 1)
+                .allowsHitTesting(!hidesPreview)
+                .accessibilityHidden(hidesPreview)
+                .clipped()
+
+                if !usesSideWorkspace && !keepsTimelineVisible {
+                    workspace()
+                        .frame(width: size.width,
+                               height: max(size.height - compactPreviewHeight - 10, 0))
+                        .offset(y: compactPreviewHeight + 10)
+                        .transition(.opacity)
+                }
+
+                if usesSideWorkspace {
+                    ZStack {
+                        workspace()
+                            .environment(\.editorUsesSideWorkspace, true)
+                            .id(workspaceID)
+                            .transition(EditorWorkspaceNavigation.transition(reduceMotion: reduceMotion))
+                    }
+                    .frame(width: inspectorWidth, height: size.height)
+                    .frame(width: size.width, alignment: .trailing)
+                    // Travel exactly one inspector width, not the full editor
+                    // width of the alignment frame surrounding it.
+                    .transition(reduceMotion ? .opacity : .offset(x: inspectorWidth + 16))
+                }
+            }
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+        }
+        .animation(navigationAnimation, value: usesSideWorkspace)
+        .animation(navigationAnimation, value: workspaceID)
+    }
+}

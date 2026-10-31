@@ -67,28 +67,27 @@ struct MainView: App {
     @StateObject private var actions = HomeScreenActions.shared
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab = 0
+    @State private var projectSearchText = ""
+    @State private var isProjectSearchPresented = false
+    @State private var isEditorPresented = false
+    @StateObject private var projectStore = ProjectStore()
     @State private var iconPickerPresented = false
     @State private var newProjectRequest: UUID?
     @AppStorage(AppPreferences.appearanceKey)
     private var appearance = AppPreferences.defaultAppearance
 
-    init() {
-        let tabBarAppearance = UITabBarAppearance()
-        tabBarAppearance.configureWithDefaultBackground()
-        let accent = UIColor(MotionaryTheme.accent)
-
-        tabBarAppearance.stackedLayoutAppearance.selected.iconColor = accent
-        tabBarAppearance.inlineLayoutAppearance.selected.iconColor = accent
-        tabBarAppearance.compactInlineLayoutAppearance.selected.iconColor = accent
-
-        UITabBar.appearance().standardAppearance = tabBarAppearance
-        UITabBar.appearance().scrollEdgeAppearance = tabBarAppearance
-    }
 
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-                if ProcessInfo.processInfo.arguments.contains("--timeline-gesture-tests") {
+                if ProcessInfo.processInfo.arguments.contains("--effects-gesture-tests") {
+                    ProjectTabController(
+                        selection: .constant(0), isSearching: false, isEditorPresented: true,
+                        homeRevision: nil, onSearch: {}, onLeaveHome: {},
+                        home: { EffectsGestureTestScene() }, settings: { Text("Settings") }
+                    )
+                    .ignoresSafeArea(.container)
+                } else if ProcessInfo.processInfo.arguments.contains("--timeline-gesture-tests") {
                     TimelineGestureTestScene()
                 } else {
                     appTabs
@@ -101,20 +100,10 @@ struct MainView: App {
 
     private var appTabs: some View {
         Group {
-            if UIDevice.current.userInterfaceIdiom == .pad {
-                if #available(iOS 26.0, *) {
-                    tabView.tint(MotionaryTheme.accent)
-                        .scrollEdgeEffectStyle(.soft, for: .all)
-                } else {
-                    tabView.tint(MotionaryTheme.accent)
-                }
+            if #available(iOS 26.0, *) {
+                tabView.scrollEdgeEffectStyle(.soft, for: .all)
             } else {
-                if #available(iOS 26.0, *) {
-                    tabView
-                        .scrollEdgeEffectStyle(.soft, for: .all)
-                } else {
-                    tabView
-                }
+                tabView
             }
         }
         .sheet(isPresented: $iconPickerPresented) {
@@ -126,23 +115,36 @@ struct MainView: App {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { handlePendingAction() }
         }
-        .labelStyle(.iconOnly)
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
     }
 
     private var tabView: some View {
-        TabView(selection: $selectedTab) {
-            Tab(value: 0) {
-                HomeView(newProjectRequest: newProjectRequest)
-                    .tint(nil)
-                    .labelStyle(.automatic)
-            } label: {
-                Image("MotionarySF")
-            }
-
-            Tab("Settings", systemImage: "gearshape.fill", value: 1) {
-                SettingsView()
-                    .tint(nil)
+        ProjectTabController(selection: $selectedTab, isSearching: isProjectSearchPresented, isEditorPresented: isEditorPresented, homeRevision: newProjectRequest, onSearch: {
+            selectedTab = 0
+            isProjectSearchPresented.toggle()
+            if !isProjectSearchPresented { projectSearchText = "" }
+        }, onLeaveHome: {
+            isProjectSearchPresented = false
+            projectSearchText = ""
+        }) {
+            HomeView(
+                projectStore: projectStore,
+                newProjectRequest: newProjectRequest,
+                searchText: $projectSearchText,
+                isSearchPresented: $isProjectSearchPresented,
+                onEditorPresentationChange: { isEditorPresented = $0 }
+            )
+        } settings: {
+            SettingsView()
+        }
+        // The UIKit container owns the system-bar insets for its hosted screens.
+        // Give it the full window instead of insetting it again in SwiftUI.
+        .ignoresSafeArea(.container)
+        .sensoryFeedback(.selection, trigger: selectedTab)
+        .onChange(of: selectedTab) { _, tab in
+            if tab == 1 {
+                isProjectSearchPresented = false
+                projectSearchText = ""
             }
         }
     }
@@ -160,6 +162,146 @@ struct MainView: App {
         case .settings:
             iconPickerPresented = false
             selectedTab = 1
+        }
+    }
+}
+
+/// The UIKit/SwiftUI boundary applies one content tint policy on both idioms.
+/// Individual accent controls can still opt in locally.
+struct RootTabContent<Content: View>: View {
+    let content: Content
+    var body: some View { content.tint(.primary) }
+}
+
+/// Uses UIKit's selection veto so the native search tab acts on the existing home controller.
+/// SwiftUI's TabView selection binding cannot veto a tab's presentation reliably.
+struct ProjectTabController<Home: View, Settings: View>: UIViewControllerRepresentable {
+    @Binding var selection: Int
+    let isSearching: Bool
+    let isEditorPresented: Bool
+    let homeRevision: UUID?
+    let onSearch: () -> Void
+    let onLeaveHome: () -> Void
+    @ViewBuilder let home: () -> Home
+    @ViewBuilder let settings: () -> Settings
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeUIViewController(context: Context) -> UITabBarController {
+        let controller = UITabBarController()
+        let coordinator = context.coordinator
+        let homeController = UIHostingController(rootView: RootTabContent(content: home()))
+        let settingsController = UIHostingController(rootView: RootTabContent(content: settings()))
+        coordinator.homeController = homeController
+        coordinator.lastHomeRevision = homeRevision
+        coordinator.settingsController = settingsController
+        let homeTab = UITab(title: "Motionary", image: UIImage(named: "MotionarySF"), identifier: "home") { _ in
+            homeController
+        }
+        let settingsTab = UITab(title: "Settings", image: UIImage(systemName: "gearshape.fill"), identifier: "settings") { _ in
+            settingsController
+        }
+        // UIKit resolves every root tab's controller during installation, even if
+        // its selection is vetoed. This controller is never presented.
+        let searchTab = UISearchTab { _ in UIViewController() }
+        coordinator.homeTab = homeTab
+        coordinator.settingsTab = settingsTab
+        coordinator.searchTab = searchTab
+        controller.tabs = [homeTab, settingsTab, searchTab]
+        configureRootTabBarItems(controller.tabBar)
+        if #available(iOS 27.0, *) {
+            controller.prominentTabIdentifier = searchTab.identifier
+        }
+        controller.delegate = coordinator
+        controller.selectedTab = selection == 1 ? settingsTab : homeTab
+        // The content hierarchy is neutral on every idiom. Tab styling stays
+        // on the tab bar rather than propagating into hosted screens/sheets.
+        controller.view.tintColor = .label
+        let appearance = UITabBarAppearance()
+        appearance.configureWithDefaultBackground()
+        let accent = UIColor(MotionaryTheme.accent)
+        appearance.stackedLayoutAppearance.selected.iconColor = accent
+        appearance.inlineLayoutAppearance.selected.iconColor = accent
+        appearance.compactInlineLayoutAppearance.selected.iconColor = accent
+        controller.tabBar.standardAppearance = appearance
+        controller.tabBar.scrollEdgeAppearance = appearance
+        controller.tabBar.tintColor = accent
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UITabBarController, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        configureRootTabBarItems(controller.tabBar)
+        if controller.isTabBarHidden != isEditorPresented {
+            controller.setTabBarHidden(isEditorPresented, animated: false)
+        }
+        if coordinator.lastSearchState != isSearching {
+            let symbol = isSearching ? "keyboard.chevron.compact.down" : "magnifyingglass"
+            let title = isSearching ? "Close search" : "Search"
+            let icon = UIImage(systemName: symbol)
+            coordinator.searchTab?.image = icon
+            coordinator.searchTab?.title = title
+            if let item = controller.tabBar.items?.last {
+                item.title = title
+                item.image = icon
+                item.accessibilityLabel = title
+            }
+            coordinator.lastSearchState = isSearching
+        }
+        // Bindings and ObservableObject update Home in its own hosting tree.
+        // Only the value-type new-project request requires a new root value.
+        if coordinator.lastHomeRevision != homeRevision {
+            coordinator.homeController?.rootView = RootTabContent(content: home())
+            coordinator.lastHomeRevision = homeRevision
+        }
+        let target = selection == 1 ? coordinator.settingsTab : coordinator.homeTab
+        if controller.selectedTab !== target {
+            controller.selectedTab = target
+        }
+    }
+
+    /// Hide labels only on the app's root tabs. Keeping the accessibility labels
+    /// lets VoiceOver identify each icon while hosted subviews retain their own
+    /// SwiftUI label styles.
+    private func configureRootTabBarItems(_ tabBar: UITabBar) {
+        guard let items = tabBar.items, items.count >= 2 else { return }
+        items[0].title = ""
+        items[0].accessibilityLabel = "Motionary"
+        items[1].title = ""
+        items[1].accessibilityLabel = "Settings"
+    }
+
+    final class Coordinator: NSObject, UITabBarControllerDelegate {
+        var parent: ProjectTabController
+        var lastSearchState: Bool?
+        var lastHomeRevision: UUID?
+        var homeController: UIHostingController<RootTabContent<Home>>?
+        var settingsController: UIHostingController<RootTabContent<Settings>>?
+        var homeTab: UITab?
+        var settingsTab: UITab?
+        var searchTab: UISearchTab?
+
+        init(parent: ProjectTabController) { self.parent = parent }
+
+        func tabBarController(_ tabBarController: UITabBarController, shouldSelectTab tab: UITab) -> Bool {
+            if tab === searchTab {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                if parent.isSearching { tabBarController.view.endEditing(true) }
+                // Finish UIKit's selection decision before changing the active tab.
+                DispatchQueue.main.async { [weak self, weak tabBarController] in
+                    guard let self, let tabBarController else { return }
+                    tabBarController.selectedTab = self.homeTab
+                    self.parent.onSearch()
+                }
+                return false
+            }
+            return true
+        }
+
+        func tabBarController(_ tabBarController: UITabBarController, didSelectTab selectedTab: UITab, previousTab: UITab?) {
+            parent.selection = selectedTab === settingsTab ? 1 : 0
+            parent.onLeaveHome()
         }
     }
 }

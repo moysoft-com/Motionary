@@ -6,6 +6,7 @@ import os
 
 extension EditorViewModel {
     func updateScrub(to time: Double) {
+        guard !isPlaying, !playbackState.isStartingPlayback, !pendingPlaybackResumeAfterPreviewRebuild else { return }
         let clamped = clampedTimelineTime(time)
         updateCurrentTime(clamped)
         guard isScrubbing else {
@@ -13,7 +14,12 @@ extension EditorViewModel {
             return
         }
 
-        pendingScrubSeekTime = clampedPlayableTime(clamped)
+        scratchAudio.update(to: clamped)
+        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
+        let target = floor(clampedPlayableTime(clamped) / frameDuration + 0.000_001) * frameDuration
+        pendingScrubSeekTime = CMTimeGetSeconds(CMTime(
+            seconds: target, preferredTimescale: 600
+        ))
         scheduleLatestScrubSeek()
     }
 
@@ -44,9 +50,15 @@ extension EditorViewModel {
     }
 
     private func scheduleLatestScrubSeek() {
-        guard pendingScrubSeekTime != nil, !isScrubSeekInFlight else { return }
-        guard scrubSeekTask == nil else { return }
-
+        guard let target = pendingScrubSeekTime else { return }
+        // Repeated gesture samples within the same seek time need no decoder
+        // work. A reversal to the in-flight target also replaces an older
+        // pending destination instead of queuing a redundant seek.
+        if target == lastIssuedScrubSeekTime {
+            pendingScrubSeekTime = nil
+            return
+        }
+        guard !isScrubSeekInFlight, scrubSeekTask == nil else { return }
         let now = CFAbsoluteTimeGetCurrent()
         let minimumInterval = scrubSeekMinimumInterval()
         let elapsed = now - lastScrubUIUpdate
@@ -80,6 +92,7 @@ extension EditorViewModel {
         lastIssuedScrubSeekTime = target
         scrubSeekGeneration &+= 1
         let seekGeneration = scrubSeekGeneration
+        let sessionGeneration = scrubSessionGeneration
         let issuedAt = CFAbsoluteTimeGetCurrent()
         let signpostID = OSSignpostID(log: TimelinePerformanceSignposts.log)
         os_signpost(
@@ -90,14 +103,18 @@ extension EditorViewModel {
             "target=%.3f",
             target
         )
-        let tolerance = scrubSeekTolerance(for: target)
         Task { [weak self, weak player] in
-            guard let self, let player else { return }
+            guard let self, let player,
+                self.player === player,
+                self.isScrubbing,
+                self.scrubSeekGeneration == seekGeneration,
+                self.scrubSessionGeneration == sessionGeneration
+            else { return }
             let didSeek = await self.boundedSeek(
                 player: player,
-                to: target,
-                toleranceBefore: tolerance,
-                toleranceAfter: tolerance,
+                to: self.livePreviewPresentationTime(target),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero,
                 timeoutNanoseconds: 2_500_000_000
             )
             os_signpost(
@@ -109,6 +126,7 @@ extension EditorViewModel {
             guard self.scrubSeekGeneration == seekGeneration else { return }
             self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
             self.isScrubSeekInFlight = false
+            if didSeek != .completed { self.lastIssuedScrubSeekTime = nil }
             guard didSeek != .timedOut else {
                 if self.player === player {
                     self.schedulePreviewRecovery(
@@ -126,30 +144,10 @@ extension EditorViewModel {
     }
 
     private func scrubSeekMinimumInterval() -> CFTimeInterval {
-        guard let target = pendingScrubSeekTime ?? lastIssuedScrubSeekTime else {
-            return 1 / 60
-        }
-        let adaptiveInterval = scrubSeekAdaptiveInterval()
-        let cost = activeGeneratedLayerCost(at: target)
-        let costInterval: CFTimeInterval
-        switch cost {
-        case 0...4:
-            costInterval = 1 / 60
-        case 5...10:
-            costInterval = 1 / 45
-        default:
-            costInterval = 1 / 30
-        }
-        return max(costInterval, adaptiveInterval)
-    }
-
-    private func scrubSeekTolerance(for target: Double) -> CMTime {
-        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
-        let activeGeneratedLayerCost = activeGeneratedLayerCost(at: target)
-        let tolerance = activeGeneratedLayerCost > 0
-            ? max(frameDuration * 2, 1 / 15)
-            : max(frameDuration, 1 / 30)
-        return CMTime(seconds: tolerance, preferredTimescale: 600)
+        // Pace new decoder work to the actual display, with a single seek in
+        // flight. Cached frames bypass this path entirely. Layer-count guesses
+        // must not force a capable device down to 24/30/45 Hz.
+        1 / Double(max(livePreviewPresentation.maximumFramesPerSecond, 1))
     }
 
     private func recordScrubSeekLatency(_ latency: CFTimeInterval) {
@@ -161,20 +159,4 @@ extension EditorViewModel {
         }
     }
 
-    private func scrubSeekAdaptiveInterval() -> CFTimeInterval {
-        switch scrubSeekLatencyEstimate {
-        case 0..<0.055:
-            return 1 / 60
-        case 0.055..<0.095:
-            return 1 / 45
-        case 0.095..<0.16:
-            return 1 / 30
-        default:
-            return 1 / 24
-        }
-    }
-
-    private func activeGeneratedLayerCost(at target: Double) -> Int {
-        cachedTimelineEvaluationIndex().generatedLayerCost(at: target)
-    }
 }

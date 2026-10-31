@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "effects-showcase-essentials.jpg",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

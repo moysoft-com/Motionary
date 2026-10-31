@@ -250,7 +250,10 @@ extension EditorViewModel {
                 !hadVisualClips,
                 let naturalSize = imported.source.naturalSize?.displaySafeSize
             {
-                after.renderSettings = RenderSettings(size: naturalSize)
+                after.renderSettings = RenderSettings(
+                    size: naturalSize,
+                    frameRate: after.renderSettings.frameRate
+                )
             }
             finalSelection = (clip.id, after.tracks[trackIndex].id, clip.timelineStart)
         }

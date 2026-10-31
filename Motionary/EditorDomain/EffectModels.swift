@@ -56,6 +56,17 @@ extension EffectModuleID {
     static let lightLeak = EffectModuleID(prefix + "light-leak")
     static let chromaticAberration = EffectModuleID(prefix + "chromatic-aberration")
     static let barrelWarp = EffectModuleID(prefix + "barrel-warp")
+    static let waveWarp = EffectModuleID(prefix + "wave-warp")
+    static let twirl = EffectModuleID(prefix + "twirl")
+    static let pixelate = EffectModuleID(prefix + "pixelate")
+    static let posterize = EffectModuleID(prefix + "posterize")
+    static let directionalBlur = EffectModuleID(prefix + "directional-blur")
+    static let zoomBlur = EffectModuleID(prefix + "zoom-blur")
+    static let kaleidoscope = EffectModuleID(prefix + "kaleidoscope")
+    static let duotone = EffectModuleID(prefix + "duotone")
+    static let displacementMap = EffectModuleID(prefix + "displacement-map")
+    static let echoTrails = EffectModuleID(prefix + "echo-trails")
+
 
 }
 
@@ -104,6 +115,21 @@ extension EffectParameterID {
     static let warp: EffectParameterID = "warp"
     static let scanlines: EffectParameterID = "scanlines"
     static let exposure: EffectParameterID = "exposure"
+    static let amount: EffectParameterID = "amount"
+    static let wavelength: EffectParameterID = "wavelength"
+    static let speed: EffectParameterID = "speed"
+    static let center: EffectParameterID = "center"
+    static let levels: EffectParameterID = "levels"
+    static let segments: EffectParameterID = "segments"
+    static let shadowColor: EffectParameterID = "shadowColor"
+    static let highlightColor: EffectParameterID = "highlightColor"
+    static let frequency: EffectParameterID = "frequency"
+    static let detail: EffectParameterID = "detail"
+    static let spacing: EffectParameterID = "spacing"
+    static let decay: EffectParameterID = "decay"
+    static let samples: EffectParameterID = "samples"
+    static let drift: EffectParameterID = "drift"
+
 }
 
 enum EffectValueComponent: String, Codable, CaseIterable, Hashable, Sendable {

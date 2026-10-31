@@ -35,7 +35,28 @@ private final class BoundedSeekContinuation: @unchecked Sendable {
 }
 
 extension EditorViewModel {
-    func exportProject(settings: VideoExportSettings) {
+    func saveExportSettings(_ settings: VideoExportSettings) {
+        let settings = settings.normalized
+        let frameRateChanged = project.renderSettings.frameRate != settings.frameRate
+        guard project.exportSettings != settings || frameRateChanged else { return }
+
+        publishProjectChange()
+        project.exportSettings = settings
+        project.renderSettings.frameRate = settings.frameRate
+        project.updatedAt = Date()
+        persist()
+
+        if frameRateChanged {
+            schedulePreviewRebuild(
+                seekTo: currentTime,
+                delay: false,
+                invalidation: [.previewFrame]
+            )
+        }
+    }
+
+    func exportProject(settings: VideoExportSettings, saveToPhotos: Bool = true) {
+        saveExportSettings(settings)
         guard exportTask == nil, !isPerformingLongTask else { return }
         exportTask = Task { [weak self] in
             guard let self else { return }
@@ -61,6 +82,10 @@ extension EditorViewModel {
                     if recoverableExportURL != url { try? FileManager.default.removeItem(at: url) }
                 }
                 try Task.checkCancellation()
+                if !saveToPhotos {
+                    exportedVideoURL = try PhotoLibraryExportService.preserveVideo(at: url)
+                    return
+                }
                 do {
                     try await PhotoLibraryExportService.saveVideo(at: url)
                 } catch {
@@ -258,6 +283,10 @@ extension EditorViewModel {
                 guard !Task.isCancelled, generation == previewGeneration else { return }
                 updatePreviewProgress(0.86, generation: generation)
                 updatePreviewProgress(0.96, generation: generation)
+                if isPlaying || pendingPlaybackResumeAfterPreviewRebuild {
+                    livePreviewPresentation.frame = nil
+                }
+                scratchAudio.prepare(item: player?.currentItem, duration: duration, at: currentTime)
                 previewContentRevision &+= 1
                 previewState.status = .ready(generation: generation)
                 pendingPreviewInvalidation.subtract(invalidation)
@@ -265,6 +294,10 @@ extension EditorViewModel {
                 resetPreviewRecoveryAttempts()
                 if !invalidation.intersection([.previewFrame, .compositionTopology]).isEmpty {
                     clearPendingLiveVisualOverrides()
+                }
+                if !isPlaying && !pendingPlaybackResumeAfterPreviewRebuild {
+                    pendingLivePreviewFrameRefresh = true
+                    scheduleLivePreviewFrameRefresh()
                 }
                 refinePreviewQualityAfterFastFrameIfNeeded(
                     requestedQuality: requestedPreviewQuality,
@@ -339,6 +372,11 @@ extension EditorViewModel {
     }
 
     func replacePreviewPlayer(with item: AVPlayerItem?) {
+        playbackState.isStartingPlayback = false
+        scratchAudio.shutdown()
+        livePreviewPresentation.frame = nil
+        livePreviewPresentation.setInteracting(false)
+        renderService.livePreviewState.clearPausedFrameRenderer()
         previewSeekGeneration &+= 1
         isPreviewSeekInFlight = false
         livePreviewFrameRefreshGeneration &+= 1
@@ -463,7 +501,10 @@ extension EditorViewModel {
         let compositorFailure = NotificationCenter.default.addObserver(
             forName: .motionaryVideoCompositorPersistentFailure,
             object: nil,
-            queue: .main
+            // Metal completion handlers must never wait for the main thread:
+            // Core Animation can be waiting for that same GPU queue. The Task
+            // below delivers UI updates asynchronously on the main actor.
+            queue: nil
         ) { [weak self] notification in
             Task { @MainActor in
                 guard let self,
@@ -480,7 +521,10 @@ extension EditorViewModel {
         let renderedFrame = NotificationCenter.default.addObserver(
             forName: .motionaryVideoCompositorRenderedFrame,
             object: nil,
-            queue: .main
+            // Metal completion handlers must never wait for the main thread:
+            // Core Animation can be waiting for that same GPU queue. The Task
+            // below delivers UI updates asynchronously on the main actor.
+            queue: nil
         ) { [weak self] notification in
             Task { @MainActor in
                 guard let self,
@@ -491,6 +535,13 @@ extension EditorViewModel {
                 self.lastPreviewRenderedFrameAt = CFAbsoluteTimeGetCurrent()
                 if let time = notification.userInfo?["compositionTime"] as? Double, time.isFinite {
                     self.lastPreviewRenderedTimelineTime = max(self.lastPreviewRenderedTimelineTime ?? time, time)
+                    // A completed seek is useful even when the gesture has
+                    // already moved ahead. Rejecting it by distance starves
+                    // presentation during fast scrubbing.
+                    if self.isScrubbing,
+                        let frame = notification.userInfo?["frame"] {
+                        self.livePreviewPresentation.frame = (frame as! CVPixelBuffer)
+                    }
                 }
             }
         }
@@ -683,16 +734,12 @@ extension EditorViewModel {
     func seekPlayerAndWait(to time: Double) async -> PreviewSeekResult {
         guard let player else { return .superseded }
         let clamped = clampedPlayableTime(time)
-        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
         // Some compressed sources expose their first decoded sample at the
         // first frame boundary rather than exactly t=0. Requesting zero with a
         // custom compositor can therefore produce a valid but black frame.
         // Keep the editor playhead at zero while presenting the first actual
         // video sample.
-        let presentationTime =
-            clamped <= 0.000_001 && lastPlayableTime >= frameDuration
-            ? frameDuration
-            : clamped
+        let presentationTime = livePreviewPresentationTime(clamped)
         player.currentItem?.cancelPendingSeeks()
         let succeeded = await boundedSeek(
             player: player,

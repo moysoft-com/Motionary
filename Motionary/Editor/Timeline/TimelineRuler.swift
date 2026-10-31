@@ -41,7 +41,7 @@ struct EmbeddedTimelineRuler: View {
 
                     for index in 0...minorCount {
                         let time = firstMinor + Double(index) * minorInterval
-                        guard time >= chunkStart, time <= chunkEnd else { continue }
+                        guard time >= chunkStart, time < chunkEnd || (chunkIndex == chunkCount - 1 && time <= chunkEnd) else { continue }
                         let isMajor = isMultiple(time, of: majorInterval)
                         let x = pixelAligned(CGFloat(time - chunkStart) * safePixelsPerSecond)
                         
@@ -64,7 +64,8 @@ struct EmbeddedTimelineRuler: View {
                         }
                     }
                 }
-                .frame(width: width, height: 30)
+                .frame(width: width + 100, height: 30, alignment: .leading)
+                .frame(width: width, height: 30, alignment: .leading)
             }
         }
         .padding(.leading, centerPadding)

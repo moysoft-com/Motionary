@@ -3,6 +3,15 @@
 import PhotosUI
 import SwiftUI
 
+private enum CoreToolBarToolset: Equatable {
+    case importMedia
+    case media(ClipMediaType)
+    case shape
+    case text
+    case adjustment
+    case otherLayer
+}
+
 struct CoreToolBar: View {
     @ObservedObject var viewModel: EditorViewModel
     @Binding var selectedMediaItems: [PhotosPickerItem]
@@ -16,40 +25,41 @@ struct CoreToolBar: View {
     @State private var extractableMediaID: MediaID?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: MotionaryDesign.Spacing.sm) {
-                if let selectedItem = viewModel.selectedTimelineItem {
-                    selectedLayerTool(for: selectedItem)
-                } else {
-                    PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
-                        CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
+        ScrollViewReader { scrollProxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: MotionaryDesign.Spacing.sm) {
+                    if let selectedItem = viewModel.selectedTimelineItem {
+                        selectedLayerTool(for: selectedItem)
+                    } else {
+                        PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
+                            CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(viewModel.isPerformingLongTask)
+                        .accessibilityLabel("Import media")
+
+                        ShapeToolMenu(viewModel: viewModel)
+
+                        CoreToolButton(systemName: "slider.horizontal.3", title: "Adjust") {
+                            guard let itemID = viewModel.addAdjustmentLayer() else { return }
+                            propertyContextClipID = itemID
+                            activePanel = .effects
+                        }
+                        .accessibilityLabel("Add adjustment layer")
+
+                        CoreToolButton(systemName: "textformat", title: "Text") {
+                            guard let itemID = viewModel.addText() else { return }
+                            propertyContextClipID = itemID
+                            activePanel = .text
+                        }
+                        .accessibilityLabel("Add text")
+
+                        AudioImportMenu(
+                            viewModel: viewModel,
+                            isAudioVideoPickerPresented: $isAudioVideoPickerPresented,
+                            isAudioFileImporterPresented: $isAudioFileImporterPresented
+                        )
                     }
-                    .buttonStyle(.plain)
-                    .disabled(viewModel.isPerformingLongTask)
-                    .accessibilityLabel("Import media")
-
-                    ShapeToolMenu(viewModel: viewModel)
-
-                    CoreToolButton(systemName: "slider.horizontal.3", title: "Adjust") {
-                        guard let itemID = viewModel.addAdjustmentLayer() else { return }
-                        propertyContextClipID = itemID
-                        activePanel = .effects
-                    }
-                    .accessibilityLabel("Add adjustment layer")
-
-                    CoreToolButton(systemName: "textformat", title: "Text") {
-                        guard let itemID = viewModel.addText() else { return }
-                        propertyContextClipID = itemID
-                        activePanel = .text
-                    }
-                    .accessibilityLabel("Add text")
-
-                    AudioImportMenu(
-                        viewModel: viewModel,
-                        isAudioVideoPickerPresented: $isAudioVideoPickerPresented,
-                        isAudioFileImporterPresented: $isAudioFileImporterPresented
-                    )
-                }
 
                 if viewModel.selectedTimelineItem != nil {
                     Divider()
@@ -214,14 +224,36 @@ struct CoreToolBar: View {
                     activePanel = activePanel == .canvas ? .timeline : .canvas
                 }
                 .accessibilityLabel("Canvas settings")
+                }
+                .padding(MotionaryDesign.Spacing.sm)
+                .id(Self.scrollStartID)
             }
-            .padding(MotionaryDesign.Spacing.sm)
+            .modifier(ToolbarScrollEdgeFade())
+            .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
+            .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
+            .onChange(of: toolset) { _, _ in
+                withAnimation(.easeOut(duration: 0.35)) {
+                    scrollProxy.scrollTo(Self.scrollStartID, anchor: .leading)
+                }
+            }
         }
-        .modifier(ToolbarScrollEdgeFade())
-        .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
-        .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
         .task(id: audioExtractionTaskID) {
             await refreshAudioExtractionAvailability()
+        }
+    }
+
+    private static let scrollStartID = "core-toolbar-scroll-start"
+
+    // Only a different toolset resets scrolling; selection, panel and availability
+    // changes within the same toolset preserve the user's position.
+    private var toolset: CoreToolBarToolset {
+        switch viewModel.selectedTimelineItem {
+        case .none: .importMedia
+        case .media(let item): .media(item.mediaType)
+        case .shape: .shape
+        case .text: .text
+        case .adjustment: .adjustment
+        case .caption, .compound: .otherLayer
         }
     }
 

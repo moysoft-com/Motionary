@@ -38,6 +38,9 @@ struct CorePreviewSection: View {
                                 .allowsHitTesting(false)
                         }
 
+                        LivePreviewSurface(presentation: viewModel.livePreviewPresentation)
+                            .frame(width: canvasRect.width, height: canvasRect.height)
+
                         if shouldShowOpeningPlaceholder {
                             openingPlaceholder
                         }

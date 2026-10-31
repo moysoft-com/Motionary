@@ -47,6 +47,63 @@ private final class DiagnosticsRecorder: @unchecked Sendable {
 
 @Suite(.serialized)
 struct CanvasAndRenderingTests {
+    @Test(arguments: [1.0, 0.45])
+    func unfoldedEffectChainsStayInsideObjectBounds(mix: Double) throws {
+        let bounds = CGRect(x: 13, y: 19, width: 64, height: 48)
+        let input = CIImage(color: .white).cropped(to: bounds)
+        let renderer = try MetalFrameRenderer()
+        var effects: [EffectInstance] = []
+        for moduleID in [EffectModuleID.analogGlitch, .prismSplit, .chromaticAberration, .zoomBlur] {
+            var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: moduleID))
+            effect.mix = AnimatableProperty(baseValue: mix)
+            effects.append(effect)
+            let output = try renderer.renderEffectsSynchronously(
+                EffectStack(effects: effects), to: input, at: 0.4, renderScale: 1
+            )
+            #expect(output.extent == bounds)
+            let inspectedBounds = bounds.insetBy(dx: -4, dy: -4)
+            let width = Int(inspectedBounds.width)
+            let height = Int(inspectedBounds.height)
+            var pixels = [UInt8](repeating: 0, count: width * height * 4)
+            CIContext().render(output, toBitmap: &pixels, rowBytes: width * 4,
+                               bounds: inspectedBounds, format: .RGBA8,
+                               colorSpace: CGColorSpaceCreateDeviceRGB())
+            for y in 0..<height {
+                for x in 0..<width {
+                    let inside = x >= 4 && x < width - 4 && y >= 4 && y < height - 4
+                    let alpha = pixels[(y * width + x) * 4 + 3]
+                    #expect(inside ? alpha >= 250 : alpha == 0,
+                            "\(moduleID.rawValue), mix \(mix), pixel (\(x), \(y)): alpha \(alpha)")
+                }
+            }
+        }
+    }
+
+    @Test(arguments: [EffectModuleID.directionalBlur, .zoomBlur])
+    func opticalBlursProduceVisibleOpaquePixels(moduleID: EffectModuleID) throws {
+        let bounds = CGRect(x: 13, y: 19, width: 64, height: 64)
+        let input = CIImage(color: .white)
+            .cropped(to: CGRect(x: 39, y: 19, width: 12, height: 64))
+            .composited(over: CIImage(color: .black).cropped(to: bounds))
+            .cropped(to: bounds)
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: moduleID))
+        let renderer = try MetalFrameRenderer()
+        let output = try renderer.renderEffectsSynchronously(
+            EffectStack(effects: [effect]), to: input, at: 0, renderScale: 1
+        )
+        let context = CIContext()
+        var pixels = [UInt8](repeating: 0, count: 64 * 64 * 4)
+        var original = pixels
+        context.render(output, toBitmap: &pixels, rowBytes: 64 * 4,
+                       bounds: bounds, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        context.render(input, toBitmap: &original, rowBytes: 64 * 4,
+                       bounds: bounds, format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        // Allow the optical kernels' small rounding error in accumulated alpha.
+        #expect(stride(from: 3, to: pixels.count, by: 4).allSatisfy { pixels[$0] >= 250 })
+        let difference = zip(pixels, original).reduce(0) { $0 + abs(Int($1.0) - Int($1.1)) }
+        #expect(difference > 1000, "The blur must visibly change the source image")
+    }
+
     @Test func completedRenderRequestsReleaseTimeoutCapturesImmediately() {
         let finisher = MotionaryVideoCompositor.RequestFinisher()
         weak var capturedObject: NSObject?
@@ -181,6 +238,57 @@ struct CanvasAndRenderingTests {
         let frame = try await generator.image(at: .zero).image
         let pixel = try rgbaPixel(in: frame, x: frame.width / 2, y: frame.height / 2)
         #expect(pixel[0] > 100 && pixel[1] > 100 && pixel[2] > 100)
+    }
+
+    @MainActor
+    @Test func highFrameRateExportPreservesTimelineSpeed() async throws {
+        let shape = ShapeTimelineItem(
+            name: "Timing", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: .white, width: 96, height: 96),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1),
+            visuals: TimelineItemVisuals(transform: ClipTransform(
+                opacity: AnimatableProperty(baseValue: 0, keyframes: [
+                    Keyframe(time: 0, value: 0), Keyframe(time: 1, value: 1)
+                ])
+            ))
+        )
+        let project = EditorProject(title: "Timing", renderSettings: RenderSettings(
+            width: 96, height: 96, frameRate: 60
+        ), tracks: [TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])])
+        let settings = VideoExportSettings(width: 96, height: 96, frameRate: 120,
+            videoBitrate: 1_000_000, audioBitrate: 96_000, codec: .h264, container: .mp4)
+        let url = try await VideoExportService().export(project: project, settings: settings, progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        #expect(abs(Double(try await track.load(.nominalFrameRate)) - 120) < 0.1)
+        #expect(abs(CMTimeGetSeconds(try await asset.load(.duration)) - 1) < 0.02)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        reader.add(output)
+        #expect(reader.startReading())
+        var count = 0
+        var lastTime = -1.0
+        while let sample = output.copyNextSampleBuffer() {
+            let time = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            #expect(abs(time - Double(count) / 120) < 0.001)
+            lastTime = time
+            count += 1
+        }
+        #expect(reader.status == .completed)
+        #expect(count == 120)
+        #expect(lastTime > 0.98)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let early = try await generator.image(at: CMTime(seconds: 0.25, preferredTimescale: 600)).image
+        let late = try await generator.image(at: CMTime(seconds: 0.75, preferredTimescale: 600)).image
+        let earlyPixel = try rgbaPixel(in: early, x: 48, y: 48)
+        let latePixel = try rgbaPixel(in: late, x: 48, y: 48)
+        #expect(latePixel[0] > earlyPixel[0] + 50)
+        #expect(latePixel[0] > 150)
     }
 
     @Test func photosRejectionPreservesTheCompletedVideo() throws {
@@ -2821,7 +2929,7 @@ struct CanvasAndRenderingTests {
 
     @MainActor
     @Test func effectThumbnailPreviewPreservesAssetOrientation() throws {
-        let image = try #require(EffectThumbnailRenderer.originalPreview(scale: 1)?.cgImage)
+        let image = try #require(EffectThumbnailRenderer.originalPreview(for: .cinematicBloom, scale: 1)?.cgImage)
 
         let top = try rgbaPixel(in: image, x: image.width / 2, y: 24)
         let bottom = try rgbaPixel(in: image, x: image.width / 2, y: image.height - 24)
@@ -2988,6 +3096,28 @@ struct CanvasAndRenderingTests {
         #expect(settings.frameRate == 1)
         #expect(settings.videoBitrate == 500_000)
         #expect(settings.audioBitrate == 320_000)
+    }
+
+    @MainActor
+    @Test func missingDecodedVideoCannotBecomeASuccessfulBlackFrame() throws {
+        let clip = RenderClipDescriptor(
+            trackID: 1, backgroundMaskTrackID: nil, clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(), adjustments: AdjustmentSettings(), effectStack: EffectStack(),
+            mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1,
+            shape: nil, text: nil, renderOrder: 0
+        )
+        do {
+            _ = try renderPixel(clips: [clip], at: 0.5, x: 50, y: 50)
+            Issue.record("A missing video source was incorrectly rendered as a valid background")
+        } catch MetalRenderingError.sourceFrameUnavailable {
+            // The preview adapter retains its last complete composed frame.
+        }
+        // Actual gaps remain intentional background, rather than replaying
+        // content from an unrelated clip on the other side of a cut.
+        let gap = try renderPixel(clips: [clip], at: 1.5, x: 50, y: 50,
+                                  backgroundColor: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1))
+        #expect(gap[0] > 200 && gap[1] < 10)
     }
 
     private func averageAlpha(in rect: CGRect, of image: CIImage) -> UInt8 {

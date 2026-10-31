@@ -5,7 +5,7 @@ import Foundation
 import Photos
 import UIKit
 
-enum ExportVideoCodec: String, CaseIterable, Identifiable {
+enum ExportVideoCodec: String, CaseIterable, Codable, Identifiable {
     case h264
     case hevc
 
@@ -14,7 +14,7 @@ enum ExportVideoCodec: String, CaseIterable, Identifiable {
     var avCodec: AVVideoCodecType { self == .h264 ? .h264 : .hevc }
 }
 
-enum ExportContainer: String, CaseIterable, Identifiable {
+enum ExportContainer: String, CaseIterable, Codable, Identifiable {
     case mp4
     case mov
 
@@ -24,7 +24,7 @@ enum ExportContainer: String, CaseIterable, Identifiable {
     var fileType: AVFileType { self == .mp4 ? .mp4 : .mov }
 }
 
-struct VideoExportSettings: Equatable {
+struct VideoExportSettings: Codable, Equatable {
     var width: Int
     var height: Int
     var frameRate: Int32
@@ -34,15 +34,19 @@ struct VideoExportSettings: Equatable {
     var container: ExportContainer
 
     static func recommended(for project: EditorProject) -> VideoExportSettings {
+        recommended(for: project.renderSettings)
+    }
+
+    static func recommended(for renderSettings: RenderSettings) -> VideoExportSettings {
         let pixelsPerSecond =
-            Double(max(project.renderSettings.width, 1))
-            * Double(max(project.renderSettings.height, 1))
-            * Double(max(project.renderSettings.frameRate, 1))
+            Double(max(renderSettings.width, 1))
+            * Double(max(renderSettings.height, 1))
+            * Double(max(renderSettings.frameRate, 1))
         let estimatedBitrate = Int(min(max(pixelsPerSecond * 0.075, 4_000_000), 50_000_000))
         return VideoExportSettings(
-            width: project.renderSettings.width,
-            height: project.renderSettings.height,
-            frameRate: project.renderSettings.frameRate,
+            width: renderSettings.width,
+            height: renderSettings.height,
+            frameRate: renderSettings.frameRate,
             videoBitrate: estimatedBitrate,
             audioBitrate: 192_000,
             codec: .h264,

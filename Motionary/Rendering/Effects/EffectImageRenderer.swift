@@ -42,12 +42,12 @@ enum EffectImageRenderer {
 enum EffectThumbnailRenderer {
     private static let outputContext = CIContext(options: [.cacheIntermediates: false])
     private static let lock = NSLock()
-    private static var cachedInput: CIImage?
+    private static var cachedInputs: [EffectCategory: CIImage] = [:]
 
     static func preview(for moduleID: EffectModuleID, scale: CGFloat = 2) -> UIImage? {
         guard let descriptor = EffectRegistry.shared.descriptor(for: moduleID),
             var effect = EffectRegistry.shared.makeEffect(moduleID: moduleID),
-            let input = normalizedPreviewInput()
+            let input = normalizedPreviewInput(for: descriptor.category)
         else { return nil }
         effect.mix = AnimatableProperty(baseValue: descriptor.previewMix)
         for parameter in descriptor.parameters {
@@ -64,16 +64,18 @@ enum EffectThumbnailRenderer {
         return previewImage(from: output, extent: input.extent, scale: scale)
     }
 
-    static func originalPreview(scale: CGFloat = 2) -> UIImage? {
-        guard let input = normalizedPreviewInput() else { return nil }
+    static func originalPreview(for moduleID: EffectModuleID, scale: CGFloat = 2) -> UIImage? {
+        guard let category = EffectRegistry.shared.descriptor(for: moduleID)?.category,
+            let input = normalizedPreviewInput(for: category)
+        else { return nil }
         return previewImage(from: input, extent: input.extent, scale: scale)
     }
 
-    private static func normalizedPreviewInput() -> CIImage? {
+    private static func normalizedPreviewInput(for category: EffectCategory) -> CIImage? {
         lock.lock()
         defer { lock.unlock() }
-        if let cachedInput { return cachedInput }
-        guard let uiImage = UIImage(named: "EffectsShowcase"),
+        if let cachedInput = cachedInputs[category] { return cachedInput }
+        guard let uiImage = UIImage(named: category.showcaseImageAssetName),
             let cgImage = uiImage.cgImage
         else { return nil }
         let square = centerCropSquare(CIImage(cgImage: cgImage))
@@ -88,7 +90,7 @@ enum EffectThumbnailRenderer {
                 y: targetSize / square.extent.height
             ))
             .cropped(to: CGRect(x: 0, y: 0, width: targetSize, height: targetSize))
-        cachedInput = normalized
+        cachedInputs[category] = normalized
         return normalized
     }
 

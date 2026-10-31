@@ -9,6 +9,15 @@ enum EffectCategory: String, CaseIterable, Identifiable, Sendable {
     case distortion = "Distortion"
 
     var id: String { rawValue }
+
+    var showcaseImageAssetName: String {
+        switch self {
+        case .essentials: "EffectsShowcaseEssentials"
+        case .colorGrade: "EffectsShowcaseColorGrade"
+        case .lens: "EffectsShowcaseLens"
+        case .distortion: "EffectsShowcaseDistortion"
+        }
+    }
 }
 
 enum EffectParameterValueType: String, Codable, Equatable, Sendable {
@@ -70,7 +79,9 @@ struct EffectParameterDescriptor: Identifiable, Equatable, Sendable {
     func accepts(_ value: EffectValue) -> Bool {
         switch (valueType, value) {
         case (.scalar, .scalar(let scalar)):
-            return scalar.isFinite && (scalarRange?.contains(scalar) ?? true)
+            // Degree controls support multiple turns. Their range describes
+            // the nominal control span, not a validity limit for animations.
+            return scalar.isFinite && (unit == .degrees || (scalarRange?.contains(scalar) ?? true))
         case (.boolean, .boolean):
             return true
         case (.color, .color(let color)):
@@ -95,6 +106,20 @@ struct EffectModuleMigration: Sendable {
 
 typealias EffectRendererFactory = @Sendable () -> any EffectRenderModule
 
+/// Internal sampling requirements, independent of editable effect parameters.
+enum EffectEdgeMode: UInt32, Equatable, Sendable {
+    case transparent = 0
+    case clamp = 1
+    case repeatTile = 2
+    case unfold = 3
+}
+
+struct EffectRenderConfiguration: Equatable, Sendable {
+    var edgeMode: EffectEdgeMode = .transparent
+    var usesTemporalFrames: Bool = false
+    var usesDisplacementMap: Bool = false
+}
+
 struct EffectModuleDescriptor: Identifiable, Equatable, Sendable {
     let id: EffectModuleID
     let currentVersion: Int
@@ -107,6 +132,7 @@ struct EffectModuleDescriptor: Identifiable, Equatable, Sendable {
     let parameters: [EffectParameterDescriptor]
     let migrations: [EffectModuleMigration]
     let rendererFactory: EffectRendererFactory
+    var renderConfiguration: EffectRenderConfiguration = .init()
 
     func descriptor(for parameterID: EffectParameterID) -> EffectParameterDescriptor? {
         parameters.first { $0.id == parameterID }
@@ -125,6 +151,7 @@ struct EffectModuleDescriptor: Identifiable, Equatable, Sendable {
             && lhs.summary == rhs.summary
             && lhs.defaultMix == rhs.defaultMix
             && lhs.previewMix == rhs.previewMix
+            && lhs.renderConfiguration == rhs.renderConfiguration
             && lhs.parameters == rhs.parameters
             && lhs.migrations.count == rhs.migrations.count
             && zip(lhs.migrations, rhs.migrations).allSatisfy { left, right in
@@ -333,12 +360,12 @@ extension EffectRegistry {
             .colorGrade,
             "camera.filters",
             "Warm archival tone.",
-            mix: 0.6,
-            previewMix: 0.78,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { SepiaEffectRenderer() },
             parameters: [
-                scalar(.warmth, "Warmth", "thermometer.sun", 0.68, 0.78),
-                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.18, 0.24),
+                scalar(.warmth, "Warmth", "thermometer.sun", 0.78, 0.78),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.24, 0.24),
             ]
         ),
         module(
@@ -347,12 +374,12 @@ extension EffectRegistry {
             .colorGrade,
             "circle.lefthalf.filled",
             "Hard monochrome contrast.",
-            mix: 0.6,
-            previewMix: 0.78,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { NoirEffectRenderer() },
             parameters: [
-                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.54, 0.68),
-                scalar(.grain, "Grain", "circle.grid.cross", 0.18, 0.32),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.68, 0.68),
+                scalar(.grain, "Grain", "circle.grid.cross", 0.32, 0.32),
             ]
         ),
         module(
@@ -361,12 +388,12 @@ extension EffectRegistry {
             .colorGrade,
             "sparkle.magnifyingglass",
             "Cool, saturated punch.",
-            mix: 0.6,
-            previewMix: 0.78,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { ChromeEffectRenderer() },
             parameters: [
-                scalar(.saturation, "Color", "drop.halffull", 0.62, 0.78),
-                scalar(.contrast, "Punch", "circle.lefthalf.filled", 0.34, 0.46),
+                scalar(.saturation, "Color", "drop.halffull", 0.78, 0.78),
+                scalar(.contrast, "Punch", "circle.lefthalf.filled", 0.46, 0.46),
             ]
         ),
         module(
@@ -375,10 +402,10 @@ extension EffectRegistry {
             .essentials,
             "circle.dotted",
             "Soft optical defocus.",
-            mix: 0.6,
-            previewMix: 0.48,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { BlurEffectRenderer() },
-            parameters: [scalar(.radius, "Radius", "circle.dotted", 0.44, 0.52)]
+            parameters: [scalar(.radius, "Radius", "circle.dotted", 0.14, 0.14)]
         ),
         module(
             .vignette,
@@ -386,12 +413,12 @@ extension EffectRegistry {
             .essentials,
             "circle.inset.filled",
             "Focused edge falloff.",
-            mix: 0.6,
-            previewMix: 0.78,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { VignetteEffectRenderer() },
             parameters: [
-                scalar(.radius, "Size", "circle.inset.filled", 0.6, 0.5),
-                scalar(.softness, "Softness", "circle.dashed", 0.58, 0.64),
+                scalar(.radius, "Size", "circle.inset.filled", 0.5, 0.5),
+                scalar(.softness, "Softness", "circle.dashed", 0.64, 0.64),
             ]
         ),
         module(
@@ -400,13 +427,13 @@ extension EffectRegistry {
             .lens,
             "sun.max",
             "Highlight bloom with contrast-preserving grade.",
-            mix: 0.55,
-            previewMix: 0.73,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { CinematicBloomEffectRenderer() },
             parameters: [
-                scalar(.radius, "Radius", "circle.dotted", 0.56, 0.64),
-                scalar(.threshold, "Threshold", "sun.max", 0.58, 0.48),
-                scalar(.saturation, "Color", "drop.halffull", 0.44, 0.58),
+                scalar(.radius, "Radius", "circle.dotted", 0.64, 0.64),
+                scalar(.threshold, "Threshold", "sun.max", 0.48, 0.48),
+                scalar(.saturation, "Color", "drop.halffull", 0.58, 0.58),
             ]
         ),
         module(
@@ -415,13 +442,13 @@ extension EffectRegistry {
             .lens,
             "lightspectrum.horizontal",
             "Warm highlight bleed inspired by scanned film.",
-            mix: 0.52,
-            previewMix: 0.7,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { FilmHalationEffectRenderer() },
             parameters: [
-                scalar(.radius, "Bleed", "circle.dotted", 0.48, 0.58),
-                scalar(.warmth, "Warmth", "thermometer.sun", 0.62, 0.74),
-                scalar(.threshold, "Threshold", "sun.max", 0.56, 0.48),
+                scalar(.radius, "Bleed", "circle.dotted", 0.58, 0.58),
+                scalar(.warmth, "Warmth", "thermometer.sun", 0.74, 0.74),
+                scalar(.threshold, "Threshold", "sun.max", 0.48, 0.48),
             ]
         ),
         module(
@@ -430,12 +457,13 @@ extension EffectRegistry {
             .distortion,
             "viewfinder",
             "Lens-edge RGB separation.",
-            mix: 0.5,
-            previewMix: 0.75,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { PrismSplitEffectRenderer() },
+            renderConfiguration: .init(edgeMode: .unfold),
             parameters: [
-                scalar(.offset, "Offset", "arrow.left.and.right", 0.46, 0.7),
-                scalar(.spread, "Spread", "viewfinder", 0.28, 0.44),
+                scalar(.offset, "Offset", "arrow.left.and.right", 0.85, 0.85),
+                scalar(.spread, "Spread", "viewfinder", 0.85, 0.85),
             ]
         ),
         module(
@@ -444,12 +472,13 @@ extension EffectRegistry {
             .distortion,
             "waveform.path.ecg",
             "Displaced scanline signal damage.",
-            mix: 0.42,
-            previewMix: 0.7,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { AnalogGlitchEffectRenderer() },
+            renderConfiguration: .init(edgeMode: .unfold),
             parameters: [
-                scalar(.offset, "Drift", "waveform.path.ecg", 0.42, 0.66),
-                scalar(.scanlines, "Scanlines", "line.3.horizontal", 0.42, 0.66),
+                scalar(.offset, "Drift", "waveform.path.ecg", 0.66, 0.66),
+                scalar(.scanlines, "Scanlines", "line.3.horizontal", 0.66, 0.66),
             ]
         ),
         module(
@@ -458,13 +487,14 @@ extension EffectRegistry {
             .colorGrade,
             "film",
             "Desaturated high-contrast print process.",
-            mix: 0.58,
-            previewMix: 0.76,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { BleachBypassEffectRenderer() },
+            renderConfiguration: .init(edgeMode: .unfold),
             parameters: [
-                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.54, 0.66),
-                scalar(.saturation, "Silver", "drop.halffull", 0.68, 0.78),
-                scalar(.sharpness, "Detail", "wand.and.rays", 0.36, 0.5),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.66, 0.66),
+                scalar(.saturation, "Silver", "drop.halffull", 0.78, 0.78),
+                scalar(.sharpness, "Detail", "wand.and.rays", 0.5, 0.5),
             ]
         ),
         module(
@@ -473,13 +503,13 @@ extension EffectRegistry {
             .colorGrade,
             "camera.aperture",
             "Balanced teal shadows with warm skin-safe highlights.",
-            mix: 0.62,
-            previewMix: 0.8,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { CineTealEffectRenderer() },
             parameters: [
-                scalar(.warmth, "Highlight Warmth", "thermometer.sun", 0.5, 0.62),
-                scalar(.saturation, "Color Density", "drop.halffull", 0.48, 0.6),
-                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.32, 0.44),
+                scalar(.warmth, "Highlight Warmth", "thermometer.sun", 0.62, 0.62),
+                scalar(.saturation, "Color Density", "drop.halffull", 0.6, 0.6),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.44, 0.44),
             ]
         ),
         module(
@@ -488,13 +518,13 @@ extension EffectRegistry {
             .colorGrade,
             "photo.on.rectangle",
             "Warm print density with controlled saturation and soft toe.",
-            mix: 0.56,
-            previewMix: 0.74,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { KodakPrintEffectRenderer() },
             parameters: [
-                scalar(.warmth, "Warmth", "sun.max", 0.58, 0.7),
-                scalar(.fade, "Print Fade", "rectangle.lefthalf.filled", 0.22, 0.34),
-                scalar(.grain, "Grain", "circle.grid.cross", 0.2, 0.3),
+                scalar(.warmth, "Warmth", "sun.max", 0.7, 0.7),
+                scalar(.fade, "Print Fade", "rectangle.lefthalf.filled", 0.34, 0.34),
+                scalar(.grain, "Grain", "circle.grid.cross", 0.3, 0.3),
             ]
         ),
         module(
@@ -503,13 +533,13 @@ extension EffectRegistry {
             .colorGrade,
             "camera.macro",
             "Creamy highlights, gentle contrast, and pastel color.",
-            mix: 0.52,
-            previewMix: 0.7,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { PortraSoftEffectRenderer() },
             parameters: [
-                scalar(.softness, "Softness", "camera.macro", 0.42, 0.56),
-                scalar(.warmth, "Warmth", "thermometer.sun", 0.42, 0.52),
-                scalar(.saturation, "Pastel", "drop.halffull", 0.32, 0.46),
+                scalar(.softness, "Softness", "camera.macro", 0.56, 0.56),
+                scalar(.warmth, "Warmth", "thermometer.sun", 0.52, 0.52),
+                scalar(.saturation, "Pastel", "drop.halffull", 0.46, 0.46),
             ]
         ),
         module(
@@ -518,13 +548,13 @@ extension EffectRegistry {
             .colorGrade,
             "snowflake",
             "Lifted shadows with cool editorial color separation.",
-            mix: 0.5,
-            previewMix: 0.68,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { CoolFadeEffectRenderer() },
             parameters: [
-                scalar(.fade, "Fade", "rectangle.lefthalf.filled", 0.42, 0.56),
-                scalar(.saturation, "Color", "drop.halffull", 0.32, 0.42),
-                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.18, 0.26),
+                scalar(.fade, "Fade", "rectangle.lefthalf.filled", 0.56, 0.56),
+                scalar(.saturation, "Color", "drop.halffull", 0.42, 0.42),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.26, 0.26),
             ]
         ),
         module(
@@ -533,12 +563,12 @@ extension EffectRegistry {
             .colorGrade,
             "rectangle.lefthalf.filled",
             "Deep but filmic matte contrast without clipped blacks.",
-            mix: 0.58,
-            previewMix: 0.76,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { MatteContrastEffectRenderer() },
             parameters: [
-                scalar(.fade, "Black Lift", "rectangle.lefthalf.filled", 0.24, 0.34),
-                scalar(.contrast, "Density", "circle.lefthalf.filled", 0.56, 0.68),
+                scalar(.fade, "Black Lift", "rectangle.lefthalf.filled", 0.34, 0.34),
+                scalar(.contrast, "Density", "circle.lefthalf.filled", 0.68, 0.68),
             ]
         ),
         module(
@@ -547,12 +577,12 @@ extension EffectRegistry {
             .essentials,
             "wand.and.rays",
             "Detail lift with restrained halo control.",
-            mix: 0.45,
-            previewMix: 0.63,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { CleanSharpenEffectRenderer() },
             parameters: [
-                scalar(.sharpness, "Detail", "wand.and.rays", 0.54, 0.7),
-                scalar(.radius, "Radius", "circle.dotted", 0.28, 0.36),
+                scalar(.sharpness, "Detail", "wand.and.rays", 0.7, 0.7),
+                scalar(.radius, "Radius", "circle.dotted", 0.36, 0.36),
             ]
         ),
         module(
@@ -561,12 +591,12 @@ extension EffectRegistry {
             .essentials,
             "circle.grid.cross",
             "Organic luma grain that scales with render resolution.",
-            mix: 0.36,
-            previewMix: 0.54,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { FineGrainEffectRenderer() },
             parameters: [
-                scalar(.grain, "Texture", "circle.grid.cross", 0.42, 0.7),
-                scalar(.contrast, "Luma Blend", "circle.lefthalf.filled", 0.34, 0.48),
+                scalar(.grain, "Texture", "circle.grid.cross", 0.7, 0.7),
+                scalar(.contrast, "Luma Blend", "circle.lefthalf.filled", 0.48, 0.48),
             ]
         ),
         module(
@@ -575,12 +605,12 @@ extension EffectRegistry {
             .lens,
             "sparkles",
             "Subtle diffusion that keeps detail under the bloom.",
-            mix: 0.48,
-            previewMix: 0.66,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { SoftGlowEffectRenderer() },
             parameters: [
-                scalar(.radius, "Diffusion", "sparkles", 0.48, 0.62),
-                scalar(.threshold, "Highlight Bias", "sun.max", 0.44, 0.36),
+                scalar(.radius, "Diffusion", "sparkles", 0.62, 0.62),
+                scalar(.threshold, "Highlight Bias", "sun.max", 0.36, 0.36),
             ]
         ),
         module(
@@ -589,13 +619,13 @@ extension EffectRegistry {
             .lens,
             "lightspectrum.horizontal",
             "Horizontal highlight flare with tunable spread and threshold.",
-            mix: 0.42,
-            previewMix: 0.6,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { AnamorphicFlareEffectRenderer() },
             parameters: [
-                scalar(.spread, "Spread", "lightspectrum.horizontal", 0.58, 0.72),
-                scalar(.threshold, "Threshold", "sun.max", 0.7, 0.54),
-                scalar(.warmth, "Tint", "thermometer.sun", 0.34, 0.44),
+                scalar(.spread, "Spread", "lightspectrum.horizontal", 0.72, 0.72),
+                scalar(.threshold, "Threshold", "sun.max", 0.22, 0.22),
+                scalar(.warmth, "Tint", "thermometer.sun", 0.44, 0.44),
             ]
         ),
         module(
@@ -604,8 +634,8 @@ extension EffectRegistry {
             .lens,
             "sun.horizon",
             "Warm directional leak for transitions and overlays.",
-            mix: 0.44,
-            previewMix: 0.62,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { LightLeakEffectRenderer() },
             parameters: [
                 scalar(
@@ -619,8 +649,8 @@ extension EffectRegistry {
                     fractionDigits: 0,
                     unit: .degrees
                 ),
-                scalar(.warmth, "Warmth", "thermometer.sun", 0.62, 0.72),
-                scalar(.spread, "Spread", "sun.horizon", 0.5, 0.64),
+                scalar(.warmth, "Warmth", "thermometer.sun", 0.72, 0.72),
+                scalar(.spread, "Spread", "sun.horizon", 0.64, 0.64),
             ]
         ),
         module(
@@ -629,12 +659,13 @@ extension EffectRegistry {
             .distortion,
             "scope",
             "Controlled RGB edge shift without full-frame destruction.",
-            mix: 0.36,
-            previewMix: 0.54,
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { ChromaticAberrationEffectRenderer() },
+            renderConfiguration: .init(edgeMode: .unfold),
             parameters: [
-                scalar(.offset, "Shift", "arrow.left.and.right", 0.38, 0.58),
-                scalar(.softness, "Edge Bias", "scope", 0.58, 0.72),
+                scalar(.offset, "Shift", "arrow.left.and.right", 0.85, 0.85),
+                scalar(.softness, "Edge Bias", "scope", 0.95, 0.95),
             ]
         ),
         module(
@@ -642,23 +673,23 @@ extension EffectRegistry {
             "Barrel Warp",
             .distortion,
             "circle.grid.3x3.circle",
-            "Lens barrel or pincushion warp with soft edge falloff.",
-            mix: 0.34,
-            previewMix: 0.52,
+            "Geometric barrel or pincushion distortion.",
+            mix: 1.0,
+            previewMix: 1.0,
             renderer: { BarrelWarpEffectRenderer() },
+            renderConfiguration: .init(edgeMode: .unfold),
             parameters: [
                 scalar(
                     .warp,
                     "Warp",
                     "circle.grid.3x3.circle",
-                    0.32,
+                    0.48,
                     0.48,
                     range: -1...1
                 ),
-                scalar(.softness, "Edge Falloff", "circle.dashed", 0.45, 0.56),
             ]
         ),
-    ]
+    ] + extendedModules
 
     private static func module(
         _ id: EffectModuleID,
@@ -670,6 +701,7 @@ extension EffectRegistry {
         previewMix: Double,
         renderer: @escaping EffectRendererFactory,
         migrations: [EffectModuleMigration] = [],
+        renderConfiguration: EffectRenderConfiguration = .init(),
         parameters: [EffectParameterDescriptor]
     ) -> EffectModuleDescriptor {
         EffectModuleDescriptor(
@@ -683,7 +715,8 @@ extension EffectRegistry {
             previewMix: previewMix,
             parameters: parameters,
             migrations: migrations,
-            rendererFactory: renderer
+            rendererFactory: renderer,
+            renderConfiguration: renderConfiguration
         )
     }
 
@@ -711,4 +744,82 @@ extension EffectRegistry {
             previewValue: .scalar(previewValue)
         )
     }
+}
+
+
+extension EffectRegistry {
+    private static func centerParameter() -> EffectParameterDescriptor {
+        EffectParameterDescriptor(id: .center, title: "Center", systemImage: "scope",
+            valueType: .point, defaultValue: .point(EffectPoint(x: 0.5, y: 0.5)))
+    }
+
+    private static func colorParameter(_ id: EffectParameterID, _ title: String, _ color: RGBAColor) -> EffectParameterDescriptor {
+        EffectParameterDescriptor(id: id, title: title, systemImage: "paintpalette",
+            valueType: .color, defaultValue: .color(color))
+    }
+
+    private static let extendedModules: [EffectModuleDescriptor] = [
+        module(.waveWarp, "Wave Warp", .distortion, "water.waves", "Animated sine waves bend the image.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .waveWarp, kind: .waveWarp) },
+            renderConfiguration: .init(edgeMode: .unfold), parameters: [
+                scalar(.amount, "Amount", "waveform", 0.055, 0.055, range: 0...0.3),
+                scalar(.wavelength, "Wavelength", "arrow.left.and.right", 0.28, 0.28, range: 0.02...1),
+                scalar(.angle, "Angle", "angle", 0, 0, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
+                scalar(.speed, "Speed", "speedometer", 0.5, 0.5, range: -3...3),
+            ]),
+        module(.twirl, "Twirl", .distortion, "hurricane", "Twist a region around an adjustable center.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .twirl, kind: .twirl) },
+            renderConfiguration: .init(edgeMode: .unfold), parameters: [
+                scalar(.angle, "Twist", "arrow.trianglehead.2.clockwise.rotate.90", 140, 140, range: -720...720, step: 1, fractionDigits: 0, unit: .degrees),
+                scalar(.radius, "Radius", "circle.dotted", 0.65, 0.65, range: 0.01...1.5), centerParameter(),
+            ]),
+        module(.pixelate, "Pixelate", .essentials, "square.grid.3x3.fill", "A crisp pixel grid, independent of output resolution.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .pixelate, kind: .pixelate) },
+            renderConfiguration: .init(edgeMode: .clamp), parameters: [
+                scalar(.amount, "Pixel Size", "square.grid.3x3", 0.045, 0.045, range: 0.002...0.25),
+            ]),
+        module(.posterize, "Posterize", .colorGrade, "square.stack.3d.up.fill", "Reduce the image to distinct tonal steps.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .posterize, kind: .posterize) }, parameters: [
+                scalar(.levels, "Levels", "line.3.horizontal", 4, 4, range: 2...32, step: 1, fractionDigits: 0, unit: .unitless),
+            ]),
+        module(.directionalBlur, "Directional Blur", .lens, "line.diagonal", "Directional streaks with mirrored image edges.", mix: 1, previewMix: 1,
+            renderer: { OpticalBlurEffectRenderer(moduleID: .directionalBlur) },
+            renderConfiguration: .init(edgeMode: .unfold), parameters: [
+                scalar(.amount, "Length", "arrow.left.and.right", 0.06, 0.06, range: 0...0.3),
+                scalar(.angle, "Angle", "angle", 35, 35, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
+            ]),
+        module(.zoomBlur, "Zoom Blur", .lens, "arrow.up.left.and.arrow.down.right", "Radial streaks from an adjustable center.", mix: 1, previewMix: 1,
+            renderer: { OpticalBlurEffectRenderer(moduleID: .zoomBlur) },
+            renderConfiguration: .init(edgeMode: .unfold), parameters: [
+                scalar(.amount, "Amount", "rays", 0.22, 0.22, range: 0...0.8), centerParameter(),
+            ]),
+        module(.kaleidoscope, "Mirror / Kaleidoscope", .distortion, "hexagon", "Fold the image into rotational mirror segments.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .kaleidoscope, kind: .kaleidoscope) },
+            renderConfiguration: .init(edgeMode: .unfold), parameters: [
+                scalar(.segments, "Segments", "hexagon", 6, 6, range: 1...16, step: 1, fractionDigits: 0, unit: .unitless),
+                scalar(.angle, "Rotation", "angle", 15, 15, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees), centerParameter(),
+            ]),
+        module(.duotone, "Duotone", .colorGrade, "circle.lefthalf.filled", "Map shadows and highlights to two editable colors.", mix: 1, previewMix: 1,
+            renderer: { DuotoneEffectRenderer() }, parameters: [
+                colorParameter(.shadowColor, "Shadows", RGBAColor(red: 0.06, green: 0.08, blue: 0.32, alpha: 1)),
+                colorParameter(.highlightColor, "Highlights", RGBAColor(red: 1, green: 0.72, blue: 0.3, alpha: 1)),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.2, 0.2),
+            ]),
+        module(.displacementMap, "Displacement Map", .distortion, "map", "An animated two-channel procedural map displaces the image.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .displacementMap, kind: .displacementMap) },
+            renderConfiguration: .init(edgeMode: .unfold, usesDisplacementMap: true), parameters: [
+                scalar(.amount, "Amount", "arrow.up.left.and.arrow.down.right", 0.07, 0.07, range: 0...0.3),
+                scalar(.frequency, "Scale", "square.grid.3x3", 5, 5, range: 1...20, step: 0.1),
+                scalar(.speed, "Speed", "speedometer", 0.3, 0.3, range: -3...3),
+                scalar(.detail, "Detail", "waveform", 0.5, 0.5),
+            ]),
+        module(.echoTrails, "Echo / Trails", .lens, "square.3.layers.3d", "Blend time-offset source frames into fading trails.", mix: 1, previewMix: 1,
+            renderer: { EchoTrailsEffectRenderer() },
+            renderConfiguration: .init(usesTemporalFrames: true), parameters: [
+                scalar(.samples, "Echoes", "square.3.layers.3d", 4, 4, range: 1...6, step: 1, fractionDigits: 0, unit: .unitless),
+                scalar(.spacing, "Delay (s)", "clock", 0.08, 0.08, range: 0.01...0.5, step: 0.01, unit: .unitless),
+                scalar(.decay, "Decay", "line.diagonal", 0.65, 0.65, range: 0...0.95),
+                scalar(.drift, "Drift", "arrow.right", 0.025, 0.025, range: -0.15...0.15),
+            ]),
+    ]
 }

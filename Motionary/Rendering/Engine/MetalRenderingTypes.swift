@@ -223,6 +223,31 @@ final class LivePreviewRenderState: @unchecked Sendable {
     private var overrides: [UUID: LivePreviewClipOverride] = [:]
     private var forcesInteractiveQuality = false
     private var revision: UInt64 = 0
+    private var pausedFrameRenderer: ((Double, UUID, @escaping (CVPixelBuffer?) -> Void) -> Bool)?
+
+    func installPausedFrameRenderer(
+        _ render: @escaping (Double, UUID, @escaping (CVPixelBuffer?) -> Void) -> Bool
+    ) {
+        lock.lock()
+        pausedFrameRenderer = render
+        lock.unlock()
+    }
+
+    func clearPausedFrameRenderer() {
+        lock.lock()
+        pausedFrameRenderer = nil
+        lock.unlock()
+    }
+
+    /// A single decoded frame set is reused only at its original timeline time
+    /// and composition session. Scrubbing/playback continue through AVFoundation.
+    func renderPausedFrame(at time: Double, sessionID: UUID,
+                           completion: @escaping (CVPixelBuffer?) -> Void) -> Bool {
+        lock.lock()
+        let render = pausedFrameRenderer
+        lock.unlock()
+        return render?(time, sessionID, completion) ?? false
+    }
 
     @discardableResult
     func setTransform(_ transform: ClipTransform, for clipID: UUID) -> UInt64 {
@@ -438,6 +463,7 @@ enum MetalRenderingError: LocalizedError {
     case unsupportedPixelFormat(OSType)
     case textureAllocationFailed(width: Int, height: Int)
     case invalidRenderTarget
+    case sourceFrameUnavailable
     case unavailableEffect(String)
     case cancelled
 
@@ -464,6 +490,8 @@ enum MetalRenderingError: LocalizedError {
             "The video frame uses an unsupported pixel format (\(format))."
         case .textureAllocationFailed(let width, let height):
             "The rendering engine could not allocate a \(width) x \(height) GPU surface."
+        case .sourceFrameUnavailable:
+            "A decoded source frame is not available yet."
         case .invalidRenderTarget:
             "AVFoundation did not provide a valid render target."
         case .unavailableEffect(let name):
@@ -611,7 +639,8 @@ extension RenderClipDescriptor {
             text: override.text ?? text,
             role: role,
             hasTransientRasterScaleOverride: hasTransientRasterScaleOverride,
-            renderOrder: renderOrder
+            renderOrder: renderOrder,
+            temporalSource: temporalSource
         )
     }
 }
@@ -648,6 +677,10 @@ struct EffectRenderContext: Sendable {
     /// Input pixels per authored pixel, never the final export scale.
     let renderScale: CGFloat
     let quality: RenderQualityProfile
+    var temporalSource: EffectTemporalSource? = nil
+    var temporalPrefix = EffectStack()
+    var temporalSourceExtent: CGRect? = nil
+    var frameDuration: Double = 1 / 30
 
     func deterministicSeed(storedSeed: UInt64, effectID: UUID) -> UInt32 {
         var value = storedSeed
@@ -691,6 +724,8 @@ struct MotionaryEffectUniforms {
     var frameIndex: Float
     var direction: SIMD2<Float>
     var parameters: SIMD4<Float>
+    var sourceBounds = SIMD4<Float>(0, 0, 1, 1)
+    var parameters2 = SIMD4<Float>(0.5, 0.5, 0, 0)
 }
 
 struct MotionaryYUVUniforms {
@@ -712,10 +747,17 @@ enum MotionaryMetalEffectKind: UInt32 {
     case lightLeak = 9
     case chromaticAberration = 10
     case barrelWarp = 11
+    case waveWarp = 12
+    case twirl = 13
+    case pixelate = 14
+    case posterize = 15
+    case kaleidoscope = 18
+    case displacementMap = 19
     case cinematicBloom = 20
     case filmHalation = 21
     case softGlow = 22
     case anamorphicFlare = 23
+    case duotone = 24
 }
 
 struct EffectRenderDiagnostic: Equatable, Sendable {

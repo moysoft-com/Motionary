@@ -21,6 +21,8 @@ struct AppIconPickerView: View {
                             HStack(spacing: MotionaryDesign.Spacing.xxl) {
                                 Image("\(icon)Preview")
                                     .resizable()
+                                    .interpolation(.high)
+                                    .antialiased(true)
                                     .frame(width: 64, height: 64)
                                     .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.graph, style: .continuous))
                                     .accessibilityHidden(true)
@@ -58,7 +60,6 @@ struct AppIconPickerView: View {
             .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
             .navigationTitle("App Icon")
             .navigationBarTitleDisplayMode(.inline)
-            .tint(MotionaryTheme.accent)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }

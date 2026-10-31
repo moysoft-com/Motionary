@@ -26,6 +26,9 @@ struct TimelineTracksContent: View {
     let trackHeight: CGFloat
     let rowSpacing: CGFloat
     @Binding var clipDragScrollOffset: CGSize
+    var workspaceContext: TimelineWorkspaceContext? = nil
+    var currentTime: Double = 0
+    var trackOriginY: CGFloat = 38
 
     @State private var clipDragPlacementSession: TimelinePlacementDragSession?
 
@@ -40,10 +43,10 @@ struct TimelineTracksContent: View {
             ZStack(alignment: .topLeading) {
                 ForEach(visibleTracks) { visible in
                     trackRow(track: visible.track, index: visible.index)
-                        .offset(y: CGFloat(visible.index) * (trackHeight + rowSpacing))
+                        .offset(y: CGFloat(displayIndex(for: visible.index)) * (trackHeight + rowSpacing))
                 }
             }
-            .offset(y: 30)
+            .offset(y: trackOriginY - 8)
 
             if let guide = activeSnapGuide {
                 TimelineSnapGuideLine(height: guide.height)
@@ -85,7 +88,7 @@ struct TimelineTracksContent: View {
                 .allowsHitTesting(false)
                 .offset(
                     x: centerPadding + CGFloat(activeClipDrag.resolvedPlacement.start) * pixelsPerSecond,
-                    y: 30 + CGFloat(activeClipDrag.resolvedPlacement.trackIndex) * (trackHeight + rowSpacing) + 4
+                    y: trackOriginY - 8 + CGFloat(displayIndex(for: activeClipDrag.resolvedPlacement.trackIndex)) * (trackHeight + rowSpacing) + 4
                 )
                 .zIndex(500)
                 .transaction { $0.animation = nil }
@@ -150,9 +153,10 @@ struct TimelineTracksContent: View {
             }
         }
 
-        let minimumIndex = involvedTrackIndices.min() ?? movingTrackIndex
-        let maximumIndex = involvedTrackIndices.max() ?? movingTrackIndex
-        let minY = 30 + CGFloat(minimumIndex) * (trackHeight + rowSpacing) + 4
+        let displayedIndices = involvedTrackIndices.map { displayIndex(for: $0) }
+        let minimumIndex = displayedIndices.min() ?? displayIndex(for: movingTrackIndex)
+        let maximumIndex = displayedIndices.max() ?? displayIndex(for: movingTrackIndex)
+        let minY = trackOriginY - 8 + CGFloat(minimumIndex) * (trackHeight + rowSpacing) + 4
         let height = CGFloat(maximumIndex - minimumIndex) * (trackHeight + rowSpacing) + trackHeight - 8
         return (time, minY, height)
     }
@@ -164,6 +168,11 @@ struct TimelineTracksContent: View {
     }
 
     private var visibleTrackIndices: [Int] {
+        if workspaceContext?.showsOnlySelectedTrack == true {
+            return snapshot.tracks.indices.filter { index in
+                snapshot.tracks[index].items.contains { $0.id == workspaceContext?.itemID }
+            }
+        }
         var indices = Set(viewportState.window.trackRange)
         if let selectedClipID = snapshot.selectedClipID,
             let selectedTrackIndex = trackIndex(containing: selectedClipID)
@@ -182,6 +191,10 @@ struct TimelineTracksContent: View {
             indices
             .filter { snapshot.tracks.indices.contains($0) }
             .sorted()
+    }
+
+    private func displayIndex(for index: Int) -> Int {
+        workspaceContext?.showsOnlySelectedTrack == true ? 0 : index
     }
 
     private var visibleTracks: [VisibleTimelineTrack] {
@@ -209,7 +222,7 @@ struct TimelineTracksContent: View {
             selectedClipID: snapshot.selectedClipID,
             activeClipDrag: activeClipDrag,
             activeTrackDrag: activeTrackDrag,
-            currentTime: 0,
+            currentTime: currentTime,
             keyframeTolerance: snapshot.keyframeTolerance,
             projectDuration: snapshot.duration,
             pixelsPerSecond: pixelsPerSecond,
@@ -276,6 +289,7 @@ struct TimelineTracksContent: View {
                 activeTrimSnapTime = time
             },
             onTrackDragBegan: {
+                guard workspaceContext?.showsOnlySelectedTrack != true else { return }
                 beginTrackDrag(trackID: track.id, sourceIndex: index)
             },
             onTrackDragChanged: { value in
@@ -283,7 +297,8 @@ struct TimelineTracksContent: View {
             },
             onTrackDragEnded: { commit in
                 finishTrackDrag(commit: commit)
-            }
+            },
+            workspaceContext: workspaceContext
         )
     }
 
@@ -429,6 +444,7 @@ struct TimelineTracksContent: View {
         translationY: CGFloat,
         currentTargetIndex: Int? = nil
     ) -> Int {
+        if workspaceContext?.showsOnlySelectedTrack == true { return sourceTrackIndex }
         let rowPosition = CGFloat(sourceTrackIndex) + translationY / max(trackHeight + rowSpacing, 1)
         return min(max(Int(rowPosition.rounded()), 0), max(viewModel.project.tracks.count - 1, 0))
     }

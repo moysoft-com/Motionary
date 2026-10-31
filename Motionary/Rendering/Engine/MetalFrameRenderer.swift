@@ -214,6 +214,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     }
                     continue
                 }
+                if clip.transform.opacity.value(at: localTime) <= 0.000_001 { continue }
                 let isGeneratedLayer = clip.shape != nil || clip.text != nil
                 let generatedPreparation = prepareGeneratedLayer(
                     for: clip,
@@ -274,7 +275,9 @@ final class MetalFrameRenderer: @unchecked Sendable {
                             frameIndex: frameIndex,
                             itemID: clip.clipID,
                             renderScale: coordinates.renderScale,
-                            quality: plan.quality
+                            quality: plan.quality,
+                            temporalSource: clip.temporalSource,
+                            frameDuration: plan.frameDuration
                         ),
                         resources: frameResources,
                         failurePolicy: plan.failurePolicy
@@ -727,9 +730,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             return SourceResult(image: image, textAnimationSample: nil,
                 rasterScaleCorrection: CGSize(width: 1, height: 1))
         }
-        guard clip.trackID != kCMPersistentTrackID_Invalid,
-            let sourceBuffer = sourceFrame(clip.trackID)
-        else {
+        guard clip.trackID != kCMPersistentTrackID_Invalid else {
             return SourceResult(
                 image: nil,
                 textAnimationSample: nil,
@@ -737,6 +738,15 @@ final class MetalFrameRenderer: @unchecked Sendable {
             )
         }
 
+        guard let sourceBuffer = sourceFrame(clip.trackID) else {
+            // Do not promote a temporary decoder miss to a successful black
+            // composite: the adapter retains the last complete frame instead.
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
+        if clip.backgroundRemoval?.requiresForegroundMatte == true,
+            let maskTrack = clip.backgroundMaskTrackID, sourceFrame(maskTrack) == nil {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
         var image = try frameResources.makeSourceImage(from: sourceBuffer)
             .transformed(by: clip.sourceTransform)
         if let settings = clip.backgroundRemoval {
@@ -1747,20 +1757,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
         to image: CIImage,
         at time: Double
     ) -> CIImage {
-        let colorControls = CIFilter.colorControls()
-        colorControls.inputImage = image
-        colorControls.brightness = Float(adjustments.brightness.value(at: time))
-        colorControls.contrast = Float(adjustments.contrast.value(at: time))
-        colorControls.saturation = Float(adjustments.saturation.value(at: time))
-        var output = colorControls.outputImage ?? image
-        let exposure = adjustments.exposure.value(at: time)
-        if abs(exposure) > 0.001 {
-            let filter = CIFilter.exposureAdjust()
-            filter.inputImage = output
-            filter.ev = Float(exposure)
-            output = filter.outputImage ?? output
-        }
-        return output
+        EffectColorAdjustments.apply(adjustments, to: image, at: time)
     }
 
     private func applyOpacity(_ opacity: Double, to image: CIImage) -> CIImage {

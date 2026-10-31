@@ -25,6 +25,8 @@ extension EditorViewModel {
     }
 
     func stop() {
+        playbackState.isStartingPlayback = false
+        scratchAudio.shutdown()
         removeEffectRenderDiagnosticsHandler()
         let content = ProjectContent(editorProject: project)
         autosaveTask?.cancel()
@@ -84,6 +86,7 @@ extension EditorViewModel {
             timeObserver = nil
         }
         replacePreviewPlayer(with: nil)
+        scrubIsFinishing = false
         isPlaying = false
     }
 
@@ -117,6 +120,8 @@ extension EditorViewModel {
     }
 
     func togglePlayback() {
+        scratchAudio.end()
+        invalidateLivePreviewPresentation()
         if previewRecoveryCircuitIsOpen {
             pendingPlaybackResumeAfterPreviewRebuild = true
             schedulePreviewRebuild(
@@ -127,6 +132,29 @@ extension EditorViewModel {
             return
         }
         guard let player else { return }
+        if playbackState.isStartingPlayback {
+            pausePlaybackForUserCommand(player)
+            return
+        }
+        if !isPlaying { playbackState.playbackStartRequestRevision &+= 1 }
+        let takingOverScrub = isScrubbing || scrubIsFinishing
+        if takingOverScrub {
+            scrubSessionGeneration &+= 1
+            scrubSeekGeneration &+= 1
+            previewSeekGeneration &+= 1
+            player.currentItem?.cancelPendingSeeks()
+            scrubSeekTask?.cancel()
+            scrubSeekTask = nil
+            pendingScrubSeekTime = nil
+            isScrubSeekInFlight = false
+            isPreviewSeekInFlight = false
+            lastIssuedScrubSeekTime = nil
+            isScrubbing = false
+            scrubIsFinishing = false
+            wasPlayingBeforeScrub = false
+            setPreviewQualityForInteraction(false)
+            flushDeferredPreviewRebuild(seekTo: currentTime)
+        }
         playbackCommandGeneration &+= 1
         let commandGeneration = playbackCommandGeneration
 
@@ -158,29 +186,22 @@ extension EditorViewModel {
         }
 
         let endTolerance = max(keyframeTimeTolerance, 0.05)
-        if duration > 0, currentTime >= max(duration - endTolerance, 0) {
-            player.pause()
-            player.currentItem?.cancelPendingSeeks()
-            updateCurrentTime(0)
+        let restartingAtEnd = duration > 0 && currentTime >= max(duration - endTolerance, 0)
+        if takingOverScrub || restartingAtEnd {
+            if restartingAtEnd { updateCurrentTime(0) }
+            let target = currentTime
+            playbackState.isStartingPlayback = true
             Task { [weak self, weak player] in
-                guard let self, let player else { return }
-                let didSeek = await self.boundedSeek(
-                    player: player,
-                    to: 0,
-                    toleranceBefore: .zero,
-                    toleranceAfter: .zero,
-                    timeoutNanoseconds: 5_000_000_000
+                guard let self, let player,
+                    self.playbackCommandGeneration == commandGeneration else { return }
+                let result = await self.boundedSeek(
+                    player: player, to: self.livePreviewPresentationTime(self.clampedPlayableTime(target)),
+                    toleranceBefore: .zero, toleranceAfter: .zero, timeoutNanoseconds: 5_000_000_000
                 )
-                guard self.player === player,
-                    self.playbackCommandGeneration == commandGeneration
-                else { return }
-                guard didSeek == .completed else {
-                    if didSeek == .timedOut {
-                        self.schedulePreviewRecovery(
-                            reason: .seekTimeout,
-                            resumePlayback: true
-                        )
-                    }
+                guard self.player === player, self.playbackCommandGeneration == commandGeneration else { return }
+                self.playbackState.isStartingPlayback = false
+                guard result == .completed else {
+                    if result == .timedOut { self.schedulePreviewRecovery(reason: .seekTimeout, resumePlayback: true) }
                     return
                 }
                 player.play()
@@ -189,13 +210,15 @@ extension EditorViewModel {
             }
             return
         }
-
         player.play()
         isPlaying = true
         startPlaybackWatchdog()
     }
 
     private func pausePlaybackForUserCommand(_ player: AVPlayer) {
+        previewSeekGeneration &+= 1
+        isPreviewSeekInFlight = false
+        playbackState.isStartingPlayback = false
         playbackCommandGeneration &+= 1
         scrubSessionGeneration &+= 1
         scrubSeekGeneration &+= 1
@@ -404,6 +427,9 @@ extension EditorViewModel {
     }
 
     func seek(to time: Double, exact: Bool = true) {
+        playbackState.isStartingPlayback = false
+        scratchAudio.end()
+        invalidateLivePreviewPresentation()
         playbackCommandGeneration &+= 1
         let clamped = clampedTimelineTime(time)
         updateCurrentTime(clamped)
@@ -433,7 +459,12 @@ extension EditorViewModel {
     }
 
     func beginScrub() {
-        guard !isScrubbing else { return }
+        guard !isScrubbing || scrubIsFinishing else { return }
+        if scrubIsFinishing { player?.currentItem?.cancelPendingSeeks() }
+        scrubIsFinishing = false
+        playbackState.isStartingPlayback = false
+        pendingPlaybackResumeAfterPreviewRebuild = false
+        invalidateLivePreviewPresentation(preservingFrame: true)
         playbackCommandGeneration &+= 1
         scrubSessionGeneration &+= 1
         wasPlayingBeforeScrub = isPlaying
@@ -441,6 +472,7 @@ extension EditorViewModel {
         player?.pause()
         isPlaying = false
         isScrubbing = true
+        livePreviewPresentation.setInteracting(true)
         if rebuildTask != nil {
             deferredPreviewInvalidation.formUnion([
                 .previewFrame,
@@ -463,9 +495,14 @@ extension EditorViewModel {
         scrubSeekGeneration &+= 1
         previewQuality = .interactive
         renderService.livePreviewState.setInteractiveQualityOverride(true)
+        scratchAudio.begin(item: player?.currentItem, duration: duration, at: currentTime)
     }
 
     func endScrub(at time: Double) {
+        guard isScrubbing else { return }
+        scratchAudio.end()
+        scrubIsFinishing = true
+        livePreviewPresentation.setInteracting(false)
         let clamped = clampedTimelineTime(time)
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
@@ -486,10 +523,13 @@ extension EditorViewModel {
             return
         }
         Task { [weak self, weak player] in
-            guard let self, let player else { return }
+            guard let self, let player,
+                self.player === player,
+                self.scrubSessionGeneration == generation
+            else { return }
             let didSeek = await self.boundedSeek(
                 player: player,
-                to: self.clampedPlayableTime(clamped),
+                to: self.livePreviewPresentationTime(self.clampedPlayableTime(clamped)),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero,
                 timeoutNanoseconds: 5_000_000_000
@@ -510,6 +550,9 @@ extension EditorViewModel {
         guard generation == scrubSessionGeneration, isScrubbing else { return }
         updateCurrentTime(time)
         isScrubbing = false
+        pendingLivePreviewFrameRefresh = true
+        scheduleLivePreviewFrameRefresh()
+        scrubIsFinishing = false
         wasPlayingBeforeScrub = false
         flushDeferredPreviewRebuild(
             seekTo: time,

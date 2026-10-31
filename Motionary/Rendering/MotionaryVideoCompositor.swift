@@ -25,11 +25,10 @@ struct RenderContextCachePolicy: Equatable {
 }
 
 final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
+    // Retain one GPU output surface. Copying every successful frame into Data
+    // forced a CPU readback and full-frame allocation during playback/scrubbing.
     private struct LastGoodFrame {
-        let width: Int
-        let height: Int
-        let bytesPerRow: Int
-        let data: Data
+        let pixelBuffer: CVPixelBuffer
     }
 
     final class RequestFinisher: @unchecked Sendable {
@@ -197,8 +196,11 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                             request.finish(with: MetalRenderingError.invalidRenderTarget)
                             return
                         }
-                        self.renderFallbackFrame(into: fallback, instruction: instruction)
-                        request.finish(withComposedVideoFrame: fallback)
+                        if self.copyLastCompleteFrame(into: fallback) {
+                            request.finish(withComposedVideoFrame: fallback)
+                        } else {
+                            request.finishCancelledRequest()
+                        }
                     }
                     // Completed requests must release their pixel buffers immediately;
                     // the delayed timer must not retain every exported frame.
@@ -206,10 +208,23 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         finisher?.timeOut()
                     }
                     let plan = RenderPlanCompiler.compile(instruction)
+                    // Retain only one frame's decoder buffers, never the request.
+                    // Reusing these avoids decoding and same-time seek caching
+                    // for every paused inspector/canvas sample.
+                    var sources: [CMPersistentTrackID: CVPixelBuffer] = [:]
+                    for track in request.sourceTrackIDs {
+                        let id = track.int32Value
+                        if let buffer = request.sourceFrame(byTrackID: id) {
+                            sources[id] = buffer
+                        }
+                    }
+                    let cachedSources = sources
+                    let renderContext = request.renderContext
+                    let frameTime = request.compositionTime
                     renderer.renderAsync(
                         plan: plan,
                         compositionTime: request.compositionTime,
-                        sourceFrame: { trackID in request.sourceFrame(byTrackID: trackID) },
+                        sourceFrame: { cachedSources[$0] },
                         destination: destination,
                         isCancelled: { finisher.isFinished || !self.isCurrent(generation) }
                     ) { [weak self] result in
@@ -228,9 +243,51 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         switch result {
                         case .success:
                             finisher.finish {
-                                self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime)
+                                instruction.livePreviewState?.installPausedFrameRenderer {
+                                    [weak self, weak cachedInstruction = instruction] time, sessionID, completion in
+                                    guard let self, let instruction = cachedInstruction,
+                                        instruction.renderSessionID == sessionID,
+                                        abs(time - CMTimeGetSeconds(frameTime)) < 0.000_01
+                                    else { return false }
+                                    let cachedGeneration = self.currentGeneration()
+                                    let liveFinisher = RequestFinisher()
+                                    liveFinisher.setTimeoutAction { completion(nil) }
+                                    self.timeoutQueue.asyncAfter(deadline: .now() + .milliseconds(1_200)) {
+                                        [weak liveFinisher] in liveFinisher?.timeOut()
+                                    }
+                                    self.renderQueue.async {
+                                        guard !liveFinisher.isFinished,
+                                            self.isCurrent(cachedGeneration),
+                                            let destination = renderContext.newPixelBuffer()
+                                        else { liveFinisher.finish { completion(nil) }; return }
+                                        renderer.renderAsync(
+                                            plan: RenderPlanCompiler.compile(instruction),
+                                            compositionTime: frameTime,
+                                            sourceFrame: { cachedSources[$0] },
+                                            destination: destination,
+                                            isCancelled: {
+                                                liveFinisher.isFinished || !self.isCurrent(cachedGeneration)
+                                            }
+                                        ) { result in
+                                            liveFinisher.finish {
+                                                if case .success = result { completion(destination) }
+                                                else { completion(nil) }
+                                            }
+                                        }
+                                    }
+                                    return true
+                                }
+                                self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime, frame: destination)
                                 self.storeLastGoodFrame(from: destination)
                                 request.finish(withComposedVideoFrame: destination)
+                            }
+                        case .failure(MetalRenderingError.sourceFrameUnavailable):
+                            finisher.finish {
+                                if self.copyLastCompleteFrame(into: destination) {
+                                    request.finish(withComposedVideoFrame: destination)
+                                } else {
+                                    request.finishCancelledRequest()
+                                }
                             }
                         case .failure(MetalRenderingError.cancelled):
                             finisher.finish {
@@ -240,13 +297,22 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                             finisher.finish {
                                 self.recordFrameFailure(error, instruction: instruction)
                                 self.logger.error("Frame rendering failed: \(error.localizedDescription, privacy: .public)")
-                                self.renderFallbackFrame(
-                                    into: destination,
-                                    instruction: instruction
-                                )
-                                request.finish(withComposedVideoFrame: destination)
+                                if self.copyLastCompleteFrame(into: destination) {
+                                    request.finish(withComposedVideoFrame: destination)
+                                } else {
+                                    request.finishCancelledRequest()
+                                }
                             }
                         }
+                    }
+                } catch MetalRenderingError.sourceFrameUnavailable {
+                    if instruction.qualityProfile == .export {
+                        request.finish(with: MetalRenderingError.sourceFrameUnavailable)
+                    } else if let destination = request.renderContext.newPixelBuffer(),
+                        self.copyLastCompleteFrame(into: destination) {
+                        request.finish(withComposedVideoFrame: destination)
+                    } else {
+                        request.finishCancelledRequest()
                     }
                 } catch MetalRenderingError.cancelled {
                     request.finishCancelledRequest()
@@ -257,14 +323,11 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         request.finish(with: error)
                         return
                     }
-                    if let destination = request.renderContext.newPixelBuffer() {
-                        self.renderFallbackFrame(
-                            into: destination,
-                            instruction: instruction
-                        )
+                    if let destination = request.renderContext.newPixelBuffer(),
+                        self.copyLastCompleteFrame(into: destination) {
                         request.finish(withComposedVideoFrame: destination)
                     } else {
-                        request.finish(with: error)
+                        request.finishCancelledRequest()
                     }
                 }
             }
@@ -283,12 +346,13 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         fallbackLock.unlock()
     }
 
-    private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction, time: CMTime) {
+    private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction, time: CMTime, frame: CVPixelBuffer) {
         let shouldNotify: Bool
         stateLock.lock()
         consecutiveRenderFailures = 0
         let now = CFAbsoluteTimeGetCurrent()
-        shouldNotify = now - lastSuccessNotificationAt > 0.25
+        shouldNotify = instruction.livePreviewState?.usesInteractiveQuality == true
+            || now - lastSuccessNotificationAt > 0.25
         if shouldNotify {
             lastSuccessNotificationAt = now
         }
@@ -298,7 +362,8 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 name: .motionaryVideoCompositorRenderedFrame,
                 object: self,
                 userInfo: ["renderSessionID": instruction.renderSessionID,
-                           "compositionTime": CMTimeGetSeconds(time)]
+                           "compositionTime": CMTimeGetSeconds(time),
+                           "frame": frame]
             )
         }
     }
@@ -364,35 +429,19 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
             return
         }
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        guard width > 0, height > 0, bytesPerRow > 0 else { return }
-        let byteCount = bytesPerRow * height
-        let data = Data(bytes: baseAddress, count: byteCount)
         fallbackLock.lock()
-        lastGoodFrame = LastGoodFrame(
-            width: width,
-            height: height,
-            bytesPerRow: bytesPerRow,
-            data: data
-        )
+        lastGoodFrame = LastGoodFrame(pixelBuffer: pixelBuffer)
         fallbackLock.unlock()
     }
 
-    private func renderFallbackFrame(
-        into pixelBuffer: CVPixelBuffer,
-        instruction: MotionaryVideoCompositionInstruction
-    ) {
+    @discardableResult
+    private func copyLastCompleteFrame(into pixelBuffer: CVPixelBuffer) -> Bool {
         guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
-            return
+            return false
         }
         CVPixelBufferLockBaseAddress(pixelBuffer, [])
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return }
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return false }
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
@@ -401,49 +450,24 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         let cachedFrame = lastGoodFrame
         fallbackLock.unlock()
 
-        if let cachedFrame,
-            cachedFrame.width == width,
-            cachedFrame.height == height,
-            cachedFrame.bytesPerRow == bytesPerRow
+        if let sourceBuffer = cachedFrame?.pixelBuffer,
+            CVPixelBufferGetWidth(sourceBuffer) == width,
+            CVPixelBufferGetHeight(sourceBuffer) == height
         {
-            cachedFrame.data.withUnsafeBytes { bytes in
-                guard let source = bytes.baseAddress else { return }
-                memcpy(baseAddress, source, cachedFrame.data.count)
-            }
-            return
-        }
-
-        fill(
-            pixelBufferBaseAddress: baseAddress,
-            width: width,
-            height: height,
-            bytesPerRow: bytesPerRow,
-            color: instruction.backgroundColor
-        )
-    }
-
-    private func fill(
-        pixelBufferBaseAddress baseAddress: UnsafeMutableRawPointer,
-        width: Int,
-        height: Int,
-        bytesPerRow: Int,
-        color: RGBAColor
-    ) {
-        let blue = UInt8((min(max(color.blue, 0), 1) * 255).rounded())
-        let green = UInt8((min(max(color.green, 0), 1) * 255).rounded())
-        let red = UInt8((min(max(color.red, 0), 1) * 255).rounded())
-        let alpha = UInt8((min(max(color.alpha, 0), 1) * 255).rounded())
-        for row in 0..<height {
-            let rowStart = baseAddress.advanced(by: row * bytesPerRow)
-                .assumingMemoryBound(to: UInt8.self)
-            for column in 0..<width {
-                let offset = column * 4
-                rowStart[offset] = blue
-                rowStart[offset + 1] = green
-                rowStart[offset + 2] = red
-                rowStart[offset + 3] = alpha
+            CVPixelBufferLockBaseAddress(sourceBuffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(sourceBuffer, .readOnly) }
+            if let source = CVPixelBufferGetBaseAddress(sourceBuffer) {
+                let sourceStride = CVPixelBufferGetBytesPerRow(sourceBuffer)
+                for row in 0..<height {
+                    memcpy(baseAddress.advanced(by: row * bytesPerRow),
+                           source.advanced(by: row * sourceStride), width * 4)
+                }
+                return true
             }
         }
+        // A loading/error path must never invent a black/background frame.
+        // With no valid fallback, cancelling retains the player's old image.
+        return false
     }
 
     private func currentGeneration() -> UInt {

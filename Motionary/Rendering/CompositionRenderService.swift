@@ -175,6 +175,7 @@ struct RenderClipDescriptor: @unchecked Sendable {
     /// to reuse the cached shape texture.
     let hasTransientRasterScaleOverride: Bool
     let renderOrder: Int
+    let temporalSource: EffectTemporalSource?
 
     var isAdjustmentLayer: Bool { role == .adjustment }
 
@@ -200,7 +201,8 @@ struct RenderClipDescriptor: @unchecked Sendable {
         text: TextTimelineItem?,
         role: RenderLayerRole = .content,
         hasTransientRasterScaleOverride: Bool = false,
-        renderOrder: Int
+        renderOrder: Int,
+        temporalSource: EffectTemporalSource? = nil
     ) {
         self.trackID = trackID
         self.backgroundMaskTrackID = backgroundMaskTrackID
@@ -224,6 +226,9 @@ struct RenderClipDescriptor: @unchecked Sendable {
         self.role = role
         self.hasTransientRasterScaleOverride = hasTransientRasterScaleOverride
         self.renderOrder = renderOrder
+        var temporalSource = temporalSource
+        temporalSource?.adjustments = adjustments
+        self.temporalSource = temporalSource
     }
 }
 
@@ -781,19 +786,23 @@ final class CompositionRenderService {
     private let timescale: CMTimeScale = 600
     private let retimingTimescale: CMTimeScale = 60_000
     private let assetCache: MediaAssetCache
+    private let previewProxyStore: PreviewProxyStore?
     private let stillImageValidationCache = StillImageValidationCache()
     private let previewAudioEnvelopePreparer = PreviewAudioEnvelopePreparer()
     let livePreviewState = LivePreviewRenderState()
     @MainActor private var previewGraph: PreviewRenderGraph?
+    @MainActor private(set) var previewSupportsExactScrubbing = false
     @MainActor private var previewGraphRevision = 0
     @MainActor private var previewPreparationGeneration = 0
 
-    init(assetCache: MediaAssetCache = .shared) {
+    init(assetCache: MediaAssetCache = .shared, previewProxyStore: PreviewProxyStore? = .shared) {
         self.assetCache = assetCache
+        self.previewProxyStore = previewProxyStore
     }
 
     @MainActor
     func invalidatePreviewGraph() {
+        previewSupportsExactScrubbing = false
         previewGraph = nil
         previewGraphRevision &+= 1
         previewPreparationGeneration &+= 1
@@ -849,7 +858,8 @@ final class CompositionRenderService {
                 qualityProfile: quality.renderQualityProfile,
                 failurePolicy: .skipUnavailableEffects,
                 livePreviewState: livePreviewState,
-                renderSessionID: renderSessionID
+                renderSessionID: renderSessionID,
+                usesPreviewProxies: true
             )
             try Task.checkCancellation()
             guard preparationGeneration == previewPreparationGeneration else {
@@ -864,6 +874,16 @@ final class CompositionRenderService {
                 (rendered.videoComposition?.instructions.first
                     as? MotionaryVideoCompositionInstruction)?.clips
                 ?? []
+            if let previewProxyStore {
+                let videoSegments = rendered.composition.tracks
+                    .filter { $0.mediaType == .video && $0.trackID != rendered.videoClockTrackID }
+                    .flatMap { $0.segments ?? [] }.filter { !$0.isEmpty }
+                previewSupportsExactScrubbing = videoSegments.allSatisfy {
+                    $0.sourceURL.map(previewProxyStore.contains) == true
+                }
+            } else {
+                previewSupportsExactScrubbing = false
+            }
             previewGraph = PreviewRenderGraph(
                 topology: topology,
                 rendered: rendered,
@@ -1048,7 +1068,8 @@ final class CompositionRenderService {
         qualityProfile: RenderQualityProfile,
         failurePolicy: RenderFailurePolicy,
         livePreviewState: LivePreviewRenderState? = nil,
-        renderSessionID: UUID = UUID()
+        renderSessionID: UUID = UUID(),
+        usesPreviewProxies: Bool = false
     ) async throws -> RenderedComposition {
         let composition = AVMutableComposition()
         var renderClips: [RenderClipDescriptor] = []
@@ -1074,6 +1095,7 @@ final class CompositionRenderService {
                     try await insertVisualItem(
                         source: TimelineVisualSource(mediaItem),
                         project: project,
+                        proxyStore: usesPreviewProxies ? previewProxyStore : nil,
                         frameRate: renderSettings.frameRate,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
@@ -1093,6 +1115,7 @@ final class CompositionRenderService {
                     try await insertVisualItem(
                         source: TimelineVisualSource(shapeItem),
                         project: project,
+                        proxyStore: usesPreviewProxies ? previewProxyStore : nil,
                         frameRate: renderSettings.frameRate,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
@@ -1469,6 +1492,7 @@ final class CompositionRenderService {
     private func insertVisualItem(
         source: TimelineVisualSource,
         project: EditorProject,
+        proxyStore: PreviewProxyStore? = nil,
         frameRate: Int32,
         composition: AVMutableComposition,
         visualTrackIDs: inout [UUID: CMPersistentTrackID],
@@ -1591,7 +1615,22 @@ final class CompositionRenderService {
             return
         }
         try Task.checkCancellation()
-        guard let sourceVideoTrack = metadata.videoTrack else {
+        var videoMetadata = metadata
+        var sourcePixelTransform = CGAffineTransform.identity
+        if source.mediaType == .video, let proxyStore {
+            do {
+                if let proxy = try await proxyStore.prepare(source: metadata) {
+                    videoMetadata = try await assetCache.metadata(for: proxy.url)
+                    sourcePixelTransform = proxy.sourcePixelTransform
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                AppLogger.rendering.warning("Preview proxy unavailable for \(source.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        try Task.checkCancellation()
+        guard let sourceVideoTrack = videoMetadata.videoTrack else {
             if sourceAvailabilityPolicy == .required {
                 throw CompositionRenderError.visualTrackUnavailable(source.name)
             }
@@ -1631,10 +1670,10 @@ final class CompositionRenderService {
             )
         }
 
-        let sourceTransform = VideoSourceGeometry.normalizedTransform(
+        let sourceTransform = sourcePixelTransform.concatenating(VideoSourceGeometry.normalizedTransform(
             naturalSize: metadata.naturalSize ?? .zero,
             transform: metadata.preferredTransform
-        )
+        ))
         sourceTransforms[source.id] = sourceTransform
         let visuals = source.visuals
         var backgroundMaskTrackID: CMPersistentTrackID?
@@ -1708,7 +1747,10 @@ final class CompositionRenderService {
                 blendIntensity: visuals.blendIntensity,
                 shape: source.shape,
                 text: nil,
-                renderOrder: renderOrder
+                renderOrder: renderOrder,
+                temporalSource: EffectTemporalSource(url: mediaAsset.url,
+                    sourceStart: source.sourceRange.start, sourceDuration: source.sourceRange.duration,
+                    speedMap: source.speedMap)
             )
         )
         renderOrder += 1
@@ -2008,7 +2050,12 @@ final class CompositionRenderService {
                             blendIntensity: visuals.blendIntensity,
                             shape: nil,
                             text: nil,
-                            renderOrder: renderOrder
+                            renderOrder: renderOrder,
+                            temporalSource: mediaItem.mediaType == .video
+                                ? project.mediaLibrary[mediaItem.mediaID].map {
+                                    EffectTemporalSource(url: $0.url, sourceStart: mediaItem.sourceRange.start,
+                                        sourceDuration: mediaItem.sourceRange.duration, speedMap: mediaItem.speedMap)
+                                } : nil
                         )
                     )
                     renderOrder += 1

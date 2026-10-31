@@ -105,6 +105,8 @@ final class PlaybackState: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var isPlaying = false
     @Published var isScrubbing = false
+    @Published var isStartingPlayback = false
+    @Published var playbackStartRequestRevision = 0
 }
 
 @MainActor

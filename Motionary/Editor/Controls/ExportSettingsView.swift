@@ -1,36 +1,53 @@
 // User-configurable export settings.
 
 import SwiftUI
+import UIKit
 
 struct ExportSettingsView: View {
     let project: EditorProject
     let onExport: (VideoExportSettings) -> Void
+    let onShare: ((VideoExportSettings) -> Void)?
+    let onSettingsChanged: (VideoExportSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var settings: VideoExportSettings
-    @State private var resolutionPreset: ExportResolutionPreset = .project
+    @State private var resolutionPreset: ExportResolutionPreset
     @State private var showAdvanced: Bool = false
 
-    init(project: EditorProject, onExport: @escaping (VideoExportSettings) -> Void) {
+    init(
+        project: EditorProject,
+        onSettingsChanged: @escaping (VideoExportSettings) -> Void = { _ in },
+        onShare: ((VideoExportSettings) -> Void)? = nil,
+        onExport: @escaping (VideoExportSettings) -> Void
+    ) {
         self.project = project
         self.onExport = onExport
-        var defaults = VideoExportSettings.recommended(for: project)
-        let storedDefaults = UserDefaults.standard
-        let quality = ExportQuality(
-            rawValue: storedDefaults.string(forKey: AppPreferences.exportQualityKey)
-                ?? AppPreferences.defaultExportQuality
-        ) ?? .balanced
-        defaults.videoBitrate = Int(Double(defaults.videoBitrate) * quality.bitrateMultiplier)
-        defaults.codec = ExportVideoCodec(
-            rawValue: storedDefaults.string(forKey: AppPreferences.exportCodecKey)
-                ?? AppPreferences.defaultExportCodec
-        ) ?? .h264
-        defaults.container = ExportContainer(
-            rawValue: storedDefaults.string(forKey: AppPreferences.exportContainerKey)
-                ?? AppPreferences.defaultExportContainer
-        ) ?? .mp4
-        _settings = State(initialValue: defaults.normalized)
+        self.onShare = onShare
+        self.onSettingsChanged = onSettingsChanged
+        var initialSettings = project.exportSettings ?? VideoExportSettings.recommended(for: project)
+        if project.exportSettings == nil {
+            let storedDefaults = UserDefaults.standard
+            let quality = ExportQuality(
+                rawValue: storedDefaults.string(forKey: AppPreferences.exportQualityKey)
+                    ?? AppPreferences.defaultExportQuality
+            ) ?? .balanced
+            initialSettings.videoBitrate = Int(
+                Double(initialSettings.videoBitrate) * quality.bitrateMultiplier
+            )
+            initialSettings.codec = ExportVideoCodec(
+                rawValue: storedDefaults.string(forKey: AppPreferences.exportCodecKey)
+                    ?? AppPreferences.defaultExportCodec
+            ) ?? .h264
+            initialSettings.container = ExportContainer(
+                rawValue: storedDefaults.string(forKey: AppPreferences.exportContainerKey)
+                    ?? AppPreferences.defaultExportContainer
+            ) ?? .mp4
+        }
+        _settings = State(initialValue: initialSettings.normalized)
+        _resolutionPreset = State(
+            initialValue: Self.resolutionPreset(for: initialSettings, project: project)
+        )
     }
 
     var body: some View {
@@ -50,13 +67,17 @@ struct ExportSettingsView: View {
                         }
                     }
                     VStack(alignment: .leading) {
-                        Text("Frame rate")
-                        Picker("FPS", selection: $settings.frameRate) {
-                            ForEach([24, 25, 30, 50, 60], id: \.self) { value in
+                        Picker("Frame rate", selection: $settings.frameRate) {
+                            ForEach(availableFrameRates, id: \.self) { value in
                                 Text("\(value) fps").tag(Int32(value))
                             }
                         }
-                        .pickerStyle(.segmented)
+                        .pickerStyle(.menu)
+                        if settings.frameRate > 60 {
+                            Text("Photos may play high-frame-rate videos in slow motion. Choose 1× playback in Photos, or export the original to Files.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     
                     //                    HStack {
@@ -118,7 +139,6 @@ struct ExportSettingsView: View {
             }
             .scrollContentBackground(.hidden)
             .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
-            .tint(MotionaryTheme.accent)
             .navigationTitle("Export")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -128,8 +148,15 @@ struct ExportSettingsView: View {
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        onExport(settings.normalized)
+                    Menu("Export") {
+                        Button("Save to Photos", systemImage: "photo") {
+                            onExport(settings.normalized)
+                        }
+                        if let onShare {
+                            Button("Save to Files or share", systemImage: "square.and.arrow.up") {
+                                onShare(settings.normalized)
+                            }
+                        }
                     }
                     .fontWeight(.semibold)
                     .disabled(settings.width < 2 || settings.height < 2)
@@ -138,10 +165,37 @@ struct ExportSettingsView: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .onChange(of: settings) { _, value in
+            onSettingsChanged(value.normalized)
+        }
     }
 
     private var videoBitrateMbps: Double {
         Double(settings.videoBitrate) / 1_000_000
+    }
+
+    private var availableFrameRates: [Int] {
+        let base = [24, 25, 30, 50, 60]
+        return UIScreen.main.maximumFramesPerSecond >= 120 || settings.frameRate == 120
+            ? base + [120]
+            : base
+    }
+
+    private static func resolutionPreset(
+        for settings: VideoExportSettings,
+        project: EditorProject
+    ) -> ExportResolutionPreset {
+        if settings.width == project.renderSettings.width,
+            settings.height == project.renderSettings.height
+        {
+            return .project
+        }
+        return switch max(settings.width, settings.height) {
+        case 1280: .hd
+        case 1920: .fullHD
+        case 3840: .uhd
+        default: .custom
+        }
     }
 
     private func dimensionBinding(_ keyPath: WritableKeyPath<VideoExportSettings, Int>) -> Binding<Int> {

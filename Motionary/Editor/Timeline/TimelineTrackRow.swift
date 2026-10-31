@@ -37,6 +37,11 @@ struct TimelineTrackRow: View {
     let onTrackDragBegan: () -> Void
     let onTrackDragChanged: (TimelineLongPressDragValue) -> Void
     let onTrackDragEnded: (Bool) -> Void
+    var workspaceContext: TimelineWorkspaceContext? = nil
+
+    private var isFocusedTrack: Bool {
+        workspaceContext == nil || track.items.contains { $0.id == selectedClipID }
+    }
 
     var body: some View {
         ZStack(alignment: .leading) {
@@ -51,6 +56,7 @@ struct TimelineTrackRow: View {
                 onTrackDragChanged: onTrackDragChanged,
                 onTrackDragEnded: onTrackDragEnded
             )
+            .opacity(isFocusedTrack ? 1 : 0.55)
             .zIndex(300)
 
             if let backgroundRange = visibleTrackBackgroundRange {
@@ -70,6 +76,7 @@ struct TimelineTrackRow: View {
                             - 5
                     )
                     .contentShape(Rectangle())
+                    .opacity(isFocusedTrack ? 1 : 0.35)
                     .onTapGesture(perform: onTapEmptySpace)
             }
 
@@ -106,8 +113,11 @@ struct TimelineTrackRow: View {
                         onPreviewTrimEnd(item.id, delta, baseline)
                     },
                     onFinishInteractiveEdit: onFinishInteractiveEdit,
-                    onSnapGuideChanged: onSnapGuideChanged
+                    onSnapGuideChanged: onSnapGuideChanged,
+                    workspaceContext: workspaceContext
                 )
+                .saturation(workspaceContext == nil || selectedClipID == item.id ? 1 : 0)
+                .opacity(workspaceContext == nil || selectedClipID == item.id ? 1 : 0.28)
                 .offset(x: centerPadding + CGFloat(item.timelineStart) * pixelsPerSecond)
             }
         }

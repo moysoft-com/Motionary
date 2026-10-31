@@ -156,13 +156,11 @@ struct VignetteEffectRenderer: EffectRenderModule {
     ) throws -> EffectRenderResult {
         let radius = scalar(.radius, in: effect, at: context.clipTime)
         let softness = scalar(.softness, in: effect, at: context.clipTime)
-        let output = CoreImageEffectSupport.filter("CIVignette", input: image) {
-            $0.setValue(1, forKey: kCIInputIntensityKey)
-            $0.setValue(
-                max(image.extent.width, image.extent.height)
-                    * (0.24 + radius * 0.62 + softness * 0.18),
-                forKey: kCIInputRadiusKey
-            )
+        let output = CoreImageEffectSupport.filter("CIVignetteEffect", input: image) {
+            $0.setValue(CIVector(x: image.extent.midX, y: image.extent.midY), forKey: kCIInputCenterKey)
+            $0.setValue(1.8, forKey: kCIInputIntensityKey)
+            $0.setValue(min(image.extent.width, image.extent.height) * (0.18 + radius * 0.32), forKey: kCIInputRadiusKey)
+            $0.setValue(1 - softness * 0.75, forKey: "inputFalloff")
         }
         return EffectRenderResult(image: output.cropped(to: image.extent))
     }

@@ -44,7 +44,7 @@ struct TimelineGestureTests {
     }
 
     @MainActor
-    @Test func diagonalPanPreservesBothScrollAxes() {
+    @Test func diagonalPanLocksToDominantVerticalAxis() {
         var events: [String] = []
         let coordinator = makeScrollCoordinator { events.append($0) }
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
@@ -53,12 +53,12 @@ struct TimelineGestureTests {
         scroll.contentOffset = CGPoint(x: 88, y: 120)
         coordinator.scrollViewDidScroll(scroll)
         coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
-        #expect(scroll.contentOffset == CGPoint(x: 88, y: 120))
-        #expect(events == ["start", "change:1.0", "end:1.0"])
+        #expect(scroll.contentOffset == CGPoint(x: 0, y: 120))
+        #expect(events.isEmpty)
     }
 
     @MainActor
-    @Test func verticalPanCanAddHorizontalScrubbingWithoutLiftingTheFinger() {
+    @Test func verticalPanStaysLockedWhenDirectionChanges() {
         var events: [String] = []
         let coordinator = makeScrollCoordinator { events.append($0) }
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
@@ -70,8 +70,27 @@ struct TimelineGestureTests {
         scroll.contentOffset = CGPoint(x: 88, y: 120)
         coordinator.scrollViewDidScroll(scroll)
         coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
-        #expect(scroll.contentOffset == CGPoint(x: 88, y: 120))
-        #expect(events == ["start", "change:1.0", "end:1.0"])
+        #expect(scroll.contentOffset == CGPoint(x: 0, y: 120))
+        #expect(events.isEmpty)
+    }
+
+    @MainActor
+    @Test func changingAxisDuringOverscrollPreservesBounce() {
+        let coordinator = makeScrollCoordinator { _ in }
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_000, height: 1_000)
+        scroll.contentOffset = CGPoint(x: 0, y: -40)
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: -40, y: 2))
+        scroll.contentOffset = CGPoint(x: 88, y: -40)
+        coordinator.scrollViewDidScroll(scroll)
+        #expect(scroll.contentOffset == CGPoint(x: 88, y: -40))
+        scroll.contentOffset = CGPoint(x: 90, y: -10)
+        coordinator.scrollViewDidScroll(scroll)
+        #expect(scroll.contentOffset == CGPoint(x: 90, y: -10))
+        scroll.contentOffset = CGPoint(x: 92, y: 0)
+        coordinator.scrollViewDidScroll(scroll)
+        #expect(scroll.contentOffset == CGPoint(x: 92, y: 0))
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
     }
 
     @MainActor
@@ -81,8 +100,9 @@ struct TimelineGestureTests {
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
         scroll.contentSize = CGSize(width: 1_000, height: 1_000)
         coordinator.beginScroll(in: scroll, translation: CGPoint(x: -40, y: 2))
-        scroll.contentOffset.x = 88
+        scroll.contentOffset = CGPoint(x: 88, y: 80)
         coordinator.scrollViewDidScroll(scroll)
+        #expect(scroll.contentOffset.y == 0)
         coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
         coordinator.stopInteractions(in: scroll)
         #expect(events == ["start", "change:1.0", "end:1.0"])
@@ -188,6 +208,62 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    @Test func playingTimelineAdvancesDuringVerticalDragAndDeceleration() {
+        let playback = PlaybackState()
+        playback.currentTime = 2
+        playback.isPlaying = true
+        var events: [String] = []
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: .constant(88), currentTime: 2, duration: 10,
+            contentRevision: 0, contentSize: CGSize(width: 1_180, height: 1_000),
+            isScrollDisabled: false, playbackState: playback,
+            onScrubStart: { events.append("start") },
+            onScrubChanged: { _ in events.append("change") },
+            onScrubEnd: { _ in events.append("end") },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        let scroll = PlaybackTrackingScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_180, height: 1_000)
+        scroll.contentOffset = CGPoint(x: 176, y: 40)
+        scroll.delegate = coordinator
+        coordinator.attach(to: scroll)
+        defer { coordinator.stopInteractions(in: scroll) }
+
+        scroll.offsetAnimationRequests = 0
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: -10, y: -40))
+        playback.currentTime = 3
+        coordinator.handlePlaybackFrame()
+        #expect(scroll.contentOffset == CGPoint(x: 176, y: 40))
+        #expect(coordinator.hostingController.view.transform.tx == -88)
+        // A subsequent UIKit pan update must not restore the original X anchor.
+        scroll.contentOffset = CGPoint(x: 180, y: 120)
+        coordinator.scrollViewDidScroll(scroll)
+        #expect(scroll.contentOffset == CGPoint(x: 180, y: 120))
+        #expect(coordinator.hostingController.view.transform.tx == -84)
+
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: true)
+        playback.currentTime = 4
+        coordinator.handlePlaybackFrame()
+        #expect(scroll.contentOffset == CGPoint(x: 180, y: 120))
+        #expect(coordinator.hostingController.view.transform.tx == -172)
+
+        // Playback must preserve the vertical rubber band as well.
+        scroll.contentOffset.y = -30
+        playback.currentTime = 5
+        coordinator.handlePlaybackFrame()
+        #expect(scroll.contentOffset == CGPoint(x: 180, y: -30))
+        #expect(coordinator.hostingController.view.transform.tx == -260)
+        #expect(scroll.offsetAnimationRequests == 0)
+        scroll.contentOffset.y = 0
+        coordinator.scrollViewDidEndDecelerating(scroll)
+        #expect(scroll.contentOffset == CGPoint(x: 440, y: 0))
+        #expect(coordinator.hostingController.view.transform == .identity)
+        #expect(events.isEmpty)
+        #expect(playback.isPlaying)
+        #expect(!coordinator.isUserInteracting)
+    }
+
+    @MainActor
     @Test func pausedPinchKeepsItsOriginalTimeAnchor() {
         let coordinator = makeScrollCoordinator { _ in }
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
@@ -198,6 +274,39 @@ struct TimelineGestureTests {
         #expect(abs(scroll.contentOffset.x - 352) < 0.01)
         coordinator.updatePinch(state: .cancelled, scale: 2, in: scroll)
         #expect(!coordinator.isUserInteracting)
+    }
+
+    @MainActor
+    @Test func playRequestDiscardsMomentumAndLateScrubEndCallbacks() {
+        let playback = PlaybackState()
+        var events: [String] = []
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: .constant(88), currentTime: 0, duration: 10, contentRevision: 0,
+            contentSize: CGSize(width: 1180, height: 200), isScrollDisabled: false, playbackState: playback,
+            onScrubStart: { events.append("start") },
+            onScrubChanged: { playback.currentTime = $0; events.append("change:\($0)") },
+            onScrubEnd: { events.append("end:\($0)") },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1180, height: 200)
+        coordinator.attach(to: scroll)
+        defer { coordinator.stopInteractions(in: scroll) }
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 30, y: 0))
+        scroll.contentOffset.x = 264
+        coordinator.scrollViewDidScroll(scroll)
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: true)
+        playback.playbackStartRequestRevision += 1
+        #expect(!coordinator.isUserInteracting)
+        #expect(playback.currentTime == 3)
+        #expect(events == ["start", "change:3.0"])
+        scroll.contentOffset.x = 88
+        coordinator.scrollViewDidScroll(scroll)
+        coordinator.scrollViewDidEndDecelerating(scroll)
+        #expect(events == ["start", "change:3.0"])
+        playback.isPlaying = true
+        coordinator.handlePlaybackFrame()
+        #expect(scroll.contentOffset.x == 264)
     }
 
     @MainActor
@@ -213,5 +322,15 @@ struct TimelineGestureTests {
             onScrubEnd: { record("end:\($0)") },
             onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
         ) { Color.clear }.makeCoordinator()
+    }
+}
+
+// Track calls that cancel UIKit's existing deceleration / bounce animation.
+private final class PlaybackTrackingScrollView: UIScrollView {
+    var offsetAnimationRequests = 0
+
+    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+        offsetAnimationRequests += 1
+        super.setContentOffset(contentOffset, animated: animated)
     }
 }

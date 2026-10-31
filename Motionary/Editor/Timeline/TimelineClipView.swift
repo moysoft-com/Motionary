@@ -31,6 +31,7 @@ struct TimelineItemBlock: View {
     let onPreviewTrimEnd: (Double, TimelineItem?) -> TimelineTrimResult?
     let onFinishInteractiveEdit: () -> Void
     let onSnapGuideChanged: (Double?) -> Void
+    var workspaceContext: TimelineWorkspaceContext? = nil
 
     @State private var trimBaseline: TimelineItem?
     @State private var trimPreview: TimelineTrimPreview?
@@ -115,16 +116,27 @@ struct TimelineItemBlock: View {
                     .zIndex(2)
                 }
 
-                TimelineKeyframeMarkers(
-                    times: displayedKeyframeTimes(for: previewItem),
-                    duration: displayDuration,
-                    width: displayWidth,
-                    height: height,
-                    itemTimelineStart: previewItem.timelineStart,
-                    visibleTimelineRange: visibleTimelineRange
-                )
-                .allowsHitTesting(false)
-                .zIndex(2)
+                if let context = workspaceContext {
+                    TimelineContextKeyframes(
+                        item: previewItem, currentTime: currentTime,
+                        tolerance: keyframeTolerance, width: displayWidth,
+                        activeSection: context.activeSection, activeEffectID: context.activeEffectID,
+                        graphSegment: context.graphSegment, height: height
+                    )
+                    .allowsHitTesting(false)
+                    .zIndex(2)
+                } else {
+                    TimelineKeyframeMarkers(
+                        times: displayedKeyframeTimes(for: previewItem),
+                        duration: displayDuration,
+                        width: displayWidth,
+                        height: height,
+                        itemTimelineStart: previewItem.timelineStart,
+                        visibleTimelineRange: visibleTimelineRange
+                    )
+                    .allowsHitTesting(false)
+                    .zIndex(2)
+                }
             }
 
             if allowsClipInteraction {

@@ -6,10 +6,44 @@ import Testing
 @testable import Motionary
 
 struct EffectDomainTests {
-    @Test func builtInRegistryContainsTwentyTwoValidModules() throws {
+    @Test func angleParametersPreserveMultipleTurnsAndRejectNonfiniteValues() throws {
+        let registry = EffectRegistry.shared
+        for module in registry.modules {
+            for parameter in module.parameters where parameter.unit == .degrees {
+                var effect = try #require(registry.makeEffect(moduleID: module.id))
+                for degrees in [-1080.0, -181, 181, 1080, 9999] {
+                    effect.parameters[parameter.id.rawValue] = EffectParameterState(baseValue: .scalar(degrees))
+                    #expect(registry.resolvedValue(for: parameter.id, in: effect, at: 0) == .scalar(degrees))
+                }
+                for degrees in [Double.nan, .infinity, -.infinity] {
+                    #expect(!parameter.accepts(.scalar(degrees)))
+                }
+            }
+        }
+        let amount = try #require(registry.descriptor(for: .waveWarp)?.descriptor(for: .amount))
+        #expect(!amount.accepts(.scalar(2)))
+    }
+
+    @Test func cyclicAnglesWrapOnlyAfterKeyframeInterpolation() throws {
+        let renderer = OpticalBlurEffectRenderer(moduleID: .directionalBlur)
+        var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .directionalBlur))
+        effect.parameters[EffectParameterID.angle.rawValue] = EffectParameterState(
+            baseValue: .scalar(0), keyframes: [
+                Keyframe(time: 0, value: .scalar(0)),
+                Keyframe(time: 2, value: .scalar(720)),
+            ]
+        )
+        #expect(EffectRegistry.shared.resolvedValue(for: .angle, in: effect, at: 1) == .scalar(360))
+        #expect(renderer.cyclicDegrees(.angle, in: effect, at: 1) == 0)
+        #expect(renderer.cyclicDegrees(.angle, in: effect, at: 0.5) == 180)
+        effect.parameters[EffectParameterID.angle.rawValue] = EffectParameterState(baseValue: .scalar(-1085))
+        #expect(renderer.cyclicDegrees(.angle, in: effect, at: 0) == -5)
+    }
+
+    @Test func builtInRegistryContainsThirtyTwoValidModules() throws {
         let registry = EffectRegistry.shared
 
-        #expect(registry.modules.count == 22)
+        #expect(registry.modules.count == 32)
         #expect(Set(registry.modules.map(\.id)).count == registry.modules.count)
         for module in registry.modules {
             #expect(module.currentVersion == 1)
@@ -18,6 +52,9 @@ struct EffectDomainTests {
             #expect(module.makeRenderer().moduleID == module.id)
             let effect = try #require(registry.makeEffect(moduleID: module.id))
             #expect(effect.parameters.count == module.parameters.count)
+            let encoded = try JSONEncoder().encode(effect)
+            let restored = try JSONDecoder().decode(EffectInstance.self, from: encoded)
+            #expect(restored == effect)
             #expect(registry.availability(of: effect) == .available)
             var newerEffect = effect
             newerEffect.moduleVersion += 1

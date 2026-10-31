@@ -14,11 +14,17 @@ struct HomeView: View {
     @AppStorage(AppPreferences.newProjectFrameRateKey)
     private var newProjectFrameRate = AppPreferences.defaultFrameRate
     @StateObject private var projectStore: ProjectStore
+    @Binding private var searchText: String
+    @Binding private var isSearchPresented: Bool
+    @FocusState private var isSearchFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showsSearchHeader = false
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedProject: ProjectEditorSelection?
     @State private var editingProjectID: UUID?
     @State private var newProjectMediaItems: [PhotosPickerItem] = []
     private let newProjectRequest: UUID?
+    private let onEditorPresentationChange: (Bool) -> Void
     @State private var isMediaPickerPresented = false
     @State private var isCreatingProject = false
     @State private var errorMessage: String?
@@ -27,9 +33,18 @@ struct HomeView: View {
         GridItem(.adaptive(minimum: 156), spacing: 12)
     ]
 
-    init(projectStore: ProjectStore = ProjectStore(), newProjectRequest: UUID? = nil) {
+    init(
+        projectStore: ProjectStore = ProjectStore(),
+        newProjectRequest: UUID? = nil,
+        searchText: Binding<String> = .constant(""),
+        isSearchPresented: Binding<Bool> = .constant(false),
+        onEditorPresentationChange: @escaping (Bool) -> Void = { _ in }
+    ) {
         self.newProjectRequest = newProjectRequest
+        self.onEditorPresentationChange = onEditorPresentationChange
         _projectStore = StateObject(wrappedValue: projectStore)
+        _searchText = searchText
+        _isSearchPresented = isSearchPresented
     }
 
     var body: some View {
@@ -39,32 +54,39 @@ struct HomeView: View {
                     VStack(alignment: .leading, spacing: 18) {
                         if projectStore.projects.isEmpty {
                             emptyState
+                        } else if filteredProjects.isEmpty {
+                            noSearchResults
                         } else {
                             LazyVGrid(columns: columns, spacing: 12) {
                                 ForEach($projectStore.projects) { $project in
-                                    ProjectCard(
-                                        project: $project,
-                                        isRenaming: editingProjectID == project.id,
-                                        onOpen: {
-                                            selectedProject = ProjectEditorSelection(
-                                                project: project,
-                                                initialContent: projectStore.bestAvailableContent(for: project)
-                                            )
-                                        },
-                                        onRename: {
-                                            editingProjectID = project.id
-                                        },
-                                        onRenameCommit: {
-                                            editingProjectID = nil
-                                            projectStore.finalizeRename(projectID: project.id)
-                                        },
-                                        onDelete: {
-                                            projectStore.deleteProject(with: project.id)
-                                        },
-                                        projectStore: projectStore
-                                    )
-                                    .onAppear {
-                                        projectStore.warmContent(for: project)
+                                    if matchesSearch(project.title) {
+                                        ProjectCard(
+                                            project: $project,
+                                            isRenaming: editingProjectID == project.id,
+                                            onOpen: {
+                                                dismissProjectSearch()
+                                                selectedProject = ProjectEditorSelection(
+                                                    project: project,
+                                                    initialContent: projectStore.bestAvailableContent(for: project)
+                                                )
+                                            },
+                                            onRename: {
+                                                dismissProjectSearch()
+                                                editingProjectID = project.id
+                                            },
+                                            onRenameCommit: {
+                                                editingProjectID = nil
+                                                projectStore.finalizeRename(projectID: project.id)
+                                            },
+                                            onDelete: {
+                                                projectStore.deleteProject(with: project.id)
+                                            },
+                                            projectStore: projectStore
+                                        )
+                                        .accessibilityIdentifier("home-project-card-\(project.id)")
+                                        .onAppear {
+                                            projectStore.warmContent(for: project)
+                                        }
                                     }
                                 }
                             }
@@ -75,7 +97,7 @@ struct HomeView: View {
             }
             .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
             .motionaryTopBar {
-                dashboardHeader
+                animatedDashboardHeader
                     .padding(18)
             }
             .overlay {
@@ -125,6 +147,18 @@ struct HomeView: View {
                 .zIndex(100)
             }
         }
+        .onChange(of: selectedProject?.id, initial: true) { _, projectID in
+            onEditorPresentationChange(projectID != nil)
+        }
+        .onChange(of: isSearchPresented, initial: true) { _, presented in
+            if presented {
+                selectedProject = nil
+                editingProjectID = nil
+            } else {
+                isSearchFocused = false
+            }
+            showsSearchHeader = presented
+        }
         .photosPicker(
             isPresented: $isMediaPickerPresented,
             selection: $newProjectMediaItems,
@@ -132,11 +166,66 @@ struct HomeView: View {
         )
         .onChange(of: newProjectRequest, initial: true) { _, request in
             guard request != nil, !isCreatingProject else { return }
+            dismissProjectSearch()
             selectedProject = nil
             editingProjectID = nil
             isMediaPickerPresented = true
         }
         .animation(.easeInOut(duration: 0.18), value: selectedProject?.id)
+    }
+
+    private var animatedDashboardHeader: some View {
+        // Measure only the normal header. Overlay contents never change the
+        // safe-area height, even while both transition layers are present.
+        dashboardHeader
+            .hidden()
+            .accessibilityHidden(true)
+            .overlay {
+                ZStack {
+                    if showsSearchHeader {
+                        projectSearchHeader
+                            .transition(reduceMotion ? .opacity : .offset(y: 8).combined(with: .opacity))
+                    } else {
+                        dashboardHeader
+                            .transition(reduceMotion ? .opacity : .offset(y: -8).combined(with: .opacity))
+                    }
+                }
+            }
+            .animation(.easeInOut(duration: reduceMotion ? 0.12 : 0.24), value: showsSearchHeader)
+    }
+
+    private var projectSearchHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(MotionaryDesign.Typography.compactIcon)
+                .foregroundStyle(MotionaryTheme.textSecondary)
+            TextField("Search projects", text: $searchText)
+                .accessibilityIdentifier("home-project-search-field")
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.callout)
+                .tint(MotionaryTheme.accent)
+                .submitLabel(.search)
+                .focused($isSearchFocused)
+                .task {
+                    guard isSearchPresented else { return }
+                    isSearchFocused = true
+                }
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "delete.backward")
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                        .frame(width: 32, height: 44)
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .frame(height: 48)
+        .foregroundStyle(MotionaryTheme.textPrimary)
+        .background(MotionaryDesign.Surface.control(), in: Capsule())
+        .motionaryGlass(cornerRadius: 24)
     }
 
     private var dashboardHeader: some View {
@@ -164,6 +253,36 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    private var filteredProjects: [Project] {
+        projectStore.projects.filter { matchesSearch($0.title) }
+    }
+
+    private func dismissProjectSearch() {
+        isSearchFocused = false
+        isSearchPresented = false
+        searchText = ""
+    }
+
+    private func matchesSearch(_ title: String) -> Bool {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty || title.localizedCaseInsensitiveContains(query)
+    }
+
+    private var noSearchResults: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 32, weight: .light))
+                .foregroundStyle(MotionaryTheme.accent)
+            Text("No projects found")
+                .font(.headline)
+                .foregroundStyle(MotionaryTheme.textPrimary)
+            Text("Try a different name.")
+                .font(.subheadline)
+                .foregroundStyle(MotionaryTheme.textSecondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 260)
     }
 
     private var emptyState: some View {

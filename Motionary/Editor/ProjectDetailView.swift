@@ -46,13 +46,14 @@ struct ProjectDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .navigation) {
                 Button {
                     onClose()
                 } label: {
                     Image(systemName: "chevron.left")
                         .contentShape(Rectangle())
                 }
+                .tint(.primary)
                 .accessibilityLabel("Back to projects")
                 .accessibilityIdentifier("motionary-editor-back")
             }

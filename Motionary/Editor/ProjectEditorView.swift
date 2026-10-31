@@ -9,7 +9,7 @@ private struct ExportRecoveryShare: Identifiable {
     var id: URL { url }
 }
 
-enum CoreEditorPanel: Equatable {
+enum CoreEditorPanel: Hashable {
     case timeline
     case text
     case textType
@@ -39,6 +39,7 @@ struct ProjectEditorView: View {
 
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedMediaItems: [PhotosPickerItem] = []
     @State private var selectedReplacementItem: PhotosPickerItem?
     @State private var selectedAudioVideoItem: PhotosPickerItem?
@@ -83,6 +84,7 @@ struct ProjectEditorView: View {
         .navigationTitle(viewModel.project.title)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
+        .tint(MotionaryTheme.accent)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
@@ -91,6 +93,7 @@ struct ProjectEditorView: View {
                 } label: {
                     Label("Export", systemImage: "square.and.arrow.down")
                 }
+                .tint(.primary)
                 .disabled(!viewModel.canExportVideo || viewModel.isPerformingLongTask)
                 .accessibilityLabel("Export")
                 .accessibilityIdentifier("motionary-editor-export")
@@ -283,14 +286,30 @@ struct ProjectEditorView: View {
             selection: $selectedAudioVideoItem,
             matching: .videos
         )
+        .onChange(of: viewModel.exportedVideoURL) { _, url in
+            if let url {
+                exportRecoveryShare = ExportRecoveryShare(url: url)
+                viewModel.exportedVideoURL = nil
+            }
+        }
         .sheet(item: $exportRecoveryShare) { export in
             ActivityView(activityItems: [export.url])
         }
         .sheet(isPresented: $isExportSettingsPresented) {
-            ExportSettingsView(project: viewModel.project) { settings in
-                isExportSettingsPresented = false
-                viewModel.exportProject(settings: settings)
-            }
+            ExportSettingsView(
+                project: viewModel.project,
+                onSettingsChanged: { settings in
+                    viewModel.saveExportSettings(settings)
+                },
+                onShare: { settings in
+                    isExportSettingsPresented = false
+                    viewModel.exportProject(settings: settings, saveToPhotos: false)
+                },
+                onExport: { settings in
+                    isExportSettingsPresented = false
+                    viewModel.exportProject(settings: settings)
+                }
+            )
         }
     }
 
@@ -310,31 +329,46 @@ struct ProjectEditorView: View {
             previewRatio = 0.31
         }
         let previewHeight = availableHeight * previewRatio
+        let supportsSideWorkspace = geometry.size.width >= 900
+            // Keep the inspector mounted while typing; moving it between
+            // layout branches would discard the focused text field.
+            && (availableHeight >= 500 || isTextKeyboardVisible)
+            && !dynamicTypeSize.isAccessibilitySize
+        let usesSideWorkspace = supportsSideWorkspace && activePanel != .timeline
+        let inspectorWidth = min(max((geometry.size.width - 32) * 0.36, 340), 440)
+        let wideTimelineHeight = min(max(availableHeight * 0.34, 180), 300)
         return ZStack {
             MotionaryTheme.background(for: colorScheme).ignoresSafeArea()
 
             VStack(spacing: 10) {
-                if !isTextKeyboardVisible {
-                    CorePreviewSection(
-                        viewModel: viewModel,
-                        selectedMediaItems: $selectedMediaItems
-                    )
-                    .frame(height: previewHeight)
+                EditorPreviewWorkspaceLayout(
+                    usesSideWorkspace: usesSideWorkspace,
+                    hidesPreview: !usesSideWorkspace && isTextKeyboardVisible,
+                    previewHeight: previewHeight,
+                    inspectorWidth: inspectorWidth,
+                    controlHeight: supportsSideWorkspace ? controlHeight + 10 + wideTimelineHeight : controlHeight,
+                    keepsTimelineVisible: supportsSideWorkspace,
+                    animatesWorkspaceChanges: supportsSideWorkspace,
+                    workspaceID: activePanel,
+                    preview: { editorPreview },
+                    controls: {
+                        VStack(spacing: 10) {
+                            playbackControls.frame(height: controlHeight)
+                            if supportsSideWorkspace {
+                                CoreTimelineView(
+                                    viewModel: viewModel,
+                                    pixelsPerSecond: $pixelsPerSecond,
+                                    workspaceContext: usesSideWorkspace ? workspaceTimelineContext : nil
+                                )
+                                .frame(height: wideTimelineHeight)
+                            }
+                        }
+                    },
+                    workspace: { workspace }
+                )
+                .frame(maxHeight: .infinity)
 
-                    EditorPlaybackControlBar(
-                        viewModel: viewModel,
-                        activePanel: $activePanel,
-                        graphReturnPanel: $graphReturnPanel,
-                        activeEffectWorkspaceID: $activeEffectWorkspaceID,
-                        activeTextMotionPhase: $activeTextMotionPhase
-                    )
-                    .frame(height: controlHeight)
-                }
-
-                workspace
-                    .frame(maxWidth: .infinity)
-
-                if showsMiniTimeline {
+                if showsMiniTimeline && !supportsSideWorkspace {
                     SelectedLayerMiniTimeline(
                         viewModel: viewModel,
                         contextClipID: $propertyContextClipID,
@@ -407,6 +441,20 @@ struct ProjectEditorView: View {
                 }
             }
         }
+    }
+
+    private var editorPreview: some View {
+        CorePreviewSection(viewModel: viewModel, selectedMediaItems: $selectedMediaItems)
+    }
+
+    private var playbackControls: some View {
+        EditorPlaybackControlBar(
+            viewModel: viewModel,
+            activePanel: $activePanel,
+            graphReturnPanel: $graphReturnPanel,
+            activeEffectWorkspaceID: $activeEffectWorkspaceID,
+            activeTextMotionPhase: $activeTextMotionPhase
+        )
     }
 
     private func cancelPopoverPosition(for location: CGPoint, in size: CGSize) -> CGPoint {
@@ -536,6 +584,17 @@ struct ProjectEditorView: View {
     private var propertyContextTimelineItem: TimelineItem? {
         guard let propertyContextClipID else { return nil }
         return viewModel.project.item(id: propertyContextClipID)
+    }
+
+    private var workspaceTimelineContext: TimelineWorkspaceContext? {
+        guard let item = propertyContextTimelineItem else { return nil }
+        return TimelineWorkspaceContext(
+            itemID: item.id,
+            activeSection: activePanel == .graph ? graphReturnPanel.keyframeSection : activeTimelineKeyframeSection,
+            activeEffectID: activePanel == .graph && graphReturnPanel == .effects
+                ? viewModel.graphSegment?.effectID : activeEffectWorkspaceID,
+            graphSegment: activePanel == .graph ? viewModel.graphSegment : nil
+        )
     }
 
     private var activeTimelineKeyframeSection: KeyframeSection? {

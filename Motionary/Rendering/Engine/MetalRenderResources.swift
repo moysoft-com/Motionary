@@ -241,6 +241,7 @@ final class MetalRenderResources: @unchecked Sendable {
             "motionaryYUVToRGBA",
             "motionaryShapeKernel",
             "motionaryEffectKernel",
+            "motionaryDisplacementMapKernel",
             "motionaryHighlightKernel",
             "motionarySeparableBlurKernel",
             "motionaryGlowCompositeKernel",
