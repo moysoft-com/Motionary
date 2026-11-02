@@ -689,7 +689,7 @@ extension EffectRegistry {
                 ),
             ]
         ),
-    ] + extendedModules
+    ] + extendedModules + creativeModules + motionModules
 
     private static func module(
         _ id: EffectModuleID,
@@ -719,6 +719,79 @@ extension EffectRegistry {
             renderConfiguration: renderConfiguration
         )
     }
+
+    private static func option(
+        _ id: EffectParameterID, _ title: String, _ values: [String], defaultValue: String
+    ) -> EffectParameterDescriptor {
+        EffectParameterDescriptor(id: id, title: title, systemImage: "slider.horizontal.3",
+            valueType: .option, defaultValue: .option(defaultValue),
+            optionValues: values, isAnimatable: false)
+    }
+
+    private static func edges(autoCrop: Bool = false) -> EffectParameterDescriptor {
+        option("edges", "Edges",
+            ["Unfold", "Repeat Tiles", "Transparent", "Clamp"] + (autoCrop ? ["Auto Crop"] : []),
+            defaultValue: "Unfold")
+    }
+
+    private static let motionModules: [EffectModuleDescriptor] = [
+        module(.shake, "Shake", .essentials, "waveform.path",
+            "Fast camera impacts with adjustable axes, rotation and decay.", mix: 1, previewMix: 1,
+            renderer: { CameraMotionEffectRenderer(moduleID: .shake) }, parameters: [
+                scalar(.amount, "Strength", "waveform", 0.025, 0.025, range: 0...0.3),
+                scalar(.frequency, "Frequency (Hz)", "waveform.path", 16, 16, range: 0...40, step: 0.1, unit: .unitless),
+                scalar("horizontal", "Horizontal", "arrow.left.and.right", 1, 1),
+                scalar("vertical", "Vertical", "arrow.up.and.down", 1, 1),
+                scalar(.angle, "Rotation", "angle", 1.2, 1.2, range: 0...30, step: 0.1, unit: .degrees),
+                scalar(.decay, "Decay", "line.diagonal", 0, 0, range: 0...10, unit: .unitless),
+                scalar("scale", "Zoom", "plus.magnifyingglass", 1.05, 1.05, range: 1...2, unit: .unitless),
+                scalar("seed", "Variation", "dice", 0, 0, range: 0...999, step: 1, fractionDigits: 0, unit: .unitless),
+                edges(autoCrop: true)
+            ]),
+        module(.cameraWiggle, "Camera Wiggle", .essentials, "camera",
+            "Smooth, organic handheld drift with independent position and rotation.", mix: 1, previewMix: 1,
+            renderer: { CameraMotionEffectRenderer(moduleID: .cameraWiggle) }, parameters: [
+                scalar(.amount, "Strength", "waveform", 0.012, 0.012, range: 0...0.2),
+                scalar(.frequency, "Frequency (Hz)", "waveform.path", 0.7, 0.7, range: 0...8, step: 0.1, unit: .unitless),
+                scalar("horizontal", "Horizontal", "arrow.left.and.right", 1, 1),
+                scalar("vertical", "Vertical", "arrow.up.and.down", 1, 1),
+                scalar(.angle, "Rotation", "angle", 0.6, 0.6, range: 0...15, step: 0.1, unit: .degrees),
+                scalar("scale", "Zoom", "plus.magnifyingglass", 1.04, 1.04, range: 1...2, unit: .unitless),
+                scalar("seed", "Variation", "dice", 0, 0, range: 0...999, step: 1, fractionDigits: 0, unit: .unitless),
+                edges(autoCrop: true)
+            ]),
+        module(.zoom, "Zoom", .essentials, "plus.magnifyingglass",
+            "Animated zoom in, zoom out or pulse, with mirrored tiles and framing offsets.", mix: 1, previewMix: 1,
+            renderer: { CameraMotionEffectRenderer(moduleID: .zoom) }, parameters: [
+                option("mode", "Direction", ["In", "Out", "Pulse", "Static"], defaultValue: "In"),
+                scalar("startScale", "Minimum Zoom", "minus.magnifyingglass", 1, 1.3, range: 0.1...5, unit: .unitless),
+                scalar("endScale", "Maximum Zoom", "plus.magnifyingglass", 1.3, 1.3, range: 0.1...5, unit: .unitless),
+                scalar("duration", "Duration (s)", "clock", 1, 1, range: 0.05...30, unit: .unitless),
+                option("easing", "Easing", ["Smooth", "Linear", "Ease In", "Ease Out"], defaultValue: "Smooth"),
+                centerParameter(),
+                scalar("offsetX", "Offset X", "arrow.left.and.right", 0, 0, range: -1...1),
+                scalar("offsetY", "Offset Y", "arrow.up.and.down", 0, 0, range: -1...1),
+                edges()
+            ]),
+        module(.mirror, "Mirror", .distortion, "arrow.left.and.right.righttriangle.left.righttriangle.right",
+            "Reflect one side across a movable vertical, horizontal or angled axis.", mix: 1, previewMix: 1,
+            renderer: { CameraMotionEffectRenderer(moduleID: .mirror) }, parameters: [
+                option("axis", "Axis", ["Vertical", "Horizontal", "Custom"], defaultValue: "Vertical"),
+                option("side", "Keep Side", ["Left / Top", "Right / Bottom"], defaultValue: "Left / Top"),
+                scalar(.angle, "Axis Angle", "angle", 0, 0, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
+                centerParameter(), edges()
+            ]),
+        module(.motionBlur, "Motion Blur", .lens, "camera.shutter.button",
+            "Blur the object’s animated position, rotation and scale over the shutter interval.",
+            mix: 1, previewMix: 1, renderer: { MotionBlurEffectRenderer() },
+            renderConfiguration: .init(usesTemporalFrames: true), parameters: [
+                option("motion", "Include Motion", ["All", "Position", "Rotation", "Scale", "Position + Rotation", "Position + Scale", "Rotation + Scale", "None"], defaultValue: "All"),
+                scalar("shutter", "Shutter Angle", "camera.shutter.button", 180, 270,
+                    range: 0...720, step: 1, fractionDigits: 0, unit: .unitless),
+                scalar(.samples, "Samples", "square.3.layers.3d", 12, 12,
+                    range: 2...32, step: 1, fractionDigits: 0, unit: .unitless)
+            ])
+    ]
 
     private static func scalar(
         _ id: EffectParameterID,
@@ -821,5 +894,76 @@ extension EffectRegistry {
                 scalar(.decay, "Decay", "line.diagonal", 0.65, 0.65, range: 0...0.95),
                 scalar(.drift, "Drift", "arrow.right", 0.025, 0.025, range: -0.15...0.15),
             ]),
+    ]
+}
+
+
+extension EffectRegistry {
+    private static let creativeModules: [EffectModuleDescriptor] = [
+        module(
+            .lightSweep, "Light Sweep", .lens, "sparkles", "An animated light reflection across the layer.", mix: 1,
+            previewMix: 1,
+            renderer: { CreativeEffectRenderer(moduleID: .lightSweep, kind: .lightSweep) },
+            parameters: [
+                scalar("position", "Position", "arrow.left.and.right", 0.5, 0.5, range: -1...2),
+                scalar(.angle, "Angle", "angle", 25, 25, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
+                scalar("width", "Width", "arrow.left.and.right", 0.18, 0.18, range: 0.01...1),
+                scalar(.amount, "Brightness", "sun.max", 0.8, 0.8, range: 0...2),
+                scalar(.speed, "Speed", "speedometer", 0.25, 0.25, range: -2...2),
+                colorParameter("tintColor", "Light Color", .white)
+            ]),
+        module(
+            .ribbedGlass, "Ribbed Glass", .distortion, "line.3.vertical", "Refraction through parallel glass ridges.",
+            mix: 1, previewMix: 1,
+            renderer: { CreativeEffectRenderer(moduleID: .ribbedGlass, kind: .ribbedGlass) },
+            renderConfiguration: .init(edgeMode: .unfold),
+            parameters: [
+                scalar(.wavelength, "Ridge Width", "arrow.left.and.right", 0.06, 0.06, range: 0.005...0.3),
+                scalar(.amount, "Refraction", "water.waves", 0.6, 0.6),
+                scalar(.angle, "Angle", "angle", 0, 0, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
+                scalar(.offset, "Offset", "arrow.left.and.right", 0, 0)
+            ]),
+        module(
+            .dither, "Dither", .colorGrade, "square.grid.3x3", "Ordered retro dithering between two editable colors.",
+            mix: 1, previewMix: 1,
+            renderer: { CreativeEffectRenderer(moduleID: .dither, kind: .dither) },
+            parameters: [
+                scalar(.amount, "Pixel Size", "square.grid.3x3", 0.006, 0.006, range: 0.001...0.08),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 1, 1, range: 0.25...3),
+                colorParameter(.shadowColor, "Shadows", RGBAColor(red: 0.06, green: 0.18, blue: 0.1)),
+                colorParameter(.highlightColor, "Highlights", RGBAColor(red: 0.75, green: 0.9, blue: 0.5))
+            ]),
+        module(
+            .halftone, "Halftone", .colorGrade, "circle.grid.3x3", "Luminance-sized ink dots on colored paper.", mix: 1,
+            previewMix: 1,
+            renderer: { CreativeEffectRenderer(moduleID: .halftone, kind: .halftone) },
+            parameters: [
+                scalar(.amount, "Dot Spacing", "circle.grid.3x3", 0.018, 0.018, range: 0.003...0.15),
+                scalar(.angle, "Angle", "angle", 45, 45, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 1, 1, range: 0.25...3),
+                colorParameter(.shadowColor, "Ink", .black),
+                colorParameter(.highlightColor, "Paper", RGBAColor(red: 1, green: 0.94, blue: 0.8))
+            ]),
+        module(
+            .colorSplash, "Color Splash", .colorGrade, "drop.halffull",
+            "Keep a selected hue while desaturating the rest.", mix: 1, previewMix: 1,
+            renderer: { CreativeEffectRenderer(moduleID: .colorSplash, kind: .colorSplash) },
+            parameters: [
+                colorParameter("targetColor", "Keep Color", RGBAColor(red: 1, green: 0, blue: 0)),
+                scalar("tolerance", "Hue Range", "scope", 0.09, 0.09, range: 0.005...0.5),
+                scalar(.softness, "Softness", "circle.dashed", 0.04, 0.04, range: 0.001...0.25),
+                scalar(.saturation, "Background Color", "drop", 0, 0)
+            ]),
+        module(
+            .neonEdges, "Neon Edges", .lens, "bolt", "Glowing colored contours over a darkened image.", mix: 1,
+            previewMix: 1,
+            renderer: { CreativeEffectRenderer(moduleID: .neonEdges, kind: .neonEdges) },
+            parameters: [
+                scalar("width", "Line Width", "pencil.tip", 0.002, 0.002, range: 0.0005...0.015),
+                scalar(.threshold, "Threshold", "slider.horizontal.3", 0.12, 0.12, range: 0...1),
+                scalar(.amount, "Glow", "sparkles", 0.7, 0.7),
+                scalar("background", "Original Image", "photo", 0.05, 0.05),
+                colorParameter("tintColor", "Neon Color", RGBAColor(red: 0.1, green: 0.8, blue: 1))
+            ])
     ]
 }

@@ -161,6 +161,14 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
 
             autoreleasepool {
                 do {
+                    if instruction.qualityProfile != .export,
+                        let cached = instruction.livePreviewState?.cachedFrame(
+                            at: CMTimeGetSeconds(request.compositionTime), sessionID: instruction.renderSessionID),
+                        CVPixelBufferGetWidth(cached) == Int(instruction.renderSize.width),
+                        CVPixelBufferGetHeight(cached) == Int(instruction.renderSize.height) {
+                        request.finish(withComposedVideoFrame: cached)
+                        return
+                    }
                     let renderer = try self.rendererResult.get()
                     guard let destination = request.renderContext.newPixelBuffer() else {
                         throw MetalRenderingError.invalidRenderTarget
@@ -247,8 +255,13 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                     [weak self, weak cachedInstruction = instruction] time, sessionID, completion in
                                     guard let self, let instruction = cachedInstruction,
                                         instruction.renderSessionID == sessionID,
+                                        time.isFinite, time >= 0,
                                         abs(time - CMTimeGetSeconds(frameTime)) < 0.000_01
+                                            || instruction.activeClips(at: time).allSatisfy({
+                                                $0.trackID == kCMPersistentTrackID_Invalid
+                                            })
                                     else { return false }
+                                    let targetTime = CMTime(seconds: time, preferredTimescale: 600)
                                     let cachedGeneration = self.currentGeneration()
                                     let liveFinisher = RequestFinisher()
                                     liveFinisher.setTimeoutAction { completion(nil) }
@@ -260,9 +273,10 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                             self.isCurrent(cachedGeneration),
                                             let destination = renderContext.newPixelBuffer()
                                         else { liveFinisher.finish { completion(nil) }; return }
+                                        let livePlan = RenderPlanCompiler.compile(instruction)
                                         renderer.renderAsync(
-                                            plan: RenderPlanCompiler.compile(instruction),
-                                            compositionTime: frameTime,
+                                            plan: livePlan,
+                                            compositionTime: targetTime,
                                             sourceFrame: { cachedSources[$0] },
                                             destination: destination,
                                             isCancelled: {
@@ -270,14 +284,20 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                             }
                                         ) { result in
                                             liveFinisher.finish {
-                                                if case .success = result { completion(destination) }
+                                                if case .success = result {
+                                                    instruction.livePreviewState?.cacheFrame(destination, at: time,
+                                                        sessionID: sessionID,
+                                                        revision: livePlan.livePreviewSnapshot?.revision ?? 0)
+                                                    completion(destination)
+                                                }
                                                 else { completion(nil) }
                                             }
                                         }
                                     }
                                     return true
                                 }
-                                self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime, frame: destination)
+                                self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime,
+                                    frame: destination, revision: plan.livePreviewSnapshot?.revision ?? 0)
                                 self.storeLastGoodFrame(from: destination)
                                 request.finish(withComposedVideoFrame: destination)
                             }
@@ -346,7 +366,10 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         fallbackLock.unlock()
     }
 
-    private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction, time: CMTime, frame: CVPixelBuffer) {
+    private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction, time: CMTime,
+                                       frame: CVPixelBuffer, revision: UInt64) {
+        instruction.livePreviewState?.cacheFrame(frame, at: CMTimeGetSeconds(time),
+            sessionID: instruction.renderSessionID, revision: revision)
         let shouldNotify: Bool
         stateLock.lock()
         consecutiveRenderFailures = 0

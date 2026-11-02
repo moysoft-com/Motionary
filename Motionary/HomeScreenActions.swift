@@ -16,6 +16,7 @@ final class HomeScreenActions: ObservableObject {
     @discardableResult
     func receive(_ shortcut: UIApplicationShortcutItem) -> Bool {
         guard let action = Action(rawValue: shortcut.type) else { return false }
+        AppLogger.lifecycle.info("Received Home Screen action: \(action.rawValue, privacy: .public)")
         pendingAction = action
         return true
     }

@@ -40,6 +40,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				MotionaryWB.icon,
 			);
 			target = 8C70C7BA2D7225A60070BD08 /* Motionary */;
 		};
@@ -431,7 +432,6 @@
 		8C70C7E02D7225A80070BD08 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = MotionaryWB;
 				ASSETCATALOG_COMPILER_APPICON_NAME = MotionaryBW;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
@@ -466,7 +466,6 @@
 		8C70C7E12D7225A80070BD08 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = MotionaryWB;
 				ASSETCATALOG_COMPILER_APPICON_NAME = MotionaryBW;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;

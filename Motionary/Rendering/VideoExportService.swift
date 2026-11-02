@@ -375,11 +375,16 @@ struct VideoExportService {
         }
 
         guard pipeline.canContinue else { return }
-        pipeline.videoInput.requestMediaDataWhenReady(on: queue) {
+        // The suspended export operation owns the pipeline until completion.
+        // Writer inputs retain their request blocks; capturing the pipeline
+        // strongly here can keep the entire reader/compositor graph alive.
+        pipeline.videoInput.requestMediaDataWhenReady(on: queue) { [weak pipeline] in
+            guard let pipeline else { return }
             drainVideo(pipeline)
         }
         if let audioInput = pipeline.audioInput {
-            audioInput.requestMediaDataWhenReady(on: queue) {
+            audioInput.requestMediaDataWhenReady(on: queue) { [weak pipeline] in
+                guard let pipeline else { return }
                 drainAudio(pipeline)
             }
         }

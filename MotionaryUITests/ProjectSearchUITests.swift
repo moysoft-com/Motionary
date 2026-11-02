@@ -30,13 +30,13 @@ final class ProjectSearchUITests: XCTestCase {
         let back = app.buttons["motionary-editor-back"]
         XCTAssertTrue(back.waitForExistence(timeout: 15))
         XCTAssertFalse(searchField.exists, "The search overlay must not cover the editor")
-        XCTAssertFalse(app.tabBars.buttons["Motionary"].isHittable, "Editor must hide the native tab bar")
+        XCTAssertFalse(app.buttons["Motionary"].firstMatch.isHittable, "Editor must hide the native tab bar")
         XCTAssertFalse(app.buttons["Search"].firstMatch.isHittable)
         back.tap()
         XCTAssertTrue(app.staticTexts["Projects"].waitForExistence(timeout: 5))
         XCTAssertFalse(searchField.exists)
-        XCTAssertTrue(app.tabBars.buttons["Motionary"].isSelected)
-        XCTAssertTrue(app.tabBars.buttons["Motionary"].isHittable)
+        XCTAssertTrue(app.buttons["Motionary"].firstMatch.isSelected)
+        XCTAssertTrue(app.buttons["Motionary"].firstMatch.isHittable)
     }
 
     @MainActor
@@ -51,8 +51,8 @@ final class ProjectSearchUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
         let homeHeaderFrame = app.staticTexts["Projects"].frame
 
-        let homeTab = app.tabBars.buttons["Motionary"]
-        let settingsTab = app.tabBars.buttons["Settings"]
+        let homeTab = app.buttons["Motionary"].firstMatch
+        let settingsTab = app.buttons["Settings"].firstMatch
         let searchButton = app.buttons["Search"].firstMatch
         let searchField = app.textFields["home-project-search-field"]
         let dismissSearch = app.buttons["Close search"].firstMatch

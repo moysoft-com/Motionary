@@ -10,16 +10,42 @@ struct EffectTemporalSource: Sendable {
     let sourceDuration: Double
     let speedMap: SpeedMap
     var adjustments = AdjustmentSettings()
+    var backgroundRemoval: BackgroundRemovalSettings? = nil
+    var backgroundMatteURL: URL? = nil
+    var sourceOrientation = CGAffineTransform.identity
+    var matteOrientation = CGAffineTransform.identity
 
-    func image(at clipTime: Double, fitting extent: CGRect, quality: RenderQualityProfile) throws -> CIImage {
+    func image(at clipTime: Double, fitting extent: CGRect, quality: RenderQualityProfile,
+               adjustmentTime: Double? = nil, applyCutout: Bool = false,
+               renderScale: CGFloat = 1) throws -> CIImage {
         let sourceTime = sourceStart + speedMap.sourceTime(at: clipTime, sourceDuration: sourceDuration)
         let image = try EffectTemporalFrameStore.shared.image(url: url, time: sourceTime,
             size: extent.size, quality: quality)
-        let fitted = image.transformed(by: CGAffineTransform(
-            scaleX: extent.width / image.extent.width, y: extent.height / image.extent.height))
-            .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
-            .cropped(to: extent)
-        return EffectColorAdjustments.apply(adjustments, to: fitted, at: clipTime)
+        func fit(_ image: CIImage, orientation: CGAffineTransform) -> CIImage {
+            // Apply exactly the same Core Image orientation as decoder buffers.
+            // ImageGenerator's preferred-track rotation uses a different space.
+            let oriented = image.transformed(by: CGAffineTransform(
+                a: orientation.a, b: orientation.b, c: orientation.c, d: orientation.d, tx: 0, ty: 0))
+            return oriented.transformed(by: CGAffineTransform(translationX: -oriented.extent.minX, y: -oriented.extent.minY))
+                .transformed(by: CGAffineTransform(scaleX: extent.width / oriented.extent.width,
+                    y: extent.height / oriented.extent.height))
+                .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+                .cropped(to: extent)
+        }
+        var fitted = fit(image, orientation: sourceOrientation)
+        if applyCutout, let settings = backgroundRemoval {
+            let matte: CIImage?
+            if settings.requiresForegroundMatte {
+                guard let backgroundMatteURL else { throw MetalRenderingError.sourceFrameUnavailable }
+                matte = try EffectTemporalFrameStore.shared.image(url: backgroundMatteURL,
+                    time: sourceTime, size: extent.size, quality: quality)
+            } else {
+                matte = nil
+            }
+            fitted = BackgroundRemovalImageRenderer.apply(settings,
+                matte: matte.map { fit($0, orientation: matteOrientation) }, to: fitted, renderScale: renderScale)
+        }
+        return EffectColorAdjustments.apply(adjustments, to: fitted, at: adjustmentTime ?? clipTime)
     }
 }
 
@@ -44,6 +70,13 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
     private let lock = NSLock()
     private let frames = NSCache<NSString, CGImage>()
     private let generators = NSCache<NSURL, AVAssetImageGenerator>()
+    private func request(url: URL, time: Double, size: CGSize, quality: RenderQualityProfile) -> (String, CMTime, Int, Int) {
+        let width = max(Int(size.width.rounded()), 1)
+        let height = max(Int(size.height.rounded()), 1)
+        let seconds = max(time, 0)
+        let target = CMTime(seconds: seconds, preferredTimescale: 60_000)
+        return ("\(url.absoluteString)|\(target.value)|\(width)x\(height)", target, width, height)
+    }
 
     private init() {
         frames.totalCostLimit = 96 * 1024 * 1024
@@ -52,21 +85,21 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
     }
 
     func image(url: URL, time: Double, size: CGSize, quality: RenderQualityProfile) throws -> CIImage {
+        let (key, target, width, height) = request(url: url, time: time, size: size, quality: quality)
+        // Cache hits must not wait behind another asset's decoder request.
+        if let frame = frames.object(forKey: key as NSString) { return CIImage(cgImage: frame) }
         lock.lock()
         defer { lock.unlock() }
-        let limit: CGFloat = quality == .interactive ? 1280 : max(size.width, size.height)
-        let scale = min(1, limit / max(size.width, size.height, 1))
-        let width = max(Int((size.width * scale).rounded()), 1)
-        let height = max(Int((size.height * scale).rounded()), 1)
-        let target = CMTime(seconds: max(time, 0), preferredTimescale: 60_000)
-        let key = "\(url.absoluteString)|\(target.value)|\(width)x\(height)" as NSString
-        if let frame = frames.object(forKey: key) { return CIImage(cgImage: frame) }
+        if let frame = frames.object(forKey: key as NSString) { return CIImage(cgImage: frame) }
+        guard !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
         let generator: AVAssetImageGenerator
         if let existing = generators.object(forKey: url as NSURL) {
             generator = existing
         } else {
             generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-            generator.appliesPreferredTrackTransform = true
+            generator.appliesPreferredTrackTransform = false
             generator.requestedTimeToleranceBefore = .zero
             generator.requestedTimeToleranceAfter = .zero
             generators.setObject(generator, forKey: url as NSURL)
@@ -84,7 +117,7 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
             throw MetalRenderingError.sourceFrameUnavailable
         }
         let frame = try decoded.get()
-        frames.setObject(frame, forKey: key, cost: frame.bytesPerRow * frame.height)
+        frames.setObject(frame, forKey: key as NSString, cost: frame.bytesPerRow * frame.height)
         return CIImage(cgImage: frame)
     }
 }

@@ -84,7 +84,6 @@ struct ProjectEditorView: View {
         .navigationTitle(viewModel.project.title)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
-        .tint(MotionaryTheme.accent)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {

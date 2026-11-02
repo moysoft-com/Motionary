@@ -137,6 +137,10 @@ extension EditorViewModel {
             return
         }
         if !isPlaying { playbackState.playbackStartRequestRevision &+= 1 }
+        // The timeline synchronously flushes its last bounce position when
+        // observing the start request. That flush can present a cached scrub
+        // frame, so release the overlay after the handoff as well.
+        invalidateLivePreviewPresentation()
         let takingOverScrub = isScrubbing || scrubIsFinishing
         if takingOverScrub {
             scrubSessionGeneration &+= 1
@@ -472,6 +476,7 @@ extension EditorViewModel {
         player?.pause()
         isPlaying = false
         isScrubbing = true
+        player?.currentItem?.seekingWaitsForVideoCompositionRendering = false
         livePreviewPresentation.setInteracting(true)
         if rebuildTask != nil {
             deferredPreviewInvalidation.formUnion([
@@ -515,6 +520,9 @@ extension EditorViewModel {
         let generation = scrubSessionGeneration
         player?.currentItem?.cancelPendingSeeks()
         updateCurrentTime(clamped)
+        // On release, completion must acknowledge the final rendered frame,
+        // rather than just the decoder's new time.
+        player?.currentItem?.seekingWaitsForVideoCompositionRendering = true
         previewQuality = .balanced
         renderService.livePreviewState.setInteractiveQualityOverride(false)
 
@@ -550,14 +558,12 @@ extension EditorViewModel {
         guard generation == scrubSessionGeneration, isScrubbing else { return }
         updateCurrentTime(time)
         isScrubbing = false
-        pendingLivePreviewFrameRefresh = true
-        scheduleLivePreviewFrameRefresh()
+        // The final seek waits for presentation at normal preview quality.
+        // Uncover that frame instead of rebuilding/re-rendering it again.
+        livePreviewPresentation.frame = nil
         scrubIsFinishing = false
         wasPlayingBeforeScrub = false
-        flushDeferredPreviewRebuild(
-            seekTo: time,
-            includeGeneratedLayerQualityRestore: true
-        )
+        flushDeferredPreviewRebuild(seekTo: time)
     }
 
     var navigationPoints: [Double] {

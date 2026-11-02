@@ -65,7 +65,19 @@ extension EffectModuleID {
     static let kaleidoscope = EffectModuleID(prefix + "kaleidoscope")
     static let duotone = EffectModuleID(prefix + "duotone")
     static let displacementMap = EffectModuleID(prefix + "displacement-map")
+    static let lightSweep = EffectModuleID(prefix + "light-sweep")
+    static let ribbedGlass = EffectModuleID(prefix + "ribbed-glass")
+    static let dither = EffectModuleID(prefix + "dither")
+    static let halftone = EffectModuleID(prefix + "halftone")
+    static let colorSplash = EffectModuleID(prefix + "color-splash")
+    static let neonEdges = EffectModuleID(prefix + "neon-edges")
     static let echoTrails = EffectModuleID(prefix + "echo-trails")
+    static let shake = EffectModuleID(prefix + "shake")
+    static let cameraWiggle = EffectModuleID(prefix + "camera-wiggle")
+    static let zoom = EffectModuleID(prefix + "zoom")
+    static let mirror = EffectModuleID(prefix + "mirror")
+    static let reverseTime = EffectModuleID(prefix + "reverse-time")
+    static let motionBlur = EffectModuleID(prefix + "motion-blur")
 
 
 }

@@ -16,11 +16,17 @@ struct RootTabTintTests {
             home: { VStack { Text("Home"); RootTintProbe() } }, settings: { Text("Settings") }
         )
         let host = UIHostingController(rootView: content)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+            ?? scene.windows.first(where: { !$0.isHidden })
         let window = UIWindow(windowScene: scene)
         window.overrideUserInterfaceStyle = style
         window.rootViewController = host
         window.isHidden = false
-        defer { window.isHidden = true; window.rootViewController = nil }
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKeyAndVisible()
+        }
         host.view.layoutIfNeeded()
         func controllers(_ controller: UIViewController) -> [UIViewController] {
             [controller] + controller.children.flatMap { controllers($0) }

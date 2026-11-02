@@ -4,6 +4,13 @@
 import CoreImage
 import UIKit
 
+extension EffectModuleDescriptor {
+    var hasAnimatedPreview: Bool {
+        [.shake, .cameraWiggle, .zoom, .motionBlur, .waveWarp,
+         .displacementMap, .lightSweep, .analogGlitch, .fineGrain, .lightLeak, .echoTrails].contains(id)
+    }
+}
+
 enum EffectImageRenderer {
     private static let renderer = Result { try MetalFrameRenderer() }
     private static let fallbackDiagnosticEffectID = UUID(
@@ -18,14 +25,16 @@ enum EffectImageRenderer {
         _ stack: EffectStack,
         to image: CIImage,
         at time: Double,
-        renderScale: CGFloat
+        renderScale: CGFloat,
+        layerMotion: EffectLayerMotion? = nil
     ) -> CIImage {
         do {
             return try renderer.get().renderEffectsSynchronously(
                 stack,
                 to: image,
                 at: time,
-                renderScale: renderScale
+                renderScale: renderScale,
+                layerMotion: layerMotion
             )
         } catch {
             EffectRenderDiagnostics.shared.report(EffectRenderDiagnostic(
@@ -44,22 +53,58 @@ enum EffectThumbnailRenderer {
     private static let lock = NSLock()
     private static var cachedInputs: [EffectCategory: CIImage] = [:]
 
-    static func preview(for moduleID: EffectModuleID, scale: CGFloat = 2) -> UIImage? {
+    static func preview(for moduleID: EffectModuleID, scale: CGFloat = 2, at time: Double = 0,
+                        animated: Bool = false) -> UIImage? {
         guard let descriptor = EffectRegistry.shared.descriptor(for: moduleID),
-            var effect = EffectRegistry.shared.makeEffect(moduleID: moduleID),
-            let input = normalizedPreviewInput(for: descriptor.category)
+            var effect = EffectRegistry.shared.makeEffect(moduleID: moduleID,
+                id: UUID(uuidString: "28977F36-7EB7-459A-8D78-66D86927D612")!),
+            var input = normalizedPreviewInput(for: descriptor.category)
         else { return nil }
+        effect.seed = EffectInstance.deterministicSeed(for: effect.id)
         effect.mix = AnimatableProperty(baseValue: descriptor.previewMix)
         for parameter in descriptor.parameters {
             effect.parameters[parameter.id.rawValue] = EffectParameterState(
                 baseValue: parameter.previewValue
             )
         }
+        var stack: [EffectInstance] = []
+        var layerMotion: EffectLayerMotion?
+        if animated {
+            input = input.transformed(by: CGAffineTransform(scaleX: 0.5, y: 0.5))
+            if moduleID == .zoom {
+                effect.parameters["mode"] = EffectParameterState(baseValue: .option("Pulse"))
+                effect.parameters["startScale"] = EffectParameterState(baseValue: .scalar(1))
+                effect.parameters["duration"] = EffectParameterState(baseValue: .scalar(3))
+            }
+            if moduleID == .echoTrails {
+                let bounds = input.extent
+                let t = time
+                input = input.transformed(by: CGAffineTransform(translationX: -bounds.midX, y: -bounds.midY))
+                    .transformed(by: CGAffineTransform(scaleX: 1.3, y: 1.3))
+                    .transformed(by: CGAffineTransform(translationX: bounds.midX + sin(t * 2 * .pi / 3) * bounds.width * 0.12,
+                        y: bounds.midY))
+                    .cropped(to: bounds)
+            }
+        }
+        let previewTime = animated ? time : 0.7
+        if moduleID == .motionBlur {
+            let previewBounds = input.extent
+            let transform = ClipTransform(positionX: AnimatableProperty(baseValue: 0, keyframes: [
+                Keyframe(time: 0, value: -0.5), Keyframe(time: 1, value: 0.5),
+                Keyframe(time: 2, value: -0.5)
+            ]))
+            layerMotion = EffectLayerMotion(transform: transform, canvasSize: input.extent.size, isGenerated: false)
+            input = input.transformed(by: CGAffineTransform(translationX:
+                transform.positionX.value(at: previewTime) * input.extent.width * 0.5, y: 0))
+                .cropped(to: CGRect(x: 0, y: 0, width: previewBounds.width, height: previewBounds.height))
+        }
+        stack.append(effect)
         let output = EffectImageRenderer.render(
-            EffectStack(effects: [effect]),
+            EffectStack(effects: stack),
             to: input,
-            at: 0,
-            renderScale: max(scale, 1)
+            at: previewTime,
+            renderScale: max(scale, 1),
+            layerMotion: layerMotion
         )
         return previewImage(from: output, extent: input.extent, scale: scale)
     }

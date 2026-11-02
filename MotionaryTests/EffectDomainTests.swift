@@ -1,6 +1,7 @@
 // Focused tests for schema-11 effect persistence, registry, and timeline operations.
 
 import Foundation
+import CoreImage
 import Testing
 
 @testable import Motionary
@@ -40,10 +41,10 @@ struct EffectDomainTests {
         #expect(renderer.cyclicDegrees(.angle, in: effect, at: 0) == -5)
     }
 
-    @Test func builtInRegistryContainsThirtyTwoValidModules() throws {
+    @Test func builtInRegistryContainsFortyThreeValidModules() throws {
         let registry = EffectRegistry.shared
 
-        #expect(registry.modules.count == 32)
+        #expect(registry.modules.count == 43)
         #expect(Set(registry.modules.map(\.id)).count == registry.modules.count)
         for module in registry.modules {
             #expect(module.currentVersion == 1)
@@ -232,6 +233,71 @@ struct EffectDomainTests {
         #expect(trimmed.effects[0].parameters["future"]?.keyframes.first?.time == 0)
         trimmed.trimAnimationsAtEnd(newDuration: 1, oldDuration: 3)
         #expect(trimmed.effects[0].parameters["future"]?.keyframes.last?.time == 1)
+    }
+
+    @Test func creativeEffectsRenderOnGPUAndRespectMixAndTransparency() throws {
+        let renderer = try MetalFrameRenderer()
+        let context = CIContext()
+        let bounds = CGRect(x: 0, y: 0, width: 64, height: 64)
+        let input = CIImage(color: CIColor(red: 0.8, green: 0.2, blue: 0.1, alpha: 1)).cropped(to: bounds)
+        let transparent = CIImage(color: .clear).cropped(to: bounds)
+        func pixels(_ image: CIImage) -> [UInt8] {
+            var bytes = [UInt8](repeating: 0, count: 64 * 64 * 4)
+            context.render(image, toBitmap: &bytes, rowBytes: 64 * 4, bounds: bounds,
+                format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+            return bytes
+        }
+        for id: EffectModuleID in [.lightSweep, .ribbedGlass, .dither, .halftone, .colorSplash, .neonEdges] {
+            var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: id))
+            let output = try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: input, at: 0.3, renderScale: 1)
+            #expect(output.extent == bounds)
+            let rendered = pixels(output)
+            #expect(stride(from: 3, to: rendered.count, by: 4).allSatisfy { rendered[$0] == 255 })
+            let clearOutput = try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: transparent, at: 0.3, renderScale: 1)
+            #expect(pixels(clearOutput).allSatisfy { $0 == 0 })
+            let translucent = CIImage(color: CIColor(red: 0.8, green: 0.2, blue: 0.1, alpha: 0.5)).cropped(to: bounds)
+            let translucentOutput = try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: translucent, at: 0.3, renderScale: 1)
+            let translucentPixels = pixels(translucentOutput)
+            #expect(stride(from: 3, to: translucentPixels.count, by: 4).allSatisfy {
+                abs(Int(translucentPixels[$0]) - 128) <= 1
+            })
+            let gradient = CIFilter(name: "CILinearGradient", parameters: [
+                "inputPoint0": CIVector(x: 0, y: 0), "inputPoint1": CIVector(x: 64, y: 64),
+                "inputColor0": CIColor(red: 1, green: 0, blue: 0),
+                "inputColor1": CIColor(red: 0, green: 0.2, blue: 1),
+            ])!.outputImage!.cropped(to: bounds)
+            let patternedOutput = try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: gradient, at: 0.3, renderScale: 1)
+            let difference = zip(pixels(patternedOutput), pixels(gradient)).reduce(0) {
+                $0 + abs(Int($1.0) - Int($1.1))
+            }
+            #expect(difference > 100, "Every creative effect must visibly change a nonuniform source")
+            effect.mix = AnimatableProperty(baseValue: 0)
+            let bypass = try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: input, at: 0.3, renderScale: 1)
+            #expect(pixels(bypass) == pixels(input))
+        }
+    }
+
+    @Test func colorSplashKeepsRedAndDesaturatesBlue() throws {
+        let renderer = try MetalFrameRenderer()
+        let bounds = CGRect(x: 0, y: 0, width: 32, height: 16)
+        let blue = CIImage(color: CIColor(red: 0, green: 0, blue: 1)).cropped(to: bounds)
+        let red = CIImage(color: CIColor(red: 1, green: 0, blue: 0))
+            .cropped(to: CGRect(x: 0, y: 0, width: 16, height: 16))
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .colorSplash))
+        let output = try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+            to: red.composited(over: blue), at: 0, renderScale: 1)
+        var bytes = [UInt8](repeating: 0, count: 32 * 16 * 4)
+        CIContext().render(output, toBitmap: &bytes, rowBytes: 32 * 4, bounds: bounds,
+            format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)
+        #expect(bytes[0] > 240 && bytes[1] < 10 && bytes[2] < 10)
+        let blueIndex = 24 * 4
+        #expect(abs(Int(bytes[blueIndex]) - Int(bytes[blueIndex + 1])) <= 1)
+        #expect(abs(Int(bytes[blueIndex]) - Int(bytes[blueIndex + 2])) <= 1)
     }
 
     private func jsonObject<T: Encodable>(_ value: T) throws -> Any {

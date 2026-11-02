@@ -805,7 +805,10 @@ extension EditorViewModel {
                     // a newer sample is pending, so continuous gestures cannot
                     // starve presentation on a slower GPU.
                     if let frame {
-                        self.livePreviewPresentation.frame = frame
+                        self.livePreviewPresentation.setFrame(
+                            frame,
+                            at: self.livePreviewPresentationTime(target)
+                        )
                     } else {
                         self.renderService.livePreviewState.clearPausedFrameRenderer()
                         self.pendingLivePreviewFrameRefresh = true

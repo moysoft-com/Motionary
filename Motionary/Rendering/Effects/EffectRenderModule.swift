@@ -61,7 +61,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
     }
 
     func validate(_ stack: EffectStack) throws {
-        for storedEffect in stack.effects where storedEffect.isEnabled {
+        for storedEffect in stack.effects where storedEffect.isEnabled && storedEffect.moduleID != .reverseTime {
             let effect = try EffectRegistry.shared.migrated(storedEffect)
             switch EffectRegistry.shared.availability(of: effect) {
             case .available:
@@ -87,7 +87,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
     ) throws -> CIImage {
         var current = input
         var prefix: [EffectInstance] = []
-        for storedEffect in stack.effects where storedEffect.isEnabled {
+        for storedEffect in stack.effects where storedEffect.isEnabled && storedEffect.moduleID != .reverseTime {
             let effect: EffectInstance
             do {
                 effect = try EffectRegistry.shared.migrated(storedEffect)
@@ -131,6 +131,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
             var moduleContext = context
             moduleContext.temporalPrefix = EffectStack(effects: prefix)
             moduleContext.temporalSourceExtent = input.extent
+            moduleContext.effectInput = input
             let result = try module.render(
                 current,
                 effect: effect,
@@ -141,10 +142,12 @@ final class EffectRenderRegistry: @unchecked Sendable {
                 prefix.append(effect)
             }
             // Margins and unfolded tiles are sampling support, not layer content.
-            // Keep every pass in the authored bounds so subsequent effects cannot
-            // treat reflected padding as part of the object's image.
-            current = Self.mix(current, with: result.image.cropped(to: input.extent), amount: mix)
-                .cropped(to: input.extent)
+            // Spatial passes stay inside the object; motion blur owns a real
+            // expanded footprint so trails survive placement and compositing.
+            let preservesMotionExtent = effect.moduleID == .motionBlur
+            let extent = preservesMotionExtent ? current.extent.union(result.image.extent) : current.extent
+            current = Self.mix(current, with: result.image.cropped(to: extent), amount: mix)
+                .cropped(to: extent)
         }
         return current
     }

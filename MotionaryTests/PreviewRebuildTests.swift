@@ -138,7 +138,12 @@ struct PreviewRebuildTests {
 
     @MainActor
     @Test func videoClockAndDependenciesCoverLayerEndsGapsAndAudioTail() async throws {
-        let videoURL = try await MediaConversionHelper.blankVideoClockURL(duration: 1, frameRate: 30)
+        // Keep fixture media on a distinct file, as real project imports are,
+        // so source decoding and private clock decoding do not alias one asset.
+        let clockFixture = try await MediaConversionHelper.blankVideoClockURL(duration: 1, frameRate: 30)
+        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        try FileManager.default.copyItem(at: clockFixture, to: videoURL)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
         let audioURL = try makeSilentAudioFile()
         defer { try? FileManager.default.removeItem(at: audioURL) }
         let first = TimelineClip(
@@ -360,6 +365,14 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
+    @Test func presentationClockMatchesSeekPrecision() {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let actual = model.livePreviewPresentationTime(0.517)
+        #expect(abs(actual - 0.5166666667) < 0.00001)
+    }
+
+    @MainActor
     @Test func scrubbingCoalescesDecoderWorkAndFinishesExactly() async throws {
         let viewModel = makeGeneratedLayerViewModel()
         defer { viewModel.stop() }
@@ -398,6 +411,58 @@ struct PreviewRebuildTests {
         for _ in 0..<100 where viewModel.isScrubbing { await Task.yield() }
         #expect(!viewModel.isScrubbing)
         #expect(viewModel.currentTime == 0.9)
+    }
+
+    @MainActor
+    @Test func cachedScrubFrameDisplaysImmediatelyWithoutDecoderWork() throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        model.beginScrub()
+        var frame: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(kCFAllocatorDefault, 96, 96, kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &frame) == kCVReturnSuccess)
+        let buffer = try #require(frame)
+        model.renderService.livePreviewState.cacheFrame(buffer, at: 0.5,
+            sessionID: model.previewRenderSessionID,
+            revision: model.renderService.livePreviewState.snapshot().revision)
+        model.updateScrub(to: 0.5)
+        #expect(model.livePreviewPresentation.frame === buffer)
+        #expect(player.pendingSeekCount == 0)
+        #expect(!model.isScrubSeekInFlight)
+        #expect(model.pendingScrubSeekTime == nil)
+    }
+
+    @MainActor
+    @Test func generatedScrubRequestsCoalesceOnGPUWithoutDecoderSeeks() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        model.beginScrub()
+        var requests: [Double] = []
+        var completions: [(CVPixelBuffer?) -> Void] = []
+        model.renderService.livePreviewState.installPausedFrameRenderer { time, _, completion in
+            requests.append(time)
+            completions.append(completion)
+            return true
+        }
+        model.updateScrub(to: 0.1)
+        model.updateScrub(to: 0.3)
+        model.updateScrub(to: 0.8)
+        #expect(requests == [0.1])
+        #expect(player.pendingSeekCount == 0)
+        var frame: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(kCFAllocatorDefault, 96, 96, kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &frame) == kCVReturnSuccess)
+        let buffer = try #require(frame)
+        completions[0](buffer)
+        for _ in 0..<100 where requests.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        #expect(requests == [0.1, 0.8])
+        #expect(player.pendingSeekCount == 0)
+        #expect(model.livePreviewPresentation.frame === buffer)
+        if completions.count == 2 { completions[1](buffer) }
     }
 
     @MainActor
@@ -445,7 +510,7 @@ struct PreviewRebuildTests {
         let url = try await MediaConversionHelper.blankVideoClockURL(duration: 2, frameRate: 30)
         let clip = TimelineClip(
             name: "Decoded scrub", source: ClipSource(url: url, mediaType: .video, originalDuration: 2,
-                                                      naturalSize: CGSizeValue(width: 16, height: 16)),
+                                                      naturalSize: CGSizeValue(width: 64, height: 64)),
             timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2)
         )
         let viewModel = makeViewModel(clip: clip)
@@ -480,6 +545,32 @@ struct PreviewRebuildTests {
         #expect(viewModel.currentTime > 1)
         Attachment.record("Real AVPlayer / H.264 clock / 12 alternating scrub targets, completion ms: \(durations)",
                           named: "scrub-decoder-regression.txt")
+    }
+
+    @MainActor
+    @Test func playDuringLeftOverscrollClearsTheSynchronouslyFlushedFirstFrame() throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        model.player = ControlledSeekPlayer()
+        model.beginScrub()
+        var frame: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(kCFAllocatorDefault, 96, 96, kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &frame) == kCVReturnSuccess)
+        let buffer = try #require(frame)
+        model.renderService.livePreviewState.cacheFrame(buffer, at: model.livePreviewPresentationTime(0),
+            sessionID: model.previewRenderSessionID,
+            revision: model.renderService.livePreviewState.snapshot().revision)
+        let observation = model.playbackState.$playbackStartRequestRevision.dropFirst().sink { _ in
+            // Match TimelineScrollContainer.interruptScrubForPlayback's
+            // synchronous flush while the left bounce is still outside zero.
+            model.updateScrub(to: -0.2)
+            #expect(model.livePreviewPresentation.frame === buffer)
+        }
+        model.togglePlayback()
+        #expect(model.livePreviewPresentation.frame == nil)
+        #expect(model.playbackState.isStartingPlayback)
+        #expect(!model.isScrubbing)
+        withExtendedLifetime(observation) {}
     }
 
     @MainActor
@@ -1643,9 +1734,9 @@ struct PreviewRebuildTests {
                 as? MotionaryVideoCompositionInstruction
         )
 
-        #expect(instruction.renderSize == CGSize(width: 404, height: 720))
-        #expect(abs(instruction.renderScale - 404.0 / 1080.0) < 0.000_001)
-        #expect(instruction.vectorRenderScale == instruction.renderScale)
+        #expect(instruction.renderSize == CGSize(width: 540, height: 960))
+        #expect(abs(instruction.renderScale - 540.0 / 1080.0) < 0.000_001)
+        #expect(instruction.vectorRenderScale == 0.75)
     }
 
     @MainActor
@@ -1678,9 +1769,9 @@ struct PreviewRebuildTests {
                 as? MotionaryVideoCompositionInstruction
         )
 
-        #expect(instruction.renderSize == CGSize(width: 404, height: 720))
-        #expect(abs(instruction.renderScale - 404.0 / 1080.0) < 0.000_001)
-        #expect(instruction.vectorRenderScale == instruction.renderScale)
+        #expect(instruction.renderSize == CGSize(width: 540, height: 960))
+        #expect(abs(instruction.renderScale - 540.0 / 1080.0) < 0.000_001)
+        #expect(instruction.vectorRenderScale == 0.75)
         #expect(instruction.qualityProfile == .interactive)
     }
 

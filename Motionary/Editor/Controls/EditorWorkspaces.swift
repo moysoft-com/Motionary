@@ -645,6 +645,9 @@ struct EffectsWorkspaceView: View {
                 pagerMinX = minX
             }
         }
+        .task(priority: .utility) {
+            _ = await EffectThumbnailCache.shared.libraryPreviews()
+        }
         .sheet(isPresented: $isLibraryPresented) {
             EffectLibrarySheet { moduleID in
                 if let effectID = viewModel.addEffect(moduleID: moduleID) {
@@ -1296,6 +1299,30 @@ private struct EffectDetailWorkspaceView: View {
             ScrollView {
                 VStack(spacing: 12) {
                     if isAvailable {
+                        ForEach(EffectRegistry.shared.descriptor(for: effect.moduleID)?.parameters.filter {
+                            $0.valueType == .option
+                        } ?? []) { parameter in
+                            HStack {
+                                Text(parameter.title)
+                                    .font(MotionaryDesign.Typography.controlTitleStrong)
+                                Spacer()
+                                Picker(parameter.title, selection: Binding(
+                                    get: {
+                                        if case .option(let value)? = EffectRegistry.shared.resolvedValue(
+                                            for: parameter.id, in: effect, at: 0) { return value }
+                                        return parameter.optionValues.first ?? ""
+                                    },
+                                    set: { viewModel.setEffectOption(effect.id, parameterID: parameter.id, value: $0) }
+                                )) {
+                                    ForEach(parameter.optionValues, id: \.self) { value in
+                                        Text(value).tag(value)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+                                .disabled(!isEnabled || !effect.isEnabled)
+                                .accessibilityIdentifier("motionary-effect-option-\(parameter.id.rawValue)")
+                            }
+                        }
                         ForEach(effect.parameterTargets) { target in
                             PropertyScrubber(
                                 viewModel: viewModel,
@@ -1459,6 +1486,7 @@ private struct EffectLibrarySheet: View {
 
     @State private var query = ""
     @State private var selectedCategory: EffectCategory?
+    @State private var previews: [EffectModuleID: EffectThumbnailPair] = [:]
 
     private let columns = [
         GridItem(.adaptive(minimum: 100), spacing: MotionaryDesign.Spacing.lg)
@@ -1489,7 +1517,11 @@ private struct EffectLibrarySheet: View {
                 }
 
                 ScrollView {
-                    if filteredModules.isEmpty {
+                    if previews.isEmpty {
+                        ProgressView("Preparing effect previews…")
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, MotionaryDesign.Spacing.xxl)
+                    } else if filteredModules.isEmpty {
                         ContentUnavailableView.search(text: query)
                             .frame(maxWidth: .infinity)
                             .padding(.top, MotionaryDesign.Spacing.xxl)
@@ -1499,6 +1531,7 @@ private struct EffectLibrarySheet: View {
                                 ForEach(filteredModules) { module in
                                     EffectLibraryTile(
                                         module: module,
+                                        preview: previews[module.id],
                                         isSelected: selectedModuleID == module.id
                                     ) {
                                         selectedModuleID = selectedModuleID == module.id ? nil : module.id
@@ -1537,6 +1570,11 @@ private struct EffectLibrarySheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .onAppear { selectedModuleID = nil }
+        .task {
+            let prepared = await EffectThumbnailCache.shared.libraryPreviews()
+            guard !Task.isCancelled else { return }
+            previews = prepared
+        }
     }
 
     private var filteredModules: [EffectModuleDescriptor] {
@@ -1618,6 +1656,7 @@ private struct EffectCategoryChip: View {
 
 private struct EffectLibraryTile: View {
     let module: EffectModuleDescriptor
+    let preview: EffectThumbnailPair?
     let isSelected: Bool
     let action: () -> Void
 
@@ -1627,7 +1666,7 @@ private struct EffectLibraryTile: View {
             action()
         } label: {
             VStack(alignment: .center) {
-                EffectPreviewTileImage(moduleID: module.id, isSelected: isSelected)
+                EffectPreviewTileImage(moduleID: module.id, isSelected: isSelected, preview: preview)
                     .aspectRatio(1, contentMode: .fit)
                     .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
                     .overlay {
@@ -1664,16 +1703,28 @@ private struct EffectPreviewTileImage: View {
     let moduleID: EffectModuleID
     let isSelected: Bool
 
-    @Environment(\.displayScale) private var displayScale
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var renderedPreview: UIImage?
-    @State private var originalPreview: UIImage?
+    @Environment(\.scenePhase) private var scenePhase
+    let preview: EffectThumbnailPair?
+    private var renderedPreview: UIImage? { preview?.rendered }
+    private var originalPreview: UIImage? { preview?.original }
+    @State private var loopFrames: [UIImage] = []
+    @State private var isVisible = false
+
+    private var animates: Bool {
+        EffectRegistry.shared.descriptor(for: moduleID)?.hasAnimatedPreview == true
+            && !reduceMotion && isVisible && scenePhase == .active
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
             ZStack {
-                thumbnailLayer(renderedPreview)
+                TimelineView(.animation(minimumInterval: 1 / 12, paused: !animates || loopFrames.isEmpty)) { timeline in
+                    let frame = loopFrames.isEmpty || !animates ? renderedPreview
+                        : loopFrames[Int(timeline.date.timeIntervalSinceReferenceDate * 12) % loopFrames.count]
+                    thumbnailLayer(frame)
+                }
                     .frame(width: size.width, height: size.height)
                     .clipped()
 
@@ -1706,24 +1757,15 @@ private struct EffectPreviewTileImage: View {
             .background(.black)
         }
         .accessibilityIdentifier("effect-preview-\(moduleID.rawValue)")
-        .task(id: moduleID, priority: .utility) {
-            if let previews = await EffectThumbnailCache.shared.cachedPreviews(
-                for: moduleID, scale: displayScale
-            ) {
-                guard !Task.isCancelled else { return }
-                originalPreview = previews.original
-                renderedPreview = previews.rendered
-                return
-            }
+        .onScrollVisibilityChange(threshold: 0.15) { isVisible = $0 }
+        .onDisappear { isVisible = false; loopFrames = [] }
+        .task(id: animates) {
+            guard animates else { return }
+            let frames = await EffectThumbnailCache.shared.animation(for: moduleID)
             guard !Task.isCancelled else { return }
-            let previews = await EffectThumbnailCache.shared.previews(
-                for: moduleID,
-                scale: displayScale
-            )
-            guard !Task.isCancelled else { return }
-            originalPreview = previews.original
-            renderedPreview = previews.rendered
+            loopFrames = frames
         }
+
     }
 
     @ViewBuilder
@@ -1733,11 +1775,10 @@ private struct EffectPreviewTileImage: View {
                 Image(uiImage: image)
                     .resizable()
             } else {
-                Image(
-                    EffectRegistry.shared.descriptor(for: moduleID)?.category.showcaseImageAssetName
-                        ?? EffectCategory.lens.showcaseImageAssetName
-                )
-                    .resizable()
+                Image(systemName: "photo.badge.exclamationmark")
+                    .font(.title)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .scaledToFill()
@@ -1754,6 +1795,10 @@ private struct EffectThumbnailPair: @unchecked Sendable {
     let rendered: UIImage?
 }
 
+private struct EffectPreviewLoop: @unchecked Sendable {
+    let frames: [UIImage]
+}
+
 private actor EffectThumbnailCache {
     static let shared = EffectThumbnailCache()
 
@@ -1763,9 +1808,33 @@ private actor EffectThumbnailCache {
     }
 
     private var entries: [Key: EffectThumbnailPair] = [:]
+    private var animations: [EffectModuleID: EffectPreviewLoop] = [:]
+    private var originals: [EffectCategory: UIImage] = [:]
 
-    func cachedPreviews(for moduleID: EffectModuleID, scale: CGFloat) -> EffectThumbnailPair? {
-        entries[Key(moduleID: moduleID, scaleHundredths: Int((max(scale, 1) * 100).rounded()))]
+    func libraryPreviews() async -> [EffectModuleID: EffectThumbnailPair] {
+        var result: [EffectModuleID: EffectThumbnailPair] = [:]
+        for module in EffectRegistry.shared.modules {
+            guard !Task.isCancelled else { return [:] }
+            result[module.id] = previews(for: module.id, scale: 2)
+            await Task.yield()
+        }
+        return result
+    }
+
+    func animation(for moduleID: EffectModuleID) async -> [UIImage] {
+        if let cached = animations[moduleID] { return cached.frames }
+        var frames: [UIImage] = []
+        for index in 0..<24 {
+            guard !Task.isCancelled else { return [] }
+            if let frame = EffectThumbnailRenderer.preview(for: moduleID, scale: 1,
+                at: Double(index) / 12, animated: true) { frames.append(frame) }
+            await Task.yield()
+        }
+        guard !Task.isCancelled else { return [] }
+        animations[moduleID] = EffectPreviewLoop(frames: frames)
+        // All built-in loops fit in a bounded ~30 MB working set. Keep them
+        // across scrolling so returning tiles never rebuild their animations.
+        return frames
     }
 
     func previews(for moduleID: EffectModuleID, scale: CGFloat) -> EffectThumbnailPair {
@@ -1777,8 +1846,12 @@ private actor EffectThumbnailCache {
         // A dismissed sheet must not leave its queued thumbnail work running
         // through the next editor/presentation animation.
         guard !Task.isCancelled else { return EffectThumbnailPair(original: nil, rendered: nil) }
+        let category = EffectRegistry.shared.descriptor(for: moduleID)?.category
+        let original = category.flatMap { originals[$0] }
+            ?? EffectThumbnailRenderer.originalPreview(for: moduleID, scale: scale)
+        if let category, let original { originals[category] = original }
         let result = EffectThumbnailPair(
-            original: EffectThumbnailRenderer.originalPreview(for: moduleID, scale: scale),
+            original: original,
             rendered: EffectThumbnailRenderer.preview(for: moduleID, scale: scale)
         )
         entries[key] = result
@@ -1868,10 +1941,9 @@ private struct PropertyScrubber: View {
                 Label(metadata.title, systemImage: metadata.systemImage)
                     .font(MotionaryDesign.Typography.controlTitle)
                     .labelStyle(.titleOnly)
-                    .frame(width: MotionaryDesign.Control.scrubberLabelWidth, alignment: .leading)
-                    .lineLimit(1)
-
-                Spacer()
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                 Text(formatted(value, metadata: metadata))
                     .font(MotionaryDesign.Typography.controlValue)

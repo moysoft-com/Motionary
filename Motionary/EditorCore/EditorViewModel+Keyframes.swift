@@ -633,6 +633,18 @@ extension EditorViewModel {
         }
     }
 
+    func setEffectOption(_ effectID: UUID, parameterID: EffectParameterID, value: String) {
+        updateSelectedClip { clip in
+            guard let index = clip.effectStack.effects.firstIndex(where: { $0.id == effectID }),
+                let descriptor = EffectRegistry.shared.descriptor(for: clip.effectStack.effects[index].moduleID)?
+                    .descriptor(for: parameterID),
+                descriptor.valueType == .option, descriptor.accepts(.option(value))
+            else { return }
+            clip.effectStack.effects[index].parameters[parameterID.rawValue] =
+                EffectParameterState(baseValue: .option(value))
+        }
+    }
+
     func removeEffect(_ effectID: UUID) {
         updateSelectedClip { clip in
             clip.effectStack.effects.removeAll { $0.id == effectID }

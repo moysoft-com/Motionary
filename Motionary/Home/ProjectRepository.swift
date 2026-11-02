@@ -86,10 +86,12 @@ actor ProjectRepository {
             try data.write(to: recoveryURL, options: [.atomic])
 
             if fileManager.fileExists(atPath: contentURL.path) {
-                if fileManager.fileExists(atPath: backupURL.path) {
-                    try fileManager.removeItem(at: backupURL)
+                // Never replace a known-good backup with a corrupt primary.
+                // Atomic rotation also keeps the prior backup if writing fails.
+                let previous = try Data(contentsOf: contentURL)
+                if (try? JSONDecoder().decode(ProjectContent.self, from: previous)) != nil {
+                    try previous.write(to: backupURL, options: [.atomic])
                 }
-                try fileManager.copyItem(at: contentURL, to: backupURL)
                 _ = try fileManager.replaceItemAt(
                     contentURL,
                     withItemAt: recoveryURL,

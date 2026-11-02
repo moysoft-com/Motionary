@@ -72,5 +72,39 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>MotionaryWBFallback</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>MotionaryWBFallback60x60</string>
+					<string>MotionaryWBFallback76x76</string>
+					<string>MotionaryWBFallback83.5x83.5</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>MotionaryWBFallback</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>MotionaryWBFallback60x60</string>
+					<string>MotionaryWBFallback76x76</string>
+					<string>MotionaryWBFallback83.5x83.5</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 </dict>
 </plist>

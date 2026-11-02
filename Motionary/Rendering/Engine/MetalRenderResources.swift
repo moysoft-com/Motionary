@@ -38,6 +38,7 @@ private final class ScratchTexturePool {
             available[key] = bucket
             pooledTextureCount -= 1
             pooledBytes -= estimatedBytes(of: texture)
+            let remainingPooledTextures = pooledTextureCount
             lock.unlock()
             os_signpost(
                 .event,
@@ -46,7 +47,7 @@ private final class ScratchTexturePool {
                 "%d x %d; pooled=%d",
                 width,
                 height,
-                pooledTextureCount
+                remainingPooledTextures
             )
             return texture
         }
@@ -509,6 +510,18 @@ final class MetalFrameResources {
             pixelFormat: texture.pixelFormat
         )
         reusableScratchTextures[key, default: []].append(texture)
+    }
+
+    /// A temporal subpass may recycle its intermediates after Core Image has
+    /// encoded their final reads. Preserve all surfaces owned by outer passes.
+    func activeScratchTextureIDs() -> Set<ObjectIdentifier> {
+        scratchTextureIDs.subtracting(reusableScratchTextureIDs)
+    }
+
+    func releaseScratchTextures(excluding protected: Set<ObjectIdentifier>) {
+        for texture in scratchTextures where !protected.contains(ObjectIdentifier(texture)) {
+            releaseScratchTexture(texture)
+        }
     }
 
     /// Runs after this frame's command buffer has reached a terminal state.

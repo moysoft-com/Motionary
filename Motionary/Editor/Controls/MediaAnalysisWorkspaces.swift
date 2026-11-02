@@ -225,6 +225,7 @@ struct RemoveBackgroundWorkspaceView: View {
 struct AutoBeatsWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let item: TimelineItem?
+    @State private var precision: AudioBeatModelPrecision = .fp16
 
     var body: some View {
         EditorWorkspaceShell(
@@ -240,16 +241,59 @@ struct AutoBeatsWorkspaceView: View {
             disablesContentWhenUnavailable: true
         ) {
             VStack(spacing: 14) {
+                Picker("Model precision", selection: $precision) {
+                    Text("Standard").tag(AudioBeatModelPrecision.fp16)
+                    Text("High precision").tag(AudioBeatModelPrecision.fp32)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Beat analysis model precision")
+                if precision == .fp32 {
+                    Text("High precision uses more processing time.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let analysis = audioItem?.beatAnalysis {
                     HStack(spacing: 18) {
                         BeatMetric(title: "Tempo", value: String(format: "%.1f BPM", analysis.bpm))
                         BeatMetric(title: "Markers", value: "\(analysis.markers.count)")
-                        BeatMetric(title: "Confidence", value: "\(Int(analysis.confidence * 100))%")
+                        BeatMetric(title: "Rhythm strength", value: "\(Int(analysis.confidence * 100))%")
+                    }
+
+                    if analysis.method == .signalFallback {
+                        Text("Signal-based fallback")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if !analysis.subbeats.isEmpty {
+                        Picker("Subdivisions", selection: Binding(
+                            get: { audioItem?.beatAnalysis?.subbeatDivision ?? 0 },
+                            set: { viewModel.setSelectedBeatSubdivision($0) }
+                        )) {
+                            Text("Beats").tag(0)
+                            Text("½").tag(2)
+                            Text("⅓").tag(3)
+                            Text("¼").tag(4)
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityLabel("Beat subdivisions")
+                    }
+
+                    if !suggestedCuts.isEmpty {
+                        Menu {
+                            ForEach(suggestedCuts) { cut in
+                                Button(String(format: "%.2f s", cut.timelineTime)) {
+                                    viewModel.seek(to: cut.timelineTime)
+                                }
+                            }
+                        } label: {
+                            Label("Suggested cuts", systemImage: "scissors")
+                        }
                     }
 
                     HStack(spacing: 8) {
                         EditorWorkspaceCommandButton(title: "Reanalyze", systemImage: "arrow.clockwise") {
-                            viewModel.analyzeSelectedAudioBeats()
+                            viewModel.analyzeSelectedAudioBeats(precision: precision)
                         }
 
                         EditorWorkspaceCommandButton(title: "Delete", systemImage: "trash", role: .destructive) {
@@ -266,12 +310,40 @@ struct AutoBeatsWorkspaceView: View {
                         title: "Analyze",
                         systemImage: "waveform.badge.magnifyingglass"
                     ) {
-                        viewModel.analyzeSelectedAudioBeats()
+                        viewModel.analyzeSelectedAudioBeats(precision: precision)
                     }
                 }
             }
             .disabled(viewModel.isPerformingLongTask)
         }
+        .onAppear { precision = audioItem?.beatAnalysis?.modelPrecision ?? .fp16 }
+        .onChange(of: audioItem?.id) { _, _ in
+            precision = audioItem?.beatAnalysis?.modelPrecision ?? .fp16
+        }
+    }
+
+    private struct SuggestedCut: Identifiable {
+        let sourceTime: Double
+        let timelineTime: Double
+        let score: Double
+        var id: Int64 { Int64((sourceTime * 1_000_000).rounded()) }
+    }
+
+    private var suggestedCuts: [SuggestedCut] {
+        guard let audioItem, let analysis = audioItem.beatAnalysis else { return [] }
+        return analysis.markers.compactMap { marker -> SuggestedCut? in
+            let cutTime = marker.audibleOnset ?? marker.sourceTime
+            guard let score = marker.editScore, score.isFinite,
+                  cutTime >= audioItem.sourceRange.start,
+                  cutTime <= audioItem.sourceRange.end else { return nil }
+            let local = audioItem.speedMap.timelineTime(
+                at: cutTime - audioItem.sourceRange.start,
+                sourceDuration: audioItem.sourceRange.duration
+            )
+            guard local >= 0.16, local <= audioItem.timelineDuration - 0.16 else { return nil }
+            return SuggestedCut(sourceTime: cutTime,
+                                timelineTime: audioItem.timelineStart + local, score: score)
+        }.sorted { $0.score > $1.score }.prefix(8).map { $0 }
     }
 
     private var audioItem: MediaTimelineItem? {

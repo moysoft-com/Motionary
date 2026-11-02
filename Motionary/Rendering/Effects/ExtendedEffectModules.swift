@@ -85,7 +85,15 @@ struct OpticalBlurEffectRenderer: EffectRenderModule {
                     y: image.extent.minY + image.extent.height * (1 - center.y)),
             ])
         }
-        return EffectRenderResult(image: output.cropped(to: image.extent))
+        // Optical kernels can accumulate slightly non-opaque alpha even with
+        // an opaque tiled input. Preserve the authored layer alpha, including
+        // foreground cutouts, rather than dimming it during compositing.
+        let opaque = output.unpremultiplyingAlpha().settingAlphaOne(in: image.extent)
+        let masked = opaque.applyingFilter("CIBlendWithAlphaMask", parameters: [
+            kCIInputBackgroundImageKey: CIImage(color: .clear).cropped(to: image.extent),
+            kCIInputMaskImageKey: image
+        ])
+        return EffectRenderResult(image: masked.cropped(to: image.extent))
     }
 }
 
@@ -128,8 +136,11 @@ struct EchoTrailsEffectRenderer: EffectRenderModule {
             guard weight > 0.0001 else { continue }
             let time = context.clipTime - Double(index) * spacing
             guard time >= 0 || context.temporalSource == nil else { continue }
-            var historical = try context.temporalSource?.image(at: max(time, 0), fitting: context.temporalSourceExtent ?? image.extent,
-                quality: context.quality) ?? image
+            var historical: CIImage
+            if let source = context.temporalSource {
+                historical = try source.image(at: max(time, 0),
+                    fitting: context.temporalSourceExtent ?? image.extent, quality: context.quality)
+            } else { historical = image }
             if context.temporalSource != nil {
                 let pastContext = EffectRenderContext(compositionTime: context.compositionTime - Double(index) * spacing,
                     clipTime: time, frameIndex: context.frameIndex - Int64((Double(index) * spacing / max(context.frameDuration, 0.0001)).rounded()),
@@ -158,5 +169,72 @@ struct EchoTrailsEffectRenderer: EffectRenderModule {
             totalWeight += weight
         }
         return EffectRenderResult(image: output)
+    }
+}
+
+struct CreativeEffectRenderer: EffectRenderModule {
+    let moduleID: EffectModuleID
+    let kind: MotionaryMetalEffectKind
+
+    func render(
+        _ image: CIImage, effect: EffectInstance, context: EffectRenderContext,
+        resources: MetalFrameResources
+    ) throws -> EffectRenderResult {
+        func v(_ id: EffectParameterID) -> Float { Float(scalar(id, in: effect, at: context.clipTime)) }
+        func angle() -> Float { Float(cyclicDegrees(.angle, in: effect, at: context.clipTime) * .pi / 180) }
+        func color(_ id: EffectParameterID) -> SIMD4<Float> {
+            guard case .color(let c)? = EffectRegistry.shared.resolvedValue(for: id, in: effect, at: context.clipTime)
+            else { return SIMD4(1, 1, 1, 1) }
+            return SIMD4(Float(c.red), Float(c.green), Float(c.blue), Float(c.alpha))
+        }
+        var p = SIMD4<Float>.zero
+        var q = SIMD4<Float>.zero
+        var extra = SIMD4<Float>(1, 1, 1, 1)
+        switch kind {
+        case .lightSweep:
+            p = SIMD4(v("position"), angle(), v("width"), v(.amount))
+            q = color("tintColor"); extra.x = q.w; q.w = v(.speed)
+        case .ribbedGlass:
+            p = SIMD4(v(.wavelength), v(.amount), angle(), v(.offset))
+        case .dither, .halftone:
+            p = color(.shadowColor); q = color(.highlightColor)
+            extra = SIMD4(p.w, q.w, 1, 1)
+            // Keep palette opacity independent of pattern geometry.
+            p.w = v(.amount); q.w = v(.contrast)
+        case .colorSplash:
+            p = SIMD4(v("tolerance"), v(.softness), v(.saturation), 0)
+            q = color("targetColor")
+        case .neonEdges:
+            p = SIMD4(v("width"), v(.threshold), v(.amount), v("background"))
+            q = color("tintColor")
+        default: throw MetalRenderingError.unavailableEffect(moduleID.rawValue)
+        }
+        let result = try MetalEffectSupport.renderSinglePass(
+            image, kind: kind, parameters: p,
+            center: SIMD2(angle(), 0), secondaryParameters: q, additionalParameters: extra, orientation: angle(),
+            margin: 0,
+            effect: effect, context: context, resources: resources)
+        guard kind == .neonEdges else { return result }
+        let glow = result.image.applyingFilter(
+            "CIBloom",
+            parameters: [
+                kCIInputRadiusKey: max(1, Double(v("width")) * min(image.extent.width, image.extent.height) * 5),
+                kCIInputIntensityKey: Double(v(.amount)) * 1.5
+            ]
+        ).cropped(to: image.extent)
+        // Bloom must not paint into transparent parts of a cutout layer.
+        let clear = CIImage(color: .clear).cropped(to: image.extent)
+        let opaqueGlow = glow.applyingFilter(
+            "CIColorMatrix",
+            parameters: [
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+            ])
+        let masked = opaqueGlow.applyingFilter(
+            "CIBlendWithAlphaMask",
+            parameters: [
+                kCIInputBackgroundImageKey: clear, kCIInputMaskImageKey: image
+            ])
+        return EffectRenderResult(image: masked.cropped(to: image.extent))
     }
 }

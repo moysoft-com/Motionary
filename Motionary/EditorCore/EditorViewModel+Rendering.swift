@@ -377,6 +377,7 @@ extension EditorViewModel {
         livePreviewPresentation.frame = nil
         livePreviewPresentation.setInteracting(false)
         renderService.livePreviewState.clearPausedFrameRenderer()
+        renderService.livePreviewState.invalidateComposedFrames()
         previewSeekGeneration &+= 1
         isPreviewSeekInFlight = false
         livePreviewFrameRefreshGeneration &+= 1
@@ -409,35 +410,6 @@ extension EditorViewModel {
         lastPreviewRenderedFrameAt = 0
         lastPreviewRenderedTimelineTime = nil
         renderService.invalidatePreviewGraph()
-    }
-
-    func installInteractiveScrubPreviewCompositionIfNeeded() {
-        guard project.containsGeneratedPreviewLayer else { return }
-        let generation = scrubSeekGeneration
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let prepared = try await renderService.preparePreview(
-                    for: project,
-                    quality: .interactive,
-                    invalidation: [.previewFrame],
-                    renderSessionID: previewRenderSessionID
-                )
-                guard !Task.isCancelled,
-                    self.isScrubbing,
-                    self.scrubSeekGeneration == generation,
-                    let prepared,
-                    let item = self.player?.currentItem
-                else { return }
-                item.videoComposition = prepared.videoComposition
-            } catch is CancellationError {
-                return
-            } catch {
-                AppLogger.rendering.warning(
-                    "Failed to install interactive scrub preview: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-        }
     }
 
     func installPreviewItemHealthObservers(for item: AVPlayerItem) {
@@ -540,7 +512,13 @@ extension EditorViewModel {
                     // presentation during fast scrubbing.
                     if self.isScrubbing,
                         let frame = notification.userInfo?["frame"] {
-                        self.livePreviewPresentation.frame = (frame as! CVPixelBuffer)
+                        let currentFrame = self.cachedFrameAtCurrentScrubTime()
+                        self.livePreviewPresentation.setFrame(
+                            currentFrame ?? (frame as! CVPixelBuffer),
+                            at: currentFrame == nil
+                                ? time
+                                : self.currentScrubPresentationTime()
+                        )
                     }
                 }
             }

@@ -437,7 +437,6 @@ struct EditorPreviewWorkspaceLayout<Preview: View, Controls: View, Workspace: Vi
                 .opacity(hidesPreview ? 0 : 1)
                 .allowsHitTesting(!hidesPreview)
                 .accessibilityHidden(hidesPreview)
-                .clipped()
 
                 if !usesSideWorkspace && !keepsTimelineVisible {
                     workspace()

@@ -17,6 +17,13 @@ extension EditorViewModel {
         scratchAudio.update(to: clamped)
         let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
         let target = floor(clampedPlayableTime(clamped) / frameDuration + 0.000_001) * frameDuration
+        let presentationTime = livePreviewPresentationTime(target)
+        if let frame = renderService.livePreviewState.cachedFrame(at: presentationTime,
+                                                                  sessionID: previewRenderSessionID) {
+            pendingScrubSeekTime = nil
+            livePreviewPresentation.setFrame(frame, at: presentationTime)
+            return
+        }
         pendingScrubSeekTime = CMTimeGetSeconds(CMTime(
             seconds: target, preferredTimescale: 600
         ))
@@ -103,6 +110,37 @@ extension EditorViewModel {
             "target=%.3f",
             target
         )
+        // Generated/image-only intervals need no decoder movement. Reuse the
+        // live Metal renderer at the requested time, at normal preview quality.
+        if renderService.livePreviewState.renderPausedFrame(
+            at: livePreviewPresentationTime(target), sessionID: previewRenderSessionID,
+            completion: { [weak self, weak player] frame in
+                Task { @MainActor in
+                    guard let self, let player, self.player === player,
+                        self.scrubSeekGeneration == seekGeneration,
+                        self.scrubSessionGeneration == sessionGeneration else { return }
+                    os_signpost(.end, log: TimelinePerformanceSignposts.log,
+                                name: "Scrub Seek", signpostID: signpostID)
+                    self.isScrubSeekInFlight = false
+                    self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
+                    guard self.isScrubbing else { return }
+                    if let frame {
+                        let currentFrame = self.cachedFrameAtCurrentScrubTime()
+                        self.livePreviewPresentation.setFrame(
+                            currentFrame ?? frame,
+                            at: currentFrame == nil
+                                ? self.livePreviewPresentationTime(target)
+                                : self.currentScrubPresentationTime()
+                        )
+                    } else {
+                        self.renderService.livePreviewState.clearPausedFrameRenderer()
+                        self.lastIssuedScrubSeekTime = nil
+                        if self.pendingScrubSeekTime == nil { self.pendingScrubSeekTime = target }
+                    }
+                    if self.pendingScrubSeekTime != nil { self.scheduleLatestScrubSeek() }
+                }
+            }
+        ) { return }
         Task { [weak self, weak player] in
             guard let self, let player,
                 self.player === player,
@@ -113,8 +151,8 @@ extension EditorViewModel {
             let didSeek = await self.boundedSeek(
                 player: player,
                 to: self.livePreviewPresentationTime(target),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero,
+                toleranceBefore: CMTime(seconds: 1 / Double(max(self.project.renderSettings.frameRate, 1)), preferredTimescale: 600),
+                toleranceAfter: CMTime(seconds: 1 / Double(max(self.project.renderSettings.frameRate, 1)), preferredTimescale: 600),
                 timeoutNanoseconds: 2_500_000_000
             )
             os_signpost(
@@ -141,6 +179,19 @@ extension EditorViewModel {
                 self.scheduleLatestScrubSeek()
             }
         }
+    }
+
+    func cachedFrameAtCurrentScrubTime() -> CVPixelBuffer? {
+        let step = 1 / Double(max(project.renderSettings.frameRate, 1))
+        let time = floor(clampedPlayableTime(currentTime) / step + 0.000_001) * step
+        return renderService.livePreviewState.cachedFrame(at: livePreviewPresentationTime(time),
+                                                          sessionID: previewRenderSessionID)
+    }
+
+    func currentScrubPresentationTime() -> Double {
+        let step = 1 / Double(max(project.renderSettings.frameRate, 1))
+        let time = floor(clampedPlayableTime(currentTime) / step + 0.000_001) * step
+        return livePreviewPresentationTime(time)
     }
 
     private func scrubSeekMinimumInterval() -> CFTimeInterval {

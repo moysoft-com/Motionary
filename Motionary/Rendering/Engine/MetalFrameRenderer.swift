@@ -19,23 +19,13 @@ enum ShapeRasterizationPolicy {
 }
 
 enum GeneratedLayerSamplingPolicy {
-    /// Interactive text rasterization is capped at 30 distinct samples per
-    /// second on higher-frame-rate projects. It never drops below the native
-    /// project cadence for 30 fps and slower timelines, avoiding the visibly
-    /// stepped 12 fps animation cadence of the previous policy.
+    /// Evaluate generated content at the requested time on every preview path.
     static func sourceTime(
         _ localTime: Double,
         frameDuration: Double,
         quality: RenderQualityProfile
     ) -> Double {
-        guard quality == .interactive else { return localTime }
-        let safeTime = localTime.isFinite ? max(localTime, 0) : 0
-        let safeFrameDuration =
-            frameDuration.isFinite && frameDuration > 0
-            ? frameDuration
-            : 1 / 30
-        let step = max(safeFrameDuration, 1 / 30)
-        return ((safeTime / step) + 1e-9).rounded(.down) * step
+        localTime
     }
 }
 
@@ -195,8 +185,16 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 colorSpace: resources.generatedColorSpace
             ) ?? CIColor.black
             var output = CIImage(color: backgroundColor).cropped(to: canvasRect)
+            let initialBackground = output
+            var motionScene = EffectMotionScene { _, _ in initialBackground }
 
-            for clip in activeClips(in: plan, at: safeTime) {
+            let active = activeClips(in: plan, at: safeTime)
+            let needsMotionScene = active.contains { clip in
+                clip.isAdjustmentLayer && clip.effectStack.effects.contains {
+                    $0.isEnabled && $0.moduleID == .motionBlur
+                }
+            }
+            for clip in active {
                 guard !isCancelled() else { throw MetalRenderingError.cancelled }
                 let localTime = max(0, safeTime - clip.timelineStart)
                 if clip.isAdjustmentLayer {
@@ -209,8 +207,18 @@ final class MetalFrameRenderer: @unchecked Sendable {
                             compositionTime: safeTime,
                             frameIndex: frameIndex,
                             plan: plan,
-                            resources: frameResources
+                            resources: frameResources,
+                            motionScene: motionScene
                         )
+                    }
+                    if needsMotionScene {
+                        let previousScene = motionScene
+                        motionScene = EffectMotionScene(hasAnimatedTransforms: previousScene.hasAnimatedTransforms) { offset, components in
+                            try self.applyAdjustmentLayer(clip,
+                                to: previousScene.sample(offset, components), canvasRect: canvasRect,
+                                at: localTime, compositionTime: safeTime, frameIndex: frameIndex,
+                                plan: plan, resources: frameResources)
+                        }
                     }
                     continue
                 }
@@ -259,12 +267,19 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     .intersects(plan.viewport.overscanRect)
                 else { continue }
 
+                let hasObjectMotionBlur = clip.effectStack.effects.contains {
+                    $0.isEnabled && $0.moduleID == .motionBlur
+                }
                 image = try measured("Adjustments and Effects", id: signpostID) {
-                    let adjusted = applyAdjustments(clip.adjustments, to: image, at: localTime)
+                    let colorAdjusted = applyAdjustments(clip.adjustments, to: image, at: localTime)
+                    let adjusted = hasObjectMotionBlur ? applyMask(clip.mask, to: colorAdjusted) : colorAdjusted
                     let coordinates = LayerEffectCoordinates(
                         isGeneratedLayer: isGeneratedLayer,
                         outputScale: plan.renderScale,
-                        rasterScaleCorrection: sourceResult.rasterScaleCorrection
+                        rasterScaleCorrection: sourceResult.rasterScaleCorrection,
+                        mediaSize: image.extent.size,
+                        canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
+                            height: plan.renderSize.height / plan.renderScale)
                     )
                     let effectOutput = try effectRegistry.render(
                         clip.effectStack,
@@ -277,7 +292,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
                             renderScale: coordinates.renderScale,
                             quality: plan.quality,
                             temporalSource: clip.temporalSource,
-                            frameDuration: plan.frameDuration
+                            frameDuration: plan.frameDuration,
+                            layerMotion: EffectLayerMotion(transform: clip.transform,
+                                canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
+                                    height: plan.renderSize.height / plan.renderScale),
+                                isGenerated: isGeneratedLayer)
                         ),
                         resources: frameResources,
                         failurePolicy: plan.failurePolicy
@@ -289,7 +308,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     if let textSample = sourceResult.textAnimationSample {
                         transformed = applyClipReveal(textSample.clipReveal, to: transformed)
                     }
-                    transformed = applyMask(clip.mask, to: transformed)
+                    if !hasObjectMotionBlur { transformed = applyMask(clip.mask, to: transformed) }
                     transformed = place(
                         transformed,
                         placementExtent: placementExtent,
@@ -303,6 +322,26 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     var opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
                     opacity *= sourceResult.textAnimationSample?.opacity ?? 1
                     return applyOpacity(opacity, to: transformed)
+                }
+                if needsMotionScene {
+                    // Freeze media pixels at the current frame; only placement is
+                    // resampled when an adjustment layer integrates the scene below.
+                    let frozenImage = image
+                    let previousScene = motionScene
+                    let motion = EffectLayerMotion(transform: clip.transform,
+                        canvasSize: plan.renderSize, isGenerated: isGeneratedLayer)
+                    let currentPlacement = motion.placement(at: localTime, bounds: placementExtent)
+                    motionScene = EffectMotionScene(hasAnimatedTransforms: previousScene.hasAnimatedTransforms
+                        || !clip.transform.positionX.keyframes.isEmpty || !clip.transform.positionY.keyframes.isEmpty
+                        || !clip.transform.rotationDegrees.keyframes.isEmpty || !clip.transform.scale.keyframes.isEmpty) { offset, components in
+                        let relative = currentPlacement.inverted().concatenating(
+                            motion.placement(at: max(localTime - offset, 0), bounds: placementExtent,
+                                referenceTime: localTime, components: components))
+                        return try MetalLayerCompositor.blend(
+                            foreground: frozenImage.transformed(by: relative),
+                            background: previousScene.sample(offset, components), in: canvasRect,
+                            mode: clip.blendMode, intensity: clip.blendIntensity, resources: frameResources)
+                    }
                 }
                 output = try measured("Blend Pass", id: signpostID) {
                     try MetalLayerCompositor.blend(
@@ -340,7 +379,9 @@ final class MetalFrameRenderer: @unchecked Sendable {
         to image: CIImage,
         at time: Double,
         renderScale: CGFloat,
-        quality: RenderQualityProfile = .balanced
+        quality: RenderQualityProfile = .balanced,
+        temporalSource: EffectTemporalSource? = nil,
+        layerMotion: EffectLayerMotion? = nil
     ) throws -> CIImage {
         let frame = try resources.beginFrame()
         let sourceExtent = image.extent.integral
@@ -353,7 +394,9 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 frameIndex: Int64((time * 30).rounded()),
                 itemID: UUID(uuidString: "3F205CA2-736B-4DDD-A420-4E57033F9991")!,
                 renderScale: renderScale,
-                quality: quality
+                quality: quality,
+                temporalSource: temporalSource,
+                layerMotion: layerMotion
             ),
             resources: frame,
             failurePolicy: .skipUnavailableEffects
@@ -552,12 +595,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
     }
 
     private func generatedLayerMaximumTextureDimension(for plan: FrameRenderPlan) -> Int {
-        switch plan.quality {
-        case .interactive:
-            return GeneratedRasterPolicy.interactiveMaximumTextureDimension
-        case .balanced, .export:
-            return GeneratedRasterPolicy.maximumTextureDimension
-        }
+        GeneratedRasterPolicy.maximumTextureDimension
     }
 
     private func estimatedGeneratedPlacementBounds(
@@ -616,9 +654,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
         sourceFrame: SourceFrameProvider,
         resources frameResources: MetalFrameResources
     ) throws -> SourceResult {
-        // Shape geometry is a cheap Metal kernel and must follow keyframes at
-        // the actual frame time. Text rasterization remains quantized only in
-        // interactive quality because glyph layout is substantially heavier.
+        // Shapes and text follow keyframes at the actual requested frame time.
         let generatedSourceTime = generatedPreparation?.sourceTime ?? localTime
         let usesProjectPixels = clip.effectStack.effects.contains(where: { $0.isEnabled })
         let sourceScale = usesProjectPixels ? 1 : plan.renderScale
@@ -774,7 +810,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
         compositionTime: Double,
         frameIndex: Int64,
         plan: FrameRenderPlan,
-        resources frameResources: MetalFrameResources
+        resources frameResources: MetalFrameResources,
+        motionScene: EffectMotionScene? = nil
     ) throws -> CIImage {
         if adjustmentLayerIsNoOp(clip, at: localTime) {
             return background
@@ -797,7 +834,15 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 frameIndex: frameIndex,
                 itemID: clip.clipID,
                 renderScale: coordinates.renderScale,
-                quality: plan.quality
+                quality: plan.quality,
+                frameDuration: plan.frameDuration,
+                motionScene: motionScene.map { scene in
+                    EffectMotionScene(hasAnimatedTransforms: scene.hasAnimatedTransforms) { offset, components in
+                        self.applyAdjustments(clip.adjustments,
+                            to: try scene.sample(offset, components), at: localTime)
+                            .transformed(by: coordinates.inputTransform)
+                    }
+                }
             ),
             resources: frameResources,
             failurePolicy: plan.failurePolicy

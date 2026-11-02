@@ -215,6 +215,23 @@ struct DomainModelTests {
         #expect(result.content.editorProject.title == "First")
     }
 
+    @Test func savingAfterPrimaryCorruptionPreservesLastValidBackup() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = ProjectRepository(rootURL: root)
+        let id = UUID()
+        for title in ["Recovery", "Second"] {
+            try await repository.save(ProjectContent(editorProject: .empty(title: title)), projectID: id)
+        }
+        let primary = root.appendingPathComponent("project_\(id.uuidString)/content.json")
+        try Data("corrupt".utf8).write(to: primary)
+        try await repository.save(ProjectContent(editorProject: .empty(title: "Third")), projectID: id)
+        try Data("corrupt again".utf8).write(to: primary)
+        let recovered = try await repository.load(projectID: id)
+        #expect(recovered.source == .backup)
+        #expect(recovered.content.editorProject.title == "Recovery")
+    }
+
     @Test func repositoryReconcilesDashboardTitleBeforeOpeningEditor() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

@@ -35,6 +35,12 @@ struct PreviewRendererView: UIViewRepresentable {
         uiView.playerLayer.backgroundColor = UIColor.clear.cgColor
         uiView.playerLayer.player = player
     }
+
+    static func dismantleUIView(_ uiView: PreviewPlayerContainerView, coordinator: Void) {
+        // SwiftUI may retain the removed view graph. Release its media client
+        // immediately instead of keeping the previous player's layer attached.
+        uiView.playerLayer.player = nil
+    }
 }
 
 /// Delivers completed frames straight to UIKit. Routing GPU completions
@@ -42,12 +48,10 @@ struct PreviewRendererView: UIViewRepresentable {
 @MainActor
 final class LivePreviewPresentation: ObservableObject {
     private var storedFrame: CVPixelBuffer?
+    @Published private(set) var frameTime: Double?
     var frame: CVPixelBuffer? {
         get { storedFrame }
-        set {
-            storedFrame = newValue
-            surface?.present(newValue)
-        }
+        set { setFrame(newValue, at: nil) }
     }
     private weak var surface: LivePreviewSampleView?
     private var isInteracting = false
@@ -62,9 +66,16 @@ final class LivePreviewPresentation: ObservableObject {
         surface?.setInteracting(active)
     }
 
+    func setFrame(_ frame: CVPixelBuffer?, at time: Double?) {
+        storedFrame = frame
+        frameTime = frame == nil ? nil : time
+        surface?.present(frame)
+    }
+
     func attach(_ view: LivePreviewSampleView) {
         guard surface !== view else { return }
         surface?.setInteracting(false)
+        surface?.present(nil)
         surface = view
         view.setInteracting(isInteracting)
         view.present(frame)
@@ -73,6 +84,7 @@ final class LivePreviewPresentation: ObservableObject {
     func detach(_ view: LivePreviewSampleView) {
         guard surface === view else { return }
         view.setInteracting(false)
+        view.present(nil)
         surface = nil
     }
 
@@ -141,6 +153,7 @@ final class LivePreviewSampleView: UIView {
             waitingFrame = nil
             updateDisplayLink()
             presentedFrame = nil
+            formatDescription = nil
             displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true)
             isHidden = true
             return

@@ -1,0 +1,187 @@
+{
+  "date": "2026-11-02",
+  "dataset": {
+    "name": "GTZAN",
+    "tracks": 998,
+    "skipped": [
+      {
+        "file": "jazz.00054.wav",
+        "error": "Error opening <_io.BytesIO object at 0x1224dcbd0>: Format not recognised."
+      }
+    ],
+    "audio_sha256": "01eb047f4d8bc85d8ab7b655ec99a741836fd8c57f527840366dc2ca0c1f7f6f",
+    "annotation_commit": "fd9fcc0896cb78730bae735102c8753ef3a3badd",
+    "trim_seconds": 5,
+    "f1_tolerance_seconds": 0.07
+  },
+  "mean_f1": {
+    "direct": 0.8810073856100143,
+    "grid": 0.8775843728522467,
+    "refined": 0.87340484486008,
+    "downbeats": 0.7592719246270958
+  },
+  "mean_cmlt": {
+    "direct": 0.7895997633191852,
+    "grid": 0.7975169879533653,
+    "refined": 0.7921170593225818
+  },
+  "per_genre_f1": {
+    "blues": {
+      "direct": 0.8101193525123389,
+      "grid": 0.7985873738748741,
+      "refined": 0.7929454489861425,
+      "downbeats": 0.6070113619748255
+    },
+    "classical": {
+      "direct": 0.6540429203186753,
+      "grid": 0.6539753963076705,
+      "refined": 0.6460926571484731,
+      "downbeats": 0.4574267747035733
+    },
+    "country": {
+      "direct": 0.9169401754707798,
+      "grid": 0.9182512182105902,
+      "refined": 0.9168264839358704,
+      "downbeats": 0.898475436855959
+    },
+    "disco": {
+      "direct": 0.968735930674967,
+      "grid": 0.9695386349296709,
+      "refined": 0.965954535282718,
+      "downbeats": 0.9448697266248726
+    },
+    "hiphop": {
+      "direct": 0.9757815852134635,
+      "grid": 0.9750165343782856,
+      "refined": 0.9722705713897476,
+      "downbeats": 0.8720510461488037
+    },
+    "jazz": {
+      "direct": 0.8163189337966746,
+      "grid": 0.8016633136525777,
+      "refined": 0.7927140900320567,
+      "downbeats": 0.6564229545143871
+    },
+    "metal": {
+      "direct": 0.8872934888677056,
+      "grid": 0.8793025093890482,
+      "refined": 0.8760513909061082,
+      "downbeats": 0.7850265478606637
+    },
+    "pop": {
+      "direct": 0.945235937058805,
+      "grid": 0.9466931457503556,
+      "refined": 0.9466271000810021,
+      "downbeats": 0.9043822983956494
+    },
+    "reggae": {
+      "direct": 0.9070115790796106,
+      "grid": 0.9047475353733232,
+      "refined": 0.9014857071159685,
+      "downbeats": 0.6533951262023882
+    },
+    "rock": {
+      "direct": 0.9282071105236861,
+      "grid": 0.9275804876892836,
+      "refined": 0.9225543647969908,
+      "downbeats": 0.8115707153044605
+    }
+  },
+  "parity_fp16": {
+    "tracks": 500,
+    "beat": {
+      "mean_logit_mae": 0.11550827738732516,
+      "worst_logit_difference": 7.670913219451904,
+      "exact_peak_tracks": 142,
+      "mean_peak_f1_20ms": 0.9917821428247086
+    },
+    "downbeat": {
+      "mean_logit_mae": 0.1026437248269981,
+      "worst_logit_difference": 6.970126390457153,
+      "exact_peak_tracks": 242,
+      "mean_peak_f1_20ms": 0.9854622115974272
+    }
+  },
+  "parity_fp32": {
+    "tracks": 500,
+    "beat": {
+      "mean_logit_mae": 0.06524769302597128,
+      "worst_logit_difference": 7.684910297393799,
+      "exact_peak_tracks": 219,
+      "mean_peak_f1_20ms": 0.9964895959948156
+    },
+    "downbeat": {
+      "mean_logit_mae": 0.05310138504317065,
+      "worst_logit_difference": 7.025446176528931,
+      "exact_peak_tracks": 315,
+      "mean_peak_f1_20ms": 0.9932331997598292
+    }
+  },
+  "calibration": {
+    "train_tracks": 498,
+    "test_tracks": 500,
+    "raw": {
+      "n": 24731,
+      "brier": 0.103288070129358,
+      "ece_10_bins": 0.09542216969806452
+    },
+    "calibrated": {
+      "n": 24731,
+      "brier": 0.09080260325404908,
+      "ece_10_bins": 0.01697441020015651
+    },
+    "genres": {
+      "blues": {
+        "n": 2718,
+        "brier": 0.15259713253616577,
+        "ece_10_bins": 0.0904132263698195
+      },
+      "classical": {
+        "n": 2217,
+        "brier": 0.21913471170391458,
+        "ece_10_bins": 0.10863295356964797
+      },
+      "country": {
+        "n": 2237,
+        "brier": 0.056801683882466994,
+        "ece_10_bins": 0.03567058816332642
+      },
+      "disco": {
+        "n": 2483,
+        "brier": 0.036779261536407995,
+        "ece_10_bins": 0.043045220875729345
+      },
+      "hiphop": {
+        "n": 2178,
+        "brier": 0.029682248576944577,
+        "ece_10_bins": 0.05666972550282878
+      },
+      "jazz": {
+        "n": 2830,
+        "brier": 0.1191284937423029,
+        "ece_10_bins": 0.04416750756059932
+      },
+      "metal": {
+        "n": 2910,
+        "brier": 0.11475015544187149,
+        "ece_10_bins": 0.05387044701513617
+      },
+      "pop": {
+        "n": 2178,
+        "brier": 0.06533658057635247,
+        "ece_10_bins": 0.06467249115086937
+      },
+      "reggae": {
+        "n": 2659,
+        "brier": 0.042549917829508684,
+        "ece_10_bins": 0.05133298889424786
+      },
+      "rock": {
+        "n": 2321,
+        "brier": 0.05838966597325417,
+        "ece_10_bins": 0.027426449686880686
+      }
+    }
+  },
+  "reference_casm_commit": "438c170f7f0dc727f0a7499f7cb758b8d4906f9c"
+}

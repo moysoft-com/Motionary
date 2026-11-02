@@ -20,12 +20,15 @@ struct HomeView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsSearchHeader = false
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedProject: ProjectEditorSelection?
     @State private var editingProjectID: UUID?
     @State private var newProjectMediaItems: [PhotosPickerItem] = []
     private let newProjectRequest: UUID?
     private let onEditorPresentationChange: (Bool) -> Void
     @State private var isMediaPickerPresented = false
+    @State private var isHomeVisible = false
+    @State private var lastPresentedNewProjectRequest: UUID?
     @State private var isCreatingProject = false
     @State private var errorMessage: String?
 
@@ -164,11 +167,18 @@ struct HomeView: View {
             selection: $newProjectMediaItems,
             matching: .any(of: [.images, .videos])
         )
-        .onChange(of: newProjectRequest, initial: true) { _, request in
-            guard request != nil, !isCreatingProject else { return }
+        .onAppear { isHomeVisible = true }
+        .onDisappear { isHomeVisible = false }
+        .task(id: isHomeVisible && scenePhase == .active ? newProjectRequest : nil) {
+            // A UIKit host can replace its root before the new SwiftUI tree
+            // has a presenter. Consume each shortcut only after attachment.
+            await Task.yield()
+            guard !Task.isCancelled, let request = newProjectRequest,
+                request != lastPresentedNewProjectRequest, !isCreatingProject else { return }
             dismissProjectSearch()
             selectedProject = nil
             editingProjectID = nil
+            lastPresentedNewProjectRequest = request
             isMediaPickerPresented = true
         }
         .animation(.easeInOut(duration: 0.18), value: selectedProject?.id)

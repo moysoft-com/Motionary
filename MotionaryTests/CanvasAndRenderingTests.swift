@@ -1180,51 +1180,15 @@ struct CanvasAndRenderingTests {
         #expect(scaleResolved.hasTransientRasterScaleOverride)
     }
 
-    @Test func interactiveGeneratedLayersSampleAtThirtyFPSOrNativeCadence() {
-        let sixtyFPSFrame = 1.0 / 60.0
-        #expect(
-            GeneratedLayerSamplingPolicy.sourceTime(
-                sixtyFPSFrame,
-                frameDuration: sixtyFPSFrame,
-                quality: .interactive
-            ) == 0
-        )
-        #expect(
-            abs(
-                GeneratedLayerSamplingPolicy.sourceTime(
-                    sixtyFPSFrame * 2,
-                    frameDuration: sixtyFPSFrame,
-                    quality: .interactive
-                ) - 1.0 / 30.0
-            ) < 0.000_001
-        )
-        #expect(
-            abs(
-                GeneratedLayerSamplingPolicy.sourceTime(
-                    sixtyFPSFrame * 3,
-                    frameDuration: sixtyFPSFrame,
-                    quality: .interactive
-                ) - 1.0 / 30.0
-            ) < 0.000_001
-        )
-
-        let twentyFourFPSFrame = 1.0 / 24.0
-        #expect(
-            abs(
-                GeneratedLayerSamplingPolicy.sourceTime(
-                    twentyFourFPSFrame,
-                    frameDuration: twentyFourFPSFrame,
-                    quality: .interactive
-                ) - twentyFourFPSFrame
-            ) < 0.000_001
-        )
-        #expect(
-            GeneratedLayerSamplingPolicy.sourceTime(
-                0.017,
-                frameDuration: sixtyFPSFrame,
-                quality: .export
-            ) == 0.017
-        )
+    @Test func generatedLayersKeepRequestedTimesAtEveryPreviewCadence() {
+        for fps in [24.0, 30, 60, 120] {
+            for time in [1 / fps, 2 / fps, 3 / fps, 0.017] {
+                for quality in [RenderQualityProfile.interactive, .balanced, .export] {
+                    #expect(GeneratedLayerSamplingPolicy.sourceTime(time,
+                        frameDuration: 1 / fps, quality: quality) == time)
+                }
+            }
+        }
     }
 
     @Test func textRasterBudgetFallbackPreservesLogicalGeometry() {
@@ -3067,7 +3031,6 @@ struct CanvasAndRenderingTests {
             duration: 5,
             frameRate: 30
         )
-        defer { try? FileManager.default.removeItem(at: url) }
 
         let asset = AVURLAsset(url: url)
         let tracks = try await asset.loadTracks(withMediaType: .video)
@@ -3075,8 +3038,8 @@ struct CanvasAndRenderingTests {
         let naturalSize = try await track.load(.naturalSize)
 
         #expect(tracks.count == 1)
-        #expect(Int(naturalSize.width.rounded()) == 16)
-        #expect(Int(naturalSize.height.rounded()) == 16)
+        #expect(Int(naturalSize.width.rounded()) == 64)
+        #expect(Int(naturalSize.height.rounded()) == 64)
         #expect(abs(CMTimeGetSeconds(try await asset.load(.duration)) - 5) < 0.05)
     }
 

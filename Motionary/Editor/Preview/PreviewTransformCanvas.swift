@@ -1,6 +1,7 @@
 // Preview hit testing, selection, snapping, and direct manipulation.
 // Rendered pixels stay exclusively in the AVPlayer-backed compositor surface.
 
+import AVFoundation
 import CoreImage
 import SwiftUI
 import UIKit
@@ -460,6 +461,7 @@ struct PreviewTransformCanvas: View {
     @ObservedObject private var timelineState: TimelineState
     @ObservedObject private var previewState: PreviewState
     @ObservedObject private var previewCanvasState: PreviewCanvasState
+    @ObservedObject private var livePreviewPresentation: LivePreviewPresentation
     let canvasFrame: CGRect
 
     @State private var dragStartTransform: ClipTransform?
@@ -497,6 +499,7 @@ struct PreviewTransformCanvas: View {
         _timelineState = ObservedObject(wrappedValue: viewModel.timelineState)
         _previewState = ObservedObject(wrappedValue: viewModel.previewState)
         _previewCanvasState = ObservedObject(wrappedValue: viewModel.previewCanvasState)
+        _livePreviewPresentation = ObservedObject(wrappedValue: viewModel.livePreviewPresentation)
         self.canvasFrame = canvasFrame
         _visualIntervalIndex = State(
             initialValue: PreviewVisualIntervalIndex(project: viewModel.project)
@@ -613,88 +616,15 @@ struct PreviewTransformCanvas: View {
             .gesture(previewSelectionGesture)
             .position(x: canvasFrame.midX, y: canvasFrame.midY)
 
-            if let clip = selectedVisualClip,
-                let frame = previewFrame(
-                    for: clip,
-                    transform: liveTransform ?? clip.transform
+            // Sample AVPlayer's clock at display cadence so animated transforms
+            // keep pace between the editor's coarser periodic time updates.
+            TimelineView(
+                .animation(
+                    minimumInterval: 1 / Double(max(livePreviewPresentation.maximumFramesPerSecond, 1)),
+                    paused: !playbackState.isPlaying
                 )
-            {
-                PreviewSelectionBox(
-                    frame: selectionFrame(from: frame),
-                    onDelete: viewModel.deleteSelectedClip,
-                    onDuplicate: viewModel.duplicateSelectedClip,
-                    onTap: handleSelectionBoxTap,
-                    onTransformChanged: { scaleFactor, rotationDelta in
-                        updateCombinedHandle(
-                            scaleFactor: scaleFactor,
-                            rotationDelta: rotationDelta,
-                            for: clip
-                        )
-                    },
-                    onTransformEnded: {
-                        finishPreviewGesture(.combinedHandle, itemID: clip.id)
-                    }
-                )
-                .gesture(dragGesture(for: clip, frame: frame))
-                .simultaneousGesture(scaleGesture(for: clip))
-                .simultaneousGesture(rotationGesture(for: clip))
-                .id(clip.id)
-            }
-
-            if let text = selectedTextItem,
-                let frame = previewFrame(
-                    for: text,
-                    transform: liveTransform ?? text.visuals.transform
-                )
-            {
-                PreviewSelectionBox(
-                    frame: selectionFrame(from: frame),
-                    onDelete: viewModel.deleteSelectedClip,
-                    onDuplicate: viewModel.duplicateSelectedClip,
-                    onTap: handleSelectionBoxTap,
-                    onTransformChanged: { scaleFactor, rotationDelta in
-                        updateCombinedHandle(
-                            scaleFactor: scaleFactor,
-                            rotationDelta: rotationDelta,
-                            for: text
-                        )
-                    },
-                    onTransformEnded: {
-                        finishPreviewGesture(.combinedHandle, itemID: text.id)
-                    }
-                )
-                .gesture(dragGesture(for: text, frame: frame))
-                .simultaneousGesture(scaleGesture(for: text))
-                .simultaneousGesture(rotationGesture(for: text))
-                .id(text.id)
-            }
-
-            if let adjustment = selectedAdjustmentItem {
-                let frame = previewFrame(
-                    for: adjustment,
-                    transform: liveTransform ?? adjustment.visuals.transform
-                )
-                PreviewSelectionBox(
-                    frame: selectionFrame(from: frame),
-                    style: .adjustment,
-                    onDelete: viewModel.deleteSelectedClip,
-                    onDuplicate: viewModel.duplicateSelectedClip,
-                    onTap: handleSelectionBoxTap,
-                    onTransformChanged: { scaleFactor, rotationDelta in
-                        updateCombinedHandle(
-                            scaleFactor: scaleFactor,
-                            rotationDelta: rotationDelta,
-                            for: adjustment
-                        )
-                    },
-                    onTransformEnded: {
-                        finishPreviewGesture(.combinedHandle, itemID: adjustment.id)
-                    }
-                )
-                .gesture(dragGesture(for: adjustment, frame: frame))
-                .simultaneousGesture(scaleGesture(for: adjustment))
-                .simultaneousGesture(rotationGesture(for: adjustment))
-                .id(adjustment.id)
+            ) { _ in
+                selectionOverlay
             }
         }
         .coordinateSpace(name: "PreviewTransformCanvasRoot")
@@ -741,6 +671,110 @@ struct PreviewTransformCanvas: View {
 
     private var isLiveProxyVisible: Bool {
         isTransforming || isCommitPresenting
+    }
+
+    private var previewTime: Double {
+        if playbackState.isPlaying, let player = viewModel.player {
+            let playerTime = CMTimeGetSeconds(player.currentTime())
+            if playerTime.isFinite { return max(playerTime, 0) }
+        }
+        if playbackState.isScrubbing, let frameTime = livePreviewPresentation.frameTime {
+            return frameTime
+        }
+        return playbackState.currentTime
+    }
+
+    @ViewBuilder
+    private var selectionOverlay: some View {
+        ZStack {
+            if isSelectedItemActive,
+                let clip = selectedVisualClip,
+                let frame = previewFrame(
+                    for: clip,
+                    transform: liveTransform ?? clip.transform
+                )
+            {
+                PreviewSelectionBox(
+                    frame: selectionFrame(from: frame),
+                    onDelete: viewModel.deleteSelectedClip,
+                    onDuplicate: viewModel.duplicateSelectedClip,
+                    onTap: handleSelectionBoxTap,
+                    onTransformChanged: { scaleFactor, rotationDelta in
+                        updateCombinedHandle(
+                            scaleFactor: scaleFactor,
+                            rotationDelta: rotationDelta,
+                            for: clip
+                        )
+                    },
+                    onTransformEnded: {
+                        finishPreviewGesture(.combinedHandle, itemID: clip.id)
+                    }
+                )
+                .gesture(dragGesture(for: clip, frame: frame))
+                .simultaneousGesture(scaleGesture(for: clip))
+                .simultaneousGesture(rotationGesture(for: clip))
+                .id(clip.id)
+            }
+
+            if isSelectedItemActive,
+                let text = selectedTextItem,
+                let frame = previewFrame(
+                    for: text,
+                    transform: liveTransform ?? text.visuals.transform
+                )
+            {
+                PreviewSelectionBox(
+                    frame: selectionFrame(from: frame),
+                    onDelete: viewModel.deleteSelectedClip,
+                    onDuplicate: viewModel.duplicateSelectedClip,
+                    onTap: handleSelectionBoxTap,
+                    onTransformChanged: { scaleFactor, rotationDelta in
+                        updateCombinedHandle(
+                            scaleFactor: scaleFactor,
+                            rotationDelta: rotationDelta,
+                            for: text
+                        )
+                    },
+                    onTransformEnded: {
+                        finishPreviewGesture(.combinedHandle, itemID: text.id)
+                    }
+                )
+                .gesture(dragGesture(for: text, frame: frame))
+                .simultaneousGesture(scaleGesture(for: text))
+                .simultaneousGesture(rotationGesture(for: text))
+                .id(text.id)
+            }
+
+            if isSelectedItemActive,
+                let adjustment = selectedAdjustmentItem
+            {
+                let frame = previewFrame(
+                    for: adjustment,
+                    transform: liveTransform ?? adjustment.visuals.transform
+                )
+                PreviewSelectionBox(
+                    frame: selectionFrame(from: frame),
+                    style: .adjustment,
+                    onDelete: viewModel.deleteSelectedClip,
+                    onDuplicate: viewModel.duplicateSelectedClip,
+                    onTap: handleSelectionBoxTap,
+                    onTransformChanged: { scaleFactor, rotationDelta in
+                        updateCombinedHandle(
+                            scaleFactor: scaleFactor,
+                            rotationDelta: rotationDelta,
+                            for: adjustment
+                        )
+                    },
+                    onTransformEnded: {
+                        finishPreviewGesture(.combinedHandle, itemID: adjustment.id)
+                    }
+                )
+                .gesture(dragGesture(for: adjustment, frame: frame))
+                .simultaneousGesture(scaleGesture(for: adjustment))
+                .id(adjustment.id)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func selectionFrame(from frame: PreviewClipFrame) -> PreviewClipFrame {
@@ -797,15 +831,23 @@ struct PreviewTransformCanvas: View {
 
     private func livePreviewAssetKey(for itemID: UUID, frameTime: Double? = nil) -> String {
         let frameRate = Double(max(viewModel.project.renderSettings.frameRate, 1))
-        let time = frameTime ?? (playbackState.currentTime * frameRate).rounded() / frameRate
+        let time = frameTime ?? (previewTime * frameRate).rounded() / frameRate
         return "\(itemID.uuidString)|\(previewState.contentRevision)|\(String(format: "%.4f", time))"
     }
 
     private var activeVisualInfos: [PreviewVisualInfo] {
         visualIntervalIndex.active(
-            at: playbackState.currentTime,
+            at: previewTime,
             retaining: viewModel.selectedTimelineItemID
         )
+    }
+
+    private var isSelectedItemActive: Bool {
+        guard let selectedItemID = viewModel.selectedTimelineItemID else { return false }
+        return visualIntervalIndex.active(
+            at: previewTime,
+            retaining: nil
+        ).contains { $0.id == selectedItemID }
     }
 
     private var visualIndexRevision: PreviewVisualIndexRevision {
@@ -1587,7 +1629,7 @@ struct PreviewTransformCanvas: View {
             for: info.clip,
             transform: nil,
             localTime: min(
-                max(playbackState.currentTime - info.clip.timelineStart, 0),
+                max(previewTime - info.clip.timelineStart, 0),
                 info.timelineDuration
             )
         )
@@ -1726,17 +1768,17 @@ struct PreviewTransformCanvas: View {
 
     private func localTime(for clip: TimelineClip) -> Double {
         min(
-            max(playbackState.currentTime - clip.timelineStart, 0),
+            max(previewTime - clip.timelineStart, 0),
             viewModel.timelinePlacementDuration(for: clip)
         )
     }
 
     private func localTime(for text: TextTimelineItem) -> Double {
-        min(max(playbackState.currentTime - text.timelineStart, 0), text.duration)
+        min(max(previewTime - text.timelineStart, 0), text.duration)
     }
 
     private func localTime(for adjustment: AdjustmentTimelineItem) -> Double {
-        min(max(playbackState.currentTime - adjustment.timelineStart, 0), adjustment.duration)
+        min(max(previewTime - adjustment.timelineStart, 0), adjustment.duration)
     }
 
     private func textAnimationSample(for text: TextTimelineItem) -> TextAnimationSample {
@@ -1842,7 +1884,7 @@ struct PreviewTransformCanvas: View {
                 let localTime = localTime(for: clip)
                 let transform = clip.transform.resolved(at: localTime)
                 let renderSize = viewModel.project.renderSettings.size
-                let timelineTime = playbackState.currentTime
+                let timelineTime = previewTime
                 let project = viewModel.project
                 async let backgroundImage = try? viewModel.renderService.makePreviewBackgroundImage(
                     for: project,
@@ -1893,7 +1935,7 @@ struct PreviewTransformCanvas: View {
             let resolved = text.visuals.transform.resolved(at: localTime)
             let renderSize = viewModel.project.renderSettings.size
             let glyphReveal = textAnimationSample(for: text).glyphReveal
-            let timelineTime = playbackState.currentTime
+            let timelineTime = previewTime
             let project = viewModel.project
             async let backgroundImage = try? viewModel.renderService.makePreviewBackgroundImage(
                 for: project,
@@ -2102,7 +2144,7 @@ struct PreviewTransformCanvas: View {
 
         let loadID = UUID()
         livePreviewLoadID = loadID
-        let timelineTime = playbackState.currentTime
+        let timelineTime = previewTime
         let targetHeight = max(previewFrame(for: clip, transform: transform)?.rect.height ?? 120, 120)
         let speedMap: SpeedMap
         if case .media(let item) = viewModel.project.item(id: clip.id) {
@@ -2359,8 +2401,8 @@ struct PreviewSelectionBox: View {
                     }
                 )
 
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .stroke(
+            Rectangle()
+                .strokeBorder(
                     MotionaryTheme.accent,
                     style: StrokeStyle(
                         lineWidth: 1.5

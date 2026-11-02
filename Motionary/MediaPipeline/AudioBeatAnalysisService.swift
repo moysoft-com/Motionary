@@ -36,6 +36,7 @@ struct AudioBeatAnalysisService {
     func analyze(
         url: URL,
         fingerprint: String? = nil,
+        precision: AudioBeatModelPrecision = .fp16,
         progress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> AudioBeatAnalysis {
         let sourceFingerprint: String
@@ -48,6 +49,7 @@ struct AudioBeatAnalysisService {
             try await Self.decodeAndAnalyze(
                 url: url,
                 sourceFingerprint: sourceFingerprint,
+                precision: precision,
                 progress: progress
             )
         }
@@ -74,6 +76,7 @@ struct AudioBeatAnalysisService {
     private static func decodeAndAnalyze(
         url: URL,
         sourceFingerprint: String,
+        precision: AudioBeatModelPrecision,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> AudioBeatAnalysis {
         try Task.checkCancellation()
@@ -113,11 +116,40 @@ struct AudioBeatAnalysisService {
             count: windowSize,
             isHalfWindow: false
         )
+        // Spool decoded PCM rather than retaining an entire long track in RAM.
+        // The mapped file is consumed synchronously after AVAssetReader finishes.
+        let pcmURL = FileManager.default.temporaryDirectory.appendingPathComponent("motionary-beats-\(UUID().uuidString).pcm")
+        let createdPCM = FileManager.default.createFile(atPath: pcmURL.path, contents: nil)
+        let pcmFile = createdPCM ? try? FileHandle(forWritingTo: pcmURL) : nil
+        defer {
+            try? pcmFile?.close()
+            if createdPCM { try? FileManager.default.removeItem(at: pcmURL) }
+        }
+        var spoolFailed = pcmFile == nil
         var pending: [Float] = []
         pending.reserveCapacity(windowSize * 8)
         var pendingOffset = 0
         var previousSpectrum = Array(repeating: Float(0), count: windowSize / 2)
         var envelope: [Float] = []
+        var sampleTimeline = AudioSampleTimeline()
+        let silence = Data(count: 8192 * MemoryLayout<Float>.stride)
+
+        func appendPCM(_ data: Data) {
+            if !spoolFailed {
+                do { try pcmFile?.write(contentsOf: data) } catch { spoolFailed = true }
+            }
+            data.withUnsafeBytes { pending.append(contentsOf: $0.bindMemory(to: Float.self)) }
+            while pending.count - pendingOffset >= windowSize {
+                let frame = Array(pending[pendingOffset..<(pendingOffset + windowSize)])
+                envelope.append(spectralFluxFrame(frame, window: window, transform: transform,
+                                                  previousSpectrum: &previousSpectrum))
+                pendingOffset += hopSize
+            }
+            if pendingOffset >= windowSize * 16 {
+                pending.removeFirst(pendingOffset)
+                pendingOffset = 0
+            }
+        }
 
         while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
             try Task.checkCancellation()
@@ -138,39 +170,65 @@ struct AudioBeatAnalysisService {
                     destination: bytes.baseAddress!
                 )
             }
-            guard status == kCMBlockBufferNoErr else { continue }
-            data.withUnsafeBytes { bytes in
-                pending.append(contentsOf: bytes.bindMemory(to: Float.self))
+            guard status == kCMBlockBufferNoErr,
+                  byteCount.isMultiple(of: MemoryLayout<Float>.stride) else {
+                throw AudioBeatAnalysisError.cannotDecode
             }
-
-            while pending.count - pendingOffset >= windowSize {
-                let frame = Array(pending[pendingOffset..<(pendingOffset + windowSize)])
-                envelope.append(
-                    spectralFluxFrame(
-                        frame,
-                        window: window,
-                        transform: transform,
-                        previousSpectrum: &previousSpectrum
-                    )
-                )
-                pendingOffset += hopSize
+            let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            let frameStart: Int64? = timestamp.seconds.isFinite
+                ? CMTimeConvertScale(timestamp, timescale: CMTimeScale(sampleRate), method: .roundHalfAwayFromZero).value
+                : nil
+            let placement = sampleTimeline.place(startFrame: frameStart,
+                                                 frameCount: byteCount / MemoryLayout<Float>.stride)
+            var missing = placement.silenceFrames
+            while missing > 0 {
+                try Task.checkCancellation()
+                let count = Int(min(missing, 8192))
+                appendPCM(count == 8192 ? silence : silence.prefix(count * MemoryLayout<Float>.stride))
+                missing -= Int64(count)
             }
-            if pendingOffset >= windowSize * 16 {
-                pending.removeFirst(pendingOffset)
-                pendingOffset = 0
-            }
+            let skipBytes = placement.skippedFrames * MemoryLayout<Float>.stride
+            if skipBytes < byteCount { appendPCM(skipBytes == 0 ? data : data.subdata(in: skipBytes..<byteCount)) }
         }
 
         guard reader.status == .completed, !envelope.isEmpty else {
             throw AudioBeatAnalysisError.cannotDecode
         }
         progress(0.8)
-        let analysis = try detectBeatGrid(
+        if !spoolFailed {
+            try pcmFile?.close()
+            // If the neural paths cannot establish a rhythm, the existing DSP
+            // tracker gets a chance to establish one independently.
+            let modelName = precision == .fp32 ? "BeatThisFP32" : "BeatThis"
+            let modelURL = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc")
+            if let engine = try? BeatThisInference(modelURL: modelURL) {
+                let pcm = try Data(contentsOf: pcmURL, options: .mappedIfSafe)
+                guard pcm.count.isMultiple(of: MemoryLayout<Float>.stride) else {
+                    throw AudioBeatAnalysisError.cannotDecode
+                }
+                do {
+                    let analysis = try pcm.withUnsafeBytes { bytes in
+                        try NeuralBeatAnalyzer.analyze(samples: bytes.bindMemory(to: Float.self),
+                                                       fingerprint: sourceFingerprint, engine: engine,
+                                                       modelPrecision: precision)
+                    }
+                    progress(1)
+                    return analysis
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // The DSP tracker applies its own reliability gate below.
+                }
+            }
+        }
+        try Task.checkCancellation()
+        var analysis = try detectBeatGrid(
             onsetEnvelope: envelope,
             sampleRate: sampleRate,
             sourceDuration: max(duration, Double(envelope.count * hopSize) / sampleRate),
             sourceFingerprint: sourceFingerprint
         )
+        analysis.method = .signalFallback
         progress(1)
         return analysis
     }

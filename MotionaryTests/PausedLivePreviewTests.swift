@@ -27,11 +27,17 @@ struct PreviewLayoutTests {
         }
         let host = UIHostingController(rootView: content(wide: false))
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+            ?? scene.windows.first(where: { !$0.isHidden })
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 1024, height: 768)
         window.rootViewController = host
         window.isHidden = false
-        defer { window.isHidden = true; window.rootViewController = nil }
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKeyAndVisible()
+        }
         host.view.frame = window.bounds
         host.view.layoutIfNeeded()
         func find<T: UIView>(_ type: T.Type, in root: UIView) -> T? {
@@ -88,10 +94,15 @@ struct PausedLivePreviewTests {
             timelineStart: 0, duration: 1,
             visuals: TimelineItemVisuals(effectStack: EffectStack(effects: [noir]))
         )
-        let videoURL = try await MediaConversionHelper.blankVideoClockURL(duration: 1, frameRate: 30)
+        // Keep fixture media on a distinct file, as real project imports are,
+        // so source decoding and private clock decoding do not alias one asset.
+        let clockFixture = try await MediaConversionHelper.blankVideoClockURL(duration: 1, frameRate: 30)
+        let videoURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+        try FileManager.default.copyItem(at: clockFixture, to: videoURL)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
         let video = TimelineClip(
             name: "Decoded source", source: ClipSource(url: videoURL, mediaType: .video,
-                                                       originalDuration: 1, naturalSize: CGSizeValue(width: 16, height: 16)),
+                                                       originalDuration: 1, naturalSize: CGSizeValue(width: 64, height: 64)),
             timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1)
         )
         var tracks = [
@@ -113,8 +124,15 @@ struct PausedLivePreviewTests {
         generator.videoComposition = prepared.videoComposition
         generator.requestedTimeToleranceBefore = .zero
         generator.requestedTimeToleranceAfter = .zero
+        func capturedFrame(at time: CMTime, stage: String) async throws -> (image: CGImage, actualTime: CMTime) {
+            do { return try await generator.image(at: time) }
+            catch {
+                throw NSError(domain: "PausedPreview.\(stage).video=\(withVideo)", code: (error as NSError).code,
+                    userInfo: [NSUnderlyingErrorKey: error])
+            }
+        }
         let time = CMTime(seconds: 0.5, preferredTimescale: 600)
-        let original = try await generator.image(at: time).image
+        let original = try await capturedFrame(at: time, stage: "initial").image
         let originalPixels = pixels(CIImage(cgImage: original))
         service.livePreviewState.setInteractiveQualityOverride(true)
 
@@ -137,16 +155,17 @@ struct PausedLivePreviewTests {
             let buffer = try #require(direct)
             let directPixels = pixels(CIImage(cvPixelBuffer: buffer))
             #expect(directPixels != originalPixels)
-            let canonical = try await generator.image(at: time).image
+            let canonical = try await capturedFrame(at: time, stage: "canonical-after-edit").image
             let canonicalPixels = pixels(CIImage(cgImage: canonical))
             let error = zip(directPixels, canonicalPixels).map { abs(Int($0) - Int($1)) }.max() ?? 0
             #expect(error <= 2)
         }
         // A seek between frame boundaries must also be able to bootstrap
         // and reuse its exact decoded snapshot.
-        let betweenFrames = try await generator.image(at: CMTime(seconds: 0.517, preferredTimescale: 600))
+        let requestedTime = 0.517
+        let betweenFrames = try await capturedFrame(at: CMTime(seconds: requestedTime, preferredTimescale: 600), stage: "between-frames")
         let actualTime = CMTimeGetSeconds(betweenFrames.actualTime)
-        #expect(abs(actualTime - CMTimeGetSeconds(CMTime(seconds: 0.517, preferredTimescale: 600))) < 0.000_01)
+        #expect(abs(actualTime - CMTimeGetSeconds(CMTime(seconds: requestedTime, preferredTimescale: 600))) < 0.000_01)
         let betweenFrameBuffer: CVPixelBuffer? = await withCheckedContinuation { continuation in
             let accepted = service.livePreviewState.renderPausedFrame(at: actualTime, sessionID: sessionID) {
                 continuation.resume(returning: $0)
@@ -154,9 +173,22 @@ struct PausedLivePreviewTests {
             if !accepted { continuation.resume(returning: nil) }
         }
         #expect(betweenFrameBuffer != nil)
-        #expect(!service.livePreviewState.renderPausedFrame(at: 0.6, sessionID: sessionID) { _ in
-            Issue.record("A different timeline time reused stale sources")
-        })
+        if withVideo {
+            #expect(!service.livePreviewState.renderPausedFrame(at: 0.6, sessionID: sessionID) { _ in
+                Issue.record("A different video time reused stale sources")
+            })
+        } else {
+            let generated: CVPixelBuffer? = await withCheckedContinuation { continuation in
+                let accepted = service.livePreviewState.renderPausedFrame(at: 0.6, sessionID: sessionID) {
+                    continuation.resume(returning: $0)
+                }
+                if !accepted { continuation.resume(returning: nil) }
+            }
+            let generatedFrame = try #require(generated)
+            let expected = try await capturedFrame(at: CMTime(seconds: 0.6, preferredTimescale: 600),
+                                                   stage: "generated-scrub").image
+            #expect(pixels(CIImage(cvPixelBuffer: generatedFrame)) == pixels(CIImage(cgImage: expected)))
+        }
         #expect(!service.livePreviewState.renderPausedFrame(at: 0.5, sessionID: UUID()) { _ in
             Issue.record("A different session reused stale sources")
         })
@@ -167,11 +199,14 @@ struct PausedLivePreviewTests {
 
     @MainActor
     @Test func measureDisplaySizedLiveFrameLatency() async throws {
-        let shape = ShapeTimelineItem(
+        var shape = ShapeTimelineItem(
             name: "Latency", mediaID: MediaID(),
             shape: ClipShape(kind: .rectangle, color: .white, width: 480, height: 300),
             timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1)
         )
+        shape.visuals.effectStack = EffectStack(effects: try [EffectModuleID.waveWarp, .blur, .softGlow].map {
+            try #require(EffectRegistry.shared.makeEffect(moduleID: $0))
+        })
         let project = EditorProject(
             title: "Latency", renderSettings: RenderSettings(width: 960, height: 540, frameRate: 60),
             tracks: [TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])]
@@ -189,7 +224,7 @@ struct PausedLivePreviewTests {
         var milliseconds: [Double] = []
         for index in 0..<65 {
             var transform = ClipTransform()
-            transform.positionX.baseValue = Double(index)
+            transform.positionX.baseValue = Double(index % 21 - 10) / 50
             transform.scale.baseValue = ScaleValue(x: 1 + Double(index) / 200, y: 1 + Double(index) / 200)
             service.livePreviewState.setTransform(transform, for: shape.id)
             let start = ProcessInfo.processInfo.systemUptime
@@ -202,15 +237,41 @@ struct PausedLivePreviewTests {
             if index >= 5 { milliseconds.append((ProcessInfo.processInfo.systemUptime - start) * 1000) }
         }
         milliseconds.sort()
-        let report = "LIVE_PREVIEW_GPU_MS median=\(milliseconds[30]) p95=\(milliseconds[57]) max=\(milliseconds[59])"
+        let cached = try #require(service.livePreviewState.cachedFrame(at: 0.5, sessionID: session))
+        // Keep the object on canvas throughout the benchmark. Offscreen
+        // culling would otherwise measure empty background frames.
+        var center = [UInt8](repeating: 0, count: 4)
+        CIContext().render(CIImage(cvPixelBuffer: cached), toBitmap: &center, rowBytes: 4,
+            bounds: CGRect(x: 480, y: 270, width: 1, height: 1), format: .RGBA8,
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        #expect(center[0] > 200 && center[3] == 255)
+        let cacheStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<1_000 {
+            #expect(service.livePreviewState.cachedFrame(at: 0.5, sessionID: session) === cached)
+        }
+        let cacheMS = (ProcessInfo.processInfo.systemUptime - cacheStart) * 1_000 / 1_000
+        let report = "960x540, Wave Warp + Blur + Soft Glow, full preview quality, 60 GPU refreshes after warm-up: LIVE_PREVIEW_GPU_MS median=\(milliseconds[30]) p95=\(milliseconds[57]) max=\(milliseconds[59]); cached full-quality frame lookup average=\(cacheMS) ms (1000 samples, including assertions)"
         Attachment.record(report, named: "live-preview-render-latency.txt")
         withExtendedLifetime(generator) {}
     }
 
     @MainActor
-    @Test func nativeSurfacePresentsWithoutSwiftUITransaction() throws {
+    @Test func nativeSurfacePresentsWithoutSwiftUITransaction() async throws {
         let presentation = LivePreviewPresentation()
         let view = LivePreviewSampleView()
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let host = UIViewController()
+        window.rootViewController = host
+        window.isHidden = false
+        host.view.addSubview(view)
+        view.frame = CGRect(x: 0, y: 0, width: 96, height: 96)
+        defer {
+            presentation.frame = nil
+            presentation.detach(view)
+            window.isHidden = true
+            window.rootViewController = nil
+        }
         presentation.attach(view)
         #expect(view.isHidden)
         var buffer: CVPixelBuffer?
@@ -222,7 +283,20 @@ struct PausedLivePreviewTests {
         #expect(!view.isHidden)
         presentation.frame = nil
         #expect(view.isHidden)
+        presentation.frame = buffer
+        // Flushing can briefly apply renderer backpressure. The native
+        // display link must replay the latest frame without a SwiftUI update.
+        for _ in 0..<50 where view.isHidden {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(!view.isHidden)
         presentation.detach(view)
+        #expect(view.isHidden)
+        presentation.attach(view)
+        for _ in 0..<50 where view.isHidden {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(!view.isHidden)
     }
 
     private func pixels(_ image: CIImage) -> [UInt8] {
@@ -298,11 +372,17 @@ struct WorkspaceTimelineTests {
         }
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let host = UIHostingController(rootView: content(focused: false))
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+            ?? scene.windows.first(where: { !$0.isHidden })
         let window = UIWindow(windowScene: scene)
         window.frame = CGRect(x: 0, y: 0, width: 1024, height: 540)
         window.rootViewController = host
         window.isHidden = false
-        defer { window.isHidden = true; window.rootViewController = nil }
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKeyAndVisible()
+        }
         host.view.frame = window.bounds
         host.view.layoutIfNeeded()
         func descendants(_ view: UIView) -> [UIView] {
@@ -317,6 +397,12 @@ struct WorkspaceTimelineTests {
         #expect(descendants(host.view).compactMap { $0 as? UIScrollView }.first === scroll)
         #expect(scroll.alwaysBounceVertical == !compact)
         #expect(abs(scroll.contentOffset.y - (compact ? 0 : 180)) < 1)
+        // Wait for the spring to settle instead of sampling its overshoot at
+        // a fixed 450 ms (the frame can still be 1–2 pt off on a busy simulator).
+        for _ in 0..<100 where abs(scroll.bounds.width - 600) >= 1 {
+            try await Task.sleep(for: .milliseconds(20))
+            host.view.layoutIfNeeded()
+        }
         #expect(abs(scroll.bounds.width - 600) < 1)
         let trackLabels = descendants(scroll).compactMap(\.accessibilityIdentifier)
             .filter { $0.hasPrefix("timeline-track-") }

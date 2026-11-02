@@ -10,6 +10,9 @@ enum MetalEffectSupport {
         parameters: SIMD4<Float>,
         center: SIMD2<Float> = SIMD2(0.5, 0.5),
         secondaryParameters: SIMD4<Float>? = nil,
+        additionalParameters: SIMD4<Float> = SIMD4(1, 1, 1, 1),
+        orientation: Float = 0,
+        edgeMode: EffectEdgeMode? = nil,
         margin: CGFloat,
         effect: EffectInstance,
         context: EffectRenderContext,
@@ -28,8 +31,8 @@ enum MetalEffectSupport {
             time: Float(context.clipTime),
             frameIndex: Float(context.frameIndex),
             direction: SIMD2(
-                Float(EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.edgeMode.rawValue ?? 0),
-                0
+                Float(edgeMode?.rawValue ?? EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.edgeMode.rawValue ?? 0),
+                orientation
             ),
             parameters: parameters,
             sourceBounds: SIMD4(
@@ -38,7 +41,8 @@ enum MetalEffectSupport {
                 Float(image.extent.width / extent.width),
                 Float(image.extent.height / extent.height)
             ),
-            parameters2: secondaryParameters ?? SIMD4(center.x, center.y, 0, 0)
+            parameters2: secondaryParameters ?? SIMD4(center.x, center.y, 0, 0),
+            parameters3: additionalParameters
         )
         let mapTexture: MTLTexture?
         if EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.usesDisplacementMap == true {

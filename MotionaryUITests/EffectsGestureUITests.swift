@@ -9,6 +9,38 @@ final class EffectsGestureUITests: XCTestCase {
     func testCompactPullAndNavigation() { exercise(side: false) }
     func testSidePullAndNavigation() { exercise(side: true) }
 
+    func testAnimatedLibraryPreviewPlaysWithoutSelectingTheEffect() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--effects-gesture-tests", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let addEffect = app.buttons["Add effect"]
+        XCTAssertTrue(addEffect.waitForExistence(timeout: 15))
+        addEffect.tap()
+        let search = app.textFields["Search effects"]
+        XCTAssertTrue(search.waitForExistence(timeout: 8))
+        search.tap()
+        search.typeText("Camera Wiggle")
+        let tile = app.buttons["Camera Wiggle"]
+        XCTAssertTrue(tile.waitForExistence(timeout: 8))
+        // Allow the off-main loop preparation to finish, then compare multiple
+        // frames without selecting the tile (the old wipe only ran on selection).
+        Thread.sleep(forTimeInterval: 4)
+        let first = tile.screenshot()
+        Thread.sleep(forTimeInterval: 0.4)
+        let second = tile.screenshot()
+        Thread.sleep(forTimeInterval: 0.4)
+        let third = tile.screenshot()
+        XCTAssertNotEqual(first.pngRepresentation, second.pngRepresentation)
+        XCTAssertNotEqual(second.pngRepresentation, third.pngRepresentation)
+        XCTAssertFalse(tile.isSelected)
+        for (index, shot) in [first, second, third].enumerated() {
+            let attachment = XCTAttachment(screenshot: shot)
+            attachment.name = "Wiggle live preview frame " + String(index)
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
     private func exercise(side: Bool) {
         let app = XCUIApplication()
         app.launchArguments = ["--effects-gesture-tests", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]

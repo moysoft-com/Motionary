@@ -33,13 +33,15 @@ final class TimelineGestureUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["test-start"].label, "0.500")
     }
 
-    func testDiagonalScrollMovesTimeAndTracksWithoutSelectingAnItem() {
+    func testDominantVerticalDiagonalScrollMovesTracksWithoutScrubbing() {
         let item = app.buttons["timeline-item-00000000-0000-0000-0000-000000000003"]
         let originalY = item.frame.minY
         let point = itemPoint(row: 2)
         point.press(forDuration: 0.01, thenDragTo: point.withOffset(CGVector(dx: -44, dy: -70)))
         XCTAssertEqual(app.staticTexts["test-selection"].label, "none")
-        XCTAssertGreaterThan(Double(app.staticTexts["test-time"].label) ?? 0, 0.1)
+        // Match the production direction lock and its domain regression:
+        // dominant vertical navigation must not move the playhead.
+        XCTAssertEqual(Double(app.staticTexts["test-time"].label) ?? -1, 0, accuracy: 0.01)
         XCTAssertLessThan(item.frame.minY, originalY - 20)
     }
 
@@ -100,9 +102,11 @@ final class TimelineGestureUITests: XCTestCase {
     }
 
     private func itemPoint(row: Int) -> XCUICoordinate {
-        let frame = app.descendants(matching: .any)["editor-timeline"].firstMatch.frame
-        return app.coordinate(withNormalizedOffset: .zero).withOffset(
-            CGVector(dx: frame.midX + 70, dy: frame.minY + 60 + CGFloat(row) * 51)
-        )
+        // Use the actual item geometry: row padding, safe-area insets and
+        // device size must not move a test gesture onto empty timeline space.
+        let suffix = String(format: "%012d", row + 1)
+        let item = app.buttons["timeline-item-00000000-0000-0000-0000-\(suffix)"]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        return item.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
     }
 }

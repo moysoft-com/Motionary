@@ -163,7 +163,7 @@ extension EditorViewModel {
         }
     }
 
-    func analyzeSelectedAudioBeats() {
+    func analyzeSelectedAudioBeats(precision: AudioBeatModelPrecision = .fp16) {
         guard case .media(let item) = selectedTimelineItem,
             item.mediaType == .audio,
             !isPerformingLongTask
@@ -182,7 +182,7 @@ extension EditorViewModel {
             }
             do {
                 let analysis = try await AudioBeatAnalysisService().analyze(
-                    url: sourceURL
+                    url: sourceURL, precision: precision
                 ) { [weak self] progress in
                     Task { @MainActor in
                         self?.updateAnalysisProgress(progress, kind: .audioBeats)
@@ -194,7 +194,9 @@ extension EditorViewModel {
                         case .media(var current) = project.tracks[location.track].items[location.item],
                         current.mediaID == mediaID
                     else { return }
-                    current.beatAnalysis = analysis
+                    var updated = analysis
+                    updated.subbeatDivision = current.beatAnalysis?.subbeatDivision ?? 0
+                    current.beatAnalysis = updated
                     project.tracks[location.track].items[location.item] = .media(current)
                 }
                 showConfirmation("Beat markers added")
@@ -203,6 +205,18 @@ extension EditorViewModel {
             } catch {
                 errorMessage = error.localizedDescription
             }
+        }
+    }
+
+    func setSelectedBeatSubdivision(_ division: Int) {
+        guard let itemID = selectedTimelineItemID, [0, 2, 3, 4].contains(division) else { return }
+        mutateProject(rebuild: false) { project in
+            guard let location = project.itemLocation(id: itemID),
+                case .media(var item) = project.tracks[location.track].items[location.item],
+                var analysis = item.beatAnalysis, analysis.subbeatDivision != division else { return }
+            analysis.subbeatDivision = division
+            item.beatAnalysis = analysis
+            project.tracks[location.track].items[location.item] = .media(item)
         }
     }
 

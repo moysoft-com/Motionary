@@ -4,11 +4,10 @@ Motionary is a native iOS video editor built with SwiftUI, AVFoundation, Core Im
 
 ## Requirements
 
-- Xcode 17 or newer
-- iOS 26 SDK
-- An iOS 26 simulator or device
+- Xcode with the iOS 26 SDK or newer
+- iOS 18 or newer on device or Simulator (Liquid Glass uses iOS 26 APIs where available)
 
-The project has no third-party runtime dependencies.
+Swift Package Manager resolves Firebase Core, Authentication, Firestore and App Check for the suggestions feature. Editing, media storage and rendering run locally.
 
 ## Getting started
 
@@ -31,7 +30,7 @@ xcodebuild test \
   -project Motionary.xcodeproj \
   -scheme Motionary \
   -configuration Debug \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 Format all Swift sources with the checked-in configuration:
@@ -47,3 +46,5 @@ xcrun swift-format format --in-place --recursive \
 - [Architecture](Documentation/ARCHITECTURE.md)
 - [Development conventions](Documentation/DEVELOPMENT.md)
 - [Modernization summary](Documentation/MODERNIZATION.md)
+
+Release verification and outstanding device/operational checks are tracked in [Release readiness](Documentation/ReleaseReadiness.md).

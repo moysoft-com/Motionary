@@ -1,4 +1,4 @@
-// Application entry point and root tab structure. 😳
+// Application entry point and root tab structure.
 
 import FirebaseAppCheck
 import FirebaseCore
@@ -22,6 +22,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             AppCheck.setAppCheckProviderFactory(MotionaryAppAttestProviderFactory())
         #endif
         FirebaseApp.configure()
+        if let shortcut = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem {
+            HomeScreenActions.shared.receive(shortcut)
+        }
         return true
     }
 
@@ -72,6 +75,7 @@ struct MainView: App {
     @State private var isEditorPresented = false
     @StateObject private var projectStore = ProjectStore()
     @State private var iconPickerPresented = false
+    @State private var rootViewAppeared = false
     @State private var newProjectRequest: UUID?
     @AppStorage(AppPreferences.appearanceKey)
     private var appearance = AppPreferences.defaultAppearance
@@ -109,11 +113,14 @@ struct MainView: App {
         .sheet(isPresented: $iconPickerPresented) {
             AppIconPickerView()
         }
-        .onChange(of: actions.pendingAction, initial: true) { _, _ in
+        .onAppear { rootViewAppeared = true }
+        .onDisappear { rootViewAppeared = false }
+        .task(id: rootViewAppeared && scenePhase == .active ? actions.pendingAction?.rawValue : nil) {
+            // Cold-launch actions can arrive before SwiftUI has a presenter.
+            // Keep the action queued until the root is attached and active.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
             handlePendingAction()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { handlePendingAction() }
         }
         .preferredColorScheme(AppAppearance(rawValue: appearance)?.colorScheme)
     }
@@ -150,7 +157,8 @@ struct MainView: App {
     }
 
     private func handlePendingAction() {
-        guard scenePhase == .active, let action = actions.pendingAction else { return }
+        guard rootViewAppeared, scenePhase == .active, let action = actions.pendingAction else { return }
+        AppLogger.lifecycle.info("Presenting Home Screen action: \(action.rawValue, privacy: .public)")
         actions.pendingAction = nil
         switch action {
         case .changeIcon:

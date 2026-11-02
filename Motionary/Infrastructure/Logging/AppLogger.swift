@@ -3,6 +3,7 @@
 import OSLog
 
 enum AppLogger {
+    static let lifecycle = Logger(subsystem: "com.moysoft.motionary", category: "Lifecycle")
     static let persistence = Logger(subsystem: "com.moysoft.motionary", category: "Persistence")
     static let media = Logger(subsystem: "com.moysoft.motionary", category: "Media")
     static let rendering = Logger(subsystem: "com.moysoft.motionary", category: "Rendering")

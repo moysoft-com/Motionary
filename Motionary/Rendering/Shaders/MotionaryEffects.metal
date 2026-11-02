@@ -12,6 +12,7 @@ struct MotionaryEffectUniforms {
     float4 parameters;
     float4 sourceBounds;
     float4 parameters2;
+    float4 parameters3;
 };
 
 struct MotionaryYUVUniforms {
@@ -163,6 +164,17 @@ kernel void motionaryDisplacementMapKernel(
     mapTexture.write(half4(half2(map), 0.0h, 1.0h), gid);
 }
 
+// Editable colors are sRGB; the frame graph works in linear light.
+static float3 creativeLinear(float3 color) {
+    color = max(color, float3(0));
+    return select(pow((color + 0.055f) / 1.055f, float3(2.4f)), color / 12.92f, color <= 0.04045f);
+}
+
+static float3 creativePerceptual(float3 color) {
+    color = max(color, float3(0));
+    return select(1.055f * pow(color, float3(1.0f / 2.4f)) - 0.055f, color * 12.92f, color <= 0.0031308f);
+}
+
 kernel void motionaryEffectKernel(
     texture2d<float, access::sample> inputTexture [[texture(0)]],
     texture2d<half, access::write> outputTexture [[texture(1)]],
@@ -204,7 +216,14 @@ kernel void motionaryEffectKernel(
             float3 left = unpremultiplied(sampleEffectInput(inputTexture, uv + float2(drift + channelShift, 0.0f), edgeMode, uniforms.sourceBounds));
             float3 right = unpremultiplied(sampleEffectInput(inputTexture, uv + float2(drift - channelShift, 0.0f), edgeMode, uniforms.sourceBounds));
             float3 middle = unpremultiplied(sampleEffectInput(inputTexture, uv + float2(drift, 0.0f), edgeMode, uniforms.sourceBounds));
-            float scanline = sin((float(gid.y) + 0.5f) * 3.14159265f) * (0.025f + p1 * 0.10f);
+            // Integrate the sinusoid over the authored pixel footprint. Point
+            // sampling at Nyquist exaggerates contrast and aliases on export.
+            // A half-pixel Gaussian reconstruction filter suppresses that
+            // phase instability before arbitrary output-size resampling.
+            const float pi = 3.14159265f;
+            const float coverage = (2.0f / pi) * exp(-0.5f * pi * pi * 0.25f);
+            float scanline = sin((float(gid.y) + 0.5f) * pi)
+                * coverage * (0.025f + p1 * 0.10f);
             color = float3(left.r, middle.g, right.b) * (1.0f - scanline);
             break;
         }
@@ -266,7 +285,12 @@ kernel void motionaryEffectKernel(
         case 8u: { // Fine Grain
             float noise = hash12(float2(gid) + uniforms.frameIndex * float2(31.0f, 47.0f), uniforms.seed) - 0.5f;
             float lumaWeight = mix(1.0f, 0.35f + 0.65f * (1.0f - abs(luminance(color) * 2.0f - 1.0f)), p1);
-            color += noise * (0.015f + p0 * 0.095f) * lumaWeight;
+            // Grain strength is a perceptual contrast, not linear-light
+            // energy. Adding it in linear light makes black grain dramatically
+            // brighter and changes its contrast when the output is resampled.
+            float3 perceptual = creativePerceptual(color);
+            perceptual += noise * (0.015f + p0 * 0.095f) * lumaWeight;
+            color = creativeLinear(clamp(perceptual, float3(0), float3(1)));
             break;
         }
         case 9u: { // Light Leak
@@ -364,6 +388,116 @@ kernel void motionaryEffectKernel(
             color = mix(lowLinear, highLinear, luma);
             alpha *= mix(low.a, high.a, luma);
             break;
+        }
+        case 25u: { // Light sweep, clipped to the incoming alpha.
+            float2 axis = float2(cos(p1), sin(p1));
+            float span = abs(axis.x) + abs(axis.y);
+            float coordinate = dot(centered, axis) / max(span, 0.001f) + 0.5f;
+            float position = p0;
+            float speed = uniforms.parameters2.w;
+            if (abs(speed) > 0.00001f) {
+                position = fract((p0 + 0.5f + uniforms.time * speed) / 2.0f) * 2.0f - 0.5f;
+            }
+            float band = exp(-pow((coordinate - position) / max(p2 * 0.35f, 0.001f), 2.0f));
+            float3 tint = creativeLinear(uniforms.parameters2.rgb);
+            color += tint * band * uniforms.parameters.w * uniforms.parameters3.x;
+            break;
+        }
+        case 26u: { // Aspect-correct sinusoidal refraction through glass ridges.
+            float2 metric = size / min(size.x, size.y);
+            float2 axis = float2(cos(p2), sin(p2));
+            float coordinate = dot(centered * metric, axis);
+            float width = max(p0, 0.001f);
+            float phase = (coordinate / width + uniforms.parameters.w) * 6.2831853f;
+            float offset = sin(phase) * width * p1 * 0.45f;
+            float4 sampled = sampleEffectInput(inputTexture, uv + axis * offset / metric, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            break;
+        }
+        case 27u: { // Ordered 4x4 Bayer threshold in perceptual luminance.
+            float cell = max(uniforms.parameters.w * min(size.x, size.y), 1.0f);
+            uint2 pixel = uint2(floor(float2(gid) / cell));
+            constexpr float bayer[16] = {0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5};
+            float2 snapped = (floor(float2(gid) / cell) + 0.5f) * cell / size;
+            float3 sampled = unpremultiplied(sampleEffectInput(inputTexture, snapped, edgeMode, uniforms.sourceBounds));
+            float luma = pow(clamp(luminance(sampled), 0.0f, 1.0f), 1.0f / 2.2f);
+            luma = clamp((luma - 0.5f) * uniforms.parameters2.w + 0.5f, 0.0f, 1.0f);
+            float threshold = (bayer[(pixel.y % 4u) * 4u + pixel.x % 4u] + 0.5f) / 16.0f;
+            float high = step(threshold, luma);
+            color = creativeLinear(mix(uniforms.parameters.rgb, uniforms.parameters2.rgb, high));
+            alpha *= mix(uniforms.parameters3.x, uniforms.parameters3.y, high);
+            break;
+        }
+        case 28u: { // Rotated, antialiased ink-dot lattice.
+            float spacing = max(uniforms.parameters.w * min(size.x, size.y), 2.0f);
+            float a = uniforms.direction.y;
+            float2 axis = float2(cos(a), sin(a));
+            float2 perpendicular = float2(-axis.y, axis.x);
+            float2 point = centered * size;
+            float2 grid = float2(dot(point, axis), dot(point, perpendicular)) / spacing;
+            float2 cell = floor(grid) + 0.5f;
+            float2 sampleUV = (axis * cell.x + perpendicular * cell.y) * spacing / size + 0.5f;
+            float3 sampled = unpremultiplied(sampleEffectInput(inputTexture, sampleUV, edgeMode, uniforms.sourceBounds));
+            float luma = pow(clamp(luminance(sampled), 0.0f, 1.0f), 1.0f / 2.2f);
+            luma = clamp((luma - 0.5f) * uniforms.parameters2.w + 0.5f, 0.0f, 1.0f);
+            float radius = sqrt(1.0f - luma) * 0.707107f;
+            float distance = length(grid - cell);
+            float aa = 0.75f / spacing;
+            float ink = 1.0f - smoothstep(radius - aa, radius + aa, distance);
+            if (luma >= 0.99999f) { ink = 0; }
+            color = creativeLinear(mix(uniforms.parameters2.rgb, uniforms.parameters.rgb, ink));
+            alpha *= mix(uniforms.parameters3.y, uniforms.parameters3.x, ink);
+            break;
+        }
+        case 29u: { // Circular hue selection; neutral pixels stay neutral.
+            float3 target = uniforms.parameters2.rgb;
+            float3 perceptual = creativePerceptual(color);
+            float targetHue = atan2(1.7320508f * (target.g - target.b), 2.0f * target.r - target.g - target.b);
+            float hue = atan2(1.7320508f * (perceptual.g - perceptual.b), 2.0f * perceptual.r - perceptual.g - perceptual.b);
+            float delta = abs(atan2(sin(hue - targetHue), cos(hue - targetHue))) / 6.2831853f;
+            float selection = 1.0f - smoothstep(p0, p0 + max(p1, 0.001f), delta);
+            float chroma = max(perceptual.r, max(perceptual.g, perceptual.b)) - min(perceptual.r, min(perceptual.g, perceptual.b));
+            selection *= smoothstep(0.01f, 0.08f, chroma);
+            color = mix(float3(luminance(color)), color, mix(p2, 1.0f, selection));
+            break;
+        }
+        case 30u: { // Sobel contours at a resolution-independent line width.
+            float2 offset = float2(max(p0 * min(size.x, size.y), 0.75f)) / size;
+            float samples[9];
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    float4 sample = sampleEffectInput(inputTexture, uv + float2(x, y) * offset, edgeMode, uniforms.sourceBounds);
+                    samples[(y + 1) * 3 + x + 1] = pow(clamp(luminance(unpremultiplied(sample)), 0.0f, 1.0f), 1.0f / 2.2f) * sample.a;
+                }
+            }
+            float gx = -samples[0] + samples[2] - 2 * samples[3] + 2 * samples[5] - samples[6] + samples[8];
+            float gy = -samples[0] - 2 * samples[1] - samples[2] + samples[6] + 2 * samples[7] + samples[8];
+            float edge = smoothstep(p1, p1 + 0.25f, length(float2(gx, gy)));
+            float3 tint = creativeLinear(uniforms.parameters2.rgb);
+            color = color * uniforms.parameters.w + tint * edge * (1.0f + p2) * uniforms.parameters2.a;
+            break;
+        }
+        case 31u: { // Inverse camera transform in aspect-correct image space.
+            float2 metric = size / min(size.x, size.y);
+            float2 pivot = uniforms.parameters2.xy;
+            float2 point = (uv - pivot - uniforms.parameters.zw) * metric;
+            float c = cos(p1), s = sin(p1);
+            point = float2(c * point.x + s * point.y, -s * point.x + c * point.y);
+            float2 coordinate = pivot + point / (max(p0, 0.01f) * metric);
+            float4 sampled = sampleEffectInput(inputTexture, coordinate, edgeMode, uniforms.sourceBounds);
+            outputTexture.write(half4(sampled), gid);
+            return;
+        }
+        case 32u: { // Reflect only the opposite half across the selected axis.
+            float2 metric = size / min(size.x, size.y);
+            float2 pivot = uniforms.parameters2.xy;
+            float2 point = (uv - pivot) * metric;
+            float2 normal = uniforms.parameters.xy;
+            float distance = dot(point, normal);
+            if (distance * p2 < 0) { point -= 2 * distance * normal; }
+            float4 sampled = sampleEffectInput(inputTexture, pivot + point / metric, edgeMode, uniforms.sourceBounds);
+            outputTexture.write(half4(sampled), gid);
+            return;
         }
         default:
             break;

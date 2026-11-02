@@ -6,8 +6,6 @@ import UIKit
 struct SettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
 
-    @AppStorage(AppPreferences.appearanceKey)
-    private var appearance = AppPreferences.defaultAppearance
     @AppStorage(AppPreferences.newProjectFrameRateKey)
     private var newProjectFrameRate = AppPreferences.defaultFrameRate
     @AppStorage(AppPreferences.exportQualityKey)
@@ -202,7 +200,6 @@ struct SettingsView: View {
 
     private func resetSettings() {
         AppPreferences.reset()
-        appearance = AppPreferences.defaultAppearance
         newProjectFrameRate = AppPreferences.defaultFrameRate
         exportQuality = AppPreferences.defaultExportQuality
         exportCodec = AppPreferences.defaultExportCodec

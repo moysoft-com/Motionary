@@ -228,6 +228,9 @@ struct RenderClipDescriptor: @unchecked Sendable {
         self.renderOrder = renderOrder
         var temporalSource = temporalSource
         temporalSource?.adjustments = adjustments
+        temporalSource?.backgroundRemoval = backgroundRemoval
+        temporalSource?.sourceOrientation = sourceTransform
+        temporalSource?.matteOrientation = backgroundMaskSourceTransform
         self.temporalSource = temporalSource
     }
 }
@@ -551,7 +554,7 @@ enum PreviewQuality: Equatable {
 
     var maximumDimension: Double? {
         switch self {
-        case .interactive: 720
+        case .interactive: 960
         case .balanced: 960
         case .full: nil
         }
@@ -802,6 +805,7 @@ final class CompositionRenderService {
 
     @MainActor
     func invalidatePreviewGraph() {
+        livePreviewState.invalidateComposedFrames()
         previewSupportsExactScrubbing = false
         previewGraph = nil
         previewGraphRevision &+= 1
@@ -815,6 +819,7 @@ final class CompositionRenderService {
         invalidation: EditorInvalidation,
         renderSessionID: UUID = UUID()
     ) async throws -> PreparedPreview? {
+        if !invalidation.isEmpty { livePreviewState.invalidateComposedFrames() }
         previewPreparationGeneration &+= 1
         let preparationGeneration = previewPreparationGeneration
         let signpostID = OSSignpostID(log: compositionMetricsLog)
@@ -1479,9 +1484,9 @@ final class CompositionRenderService {
         let logicalScale = CGFloat(renderSettings.width)
             / CGFloat(max(projectSettings.width, 1))
         switch qualityProfile {
-        case .interactive, .export:
+        case .export:
             return logicalScale
-        case .balanced:
+        case .interactive, .balanced:
             // A 1.5x supersampled vector proxy remains crisp on the preview
             // surface without forcing every text/shape project through a full
             // export-resolution frame graph.
@@ -1706,13 +1711,9 @@ final class CompositionRenderService {
                         start: max(source.sourceRange.start - artifact.sourceRange.start, 0),
                         duration: source.sourceRange.duration
                     )
-                    try insertRetimedTrack(
-                        sourceTrack: maskSourceTrack,
-                        compositionTrack: maskCompositionTrack,
-                        sourceRange: maskSourceRange,
-                        timelineStart: source.timelineStart,
-                        speedMap: source.speedMap
-                    )
+                    try insertRetimedTrack(sourceTrack: maskSourceTrack,
+                        compositionTrack: maskCompositionTrack, sourceRange: maskSourceRange,
+                        timelineStart: source.timelineStart, speedMap: source.speedMap)
                     backgroundMaskTrackID = maskCompositionTrack.trackID
                     backgroundMaskTrackIDs[source.id] = maskCompositionTrack.trackID
                     backgroundMaskSourceTransform = VideoSourceGeometry.normalizedTransform(
@@ -1750,7 +1751,7 @@ final class CompositionRenderService {
                 renderOrder: renderOrder,
                 temporalSource: EffectTemporalSource(url: mediaAsset.url,
                     sourceStart: source.sourceRange.start, sourceDuration: source.sourceRange.duration,
-                    speedMap: source.speedMap)
+                    speedMap: source.speedMap, backgroundMatteURL: mediaAsset.backgroundRemovalArtifact?.url)
             )
         )
         renderOrder += 1
@@ -2054,7 +2055,8 @@ final class CompositionRenderService {
                             temporalSource: mediaItem.mediaType == .video
                                 ? project.mediaLibrary[mediaItem.mediaID].map {
                                     EffectTemporalSource(url: $0.url, sourceStart: mediaItem.sourceRange.start,
-                                        sourceDuration: mediaItem.sourceRange.duration, speedMap: mediaItem.speedMap)
+                                        sourceDuration: mediaItem.sourceRange.duration, speedMap: mediaItem.speedMap,
+                                        backgroundMatteURL: $0.backgroundRemovalArtifact?.url)
                                 } : nil
                         )
                     )

@@ -21,7 +21,6 @@ enum RenderQualityProfile: String, Sendable {
 
 enum GeneratedRasterPolicy {
     static let maximumTextureDimension = 8_192
-    static let interactiveMaximumTextureDimension = 1_536
     static let maximumRasterizedCanvasCoverage: CGFloat = 10
     static let textCacheBytes = 64 * 1_024 * 1_024
     static let gpuImageCacheBytes = 256 * 1_024 * 1_024
@@ -223,7 +222,28 @@ final class LivePreviewRenderState: @unchecked Sendable {
     private var overrides: [UUID: LivePreviewClipOverride] = [:]
     private var forcesInteractiveQuality = false
     private var revision: UInt64 = 0
+    private let composedFrames = PreviewFrameCache()
     private var pausedFrameRenderer: ((Double, UUID, @escaping (CVPixelBuffer?) -> Void) -> Bool)?
+
+    func cachedFrame(at time: Double, sessionID: UUID) -> CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return composedFrames.frame(at: time, sessionID: sessionID, revision: revision)
+    }
+
+    func cacheFrame(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision renderedRevision: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard renderedRevision == revision else { return }
+        composedFrames.store(frame, at: time, sessionID: sessionID, revision: renderedRevision)
+    }
+
+    func invalidateComposedFrames() {
+        lock.lock()
+        revision &+= 1
+        composedFrames.removeAll()
+        lock.unlock()
+    }
 
     func installPausedFrameRenderer(
         _ render: @escaping (Double, UUID, @escaping (CVPixelBuffer?) -> Void) -> Bool
@@ -425,7 +445,6 @@ final class LivePreviewRenderState: @unchecked Sendable {
         lock.lock()
         if forcesInteractiveQuality != isEnabled {
             forcesInteractiveQuality = isEnabled
-            revision &+= 1
         }
         let currentRevision = revision
         lock.unlock()
@@ -652,10 +671,17 @@ struct LayerEffectCoordinates {
     let renderScale: CGFloat
     let inputTransform: CGAffineTransform
 
-    init(isGeneratedLayer: Bool, outputScale: CGFloat, rasterScaleCorrection: CGSize) {
+    init(isGeneratedLayer: Bool, outputScale: CGFloat, rasterScaleCorrection: CGSize,
+         mediaSize: CGSize? = nil, canvasSize: CGSize? = nil) {
         guard isGeneratedLayer else {
             renderScale = 1
-            inputTransform = .identity
+            // Media effects use project pixels just like generated layers. A
+            // proxy and its original must not assign different visual sizes to
+            // the same blur radius, grain cell or scanline spacing.
+            let fit = mediaSize.flatMap { source in
+                canvasSize.flatMap { VideoSourceGeometry.fitScale(sourceSize: source, inside: $0) }
+            } ?? 1
+            inputTransform = CGAffineTransform(scaleX: fit, y: fit)
             return
         }
         renderScale = 1
@@ -667,6 +693,12 @@ struct LayerEffectCoordinates {
             y: max(rasterScaleCorrection.height, 0.000_001) / outputScale
         )
     }
+}
+
+/// Frame-local scene sampling; the closure never escapes its command buffer.
+struct EffectMotionScene: @unchecked Sendable {
+    var hasAnimatedTransforms = false
+    let sample: (Double, String) throws -> CIImage
 }
 
 struct EffectRenderContext: Sendable {
@@ -681,6 +713,9 @@ struct EffectRenderContext: Sendable {
     var temporalPrefix = EffectStack()
     var temporalSourceExtent: CGRect? = nil
     var frameDuration: Double = 1 / 30
+    var effectInput: CIImage? = nil
+    var layerMotion: EffectLayerMotion? = nil
+    var motionScene: EffectMotionScene? = nil
 
     func deterministicSeed(storedSeed: UInt64, effectID: UUID) -> UInt32 {
         var value = storedSeed
@@ -726,6 +761,7 @@ struct MotionaryEffectUniforms {
     var parameters: SIMD4<Float>
     var sourceBounds = SIMD4<Float>(0, 0, 1, 1)
     var parameters2 = SIMD4<Float>(0.5, 0.5, 0, 0)
+    var parameters3 = SIMD4<Float>(1, 1, 1, 1)
 }
 
 struct MotionaryYUVUniforms {
@@ -758,6 +794,14 @@ enum MotionaryMetalEffectKind: UInt32 {
     case softGlow = 22
     case anamorphicFlare = 23
     case duotone = 24
+    case lightSweep = 25
+    case ribbedGlass = 26
+    case dither = 27
+    case halftone = 28
+    case colorSplash = 29
+    case neonEdges = 30
+    case cameraTransform = 31
+    case mirror = 32
 }
 
 struct EffectRenderDiagnostic: Equatable, Sendable {
