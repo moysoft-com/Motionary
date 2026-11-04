@@ -2447,6 +2447,103 @@ struct CanvasAndRenderingTests {
     }
 
     @MainActor
+    @Test func adjustmentTargetsRespectLayerOrderAndExclusions() throws {
+        let redID = UUID()
+        let greenID = UUID()
+        var red = shapeDescriptor(transform: ClipTransform(),
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+            width: 100, height: 100, renderOrder: 0)
+        red.layerID = redID
+        var green = shapeDescriptor(transform: ClipTransform(),
+            color: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1),
+            width: 20, height: 20, renderOrder: 1)
+        green.layerID = greenID
+        var adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+            clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(),
+            adjustments: AdjustmentSettings(saturation: AnimatableProperty(baseValue: 0)),
+            effectStack: EffectStack(), mask: nil, backgroundRemoval: nil,
+            blendMode: .normal, blendIntensity: 1, shape: nil, text: nil,
+            role: .adjustment, renderOrder: 2)
+        for targets in [
+            AdjustmentLayerTargets(mode: .selected, trackIDs: [redID]),
+            AdjustmentLayerTargets(mode: .excluding, trackIDs: [greenID])
+        ] {
+            adjustment.adjustmentTargets = targets
+            let affected = try renderPixel(clips: [red, green, adjustment], x: 10, y: 10)
+            let excluded = try renderPixel(clips: [red, green, adjustment], x: 50, y: 50)
+            #expect(abs(Int(affected[0]) - Int(affected[1])) < 12)
+            #expect(excluded[1] > excluded[0] + 60)
+        }
+
+        adjustment.adjustmentTargets = AdjustmentLayerTargets(mode: .selected, trackIDs: [])
+        let unaffected = try renderPixel(clips: [red, green, adjustment], x: 10, y: 10)
+        #expect(unaffected[0] > unaffected[1] + 60)
+    }
+
+    @MainActor
+    @Test func selectiveAdjustmentRendersEffectOnceForCombinedCanvas() throws {
+        let recorder = AdjustmentExtentRecorder()
+        let renderer = try MetalFrameRenderer(effectRegistry: EffectRenderRegistry(modules: [recorder]))
+        let included1 = UUID()
+        let included2 = UUID()
+        let excluded = UUID()
+        var first = shapeDescriptor(transform: ClipTransform(), color: .white, renderOrder: 0)
+        first.layerID = included1
+        var second = shapeDescriptor(transform: ClipTransform(), color: .white, renderOrder: 1)
+        second.layerID = included2
+        var third = shapeDescriptor(transform: ClipTransform(), color: .white, renderOrder: 2)
+        third.layerID = excluded
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .sepia))
+        var adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+            clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(), adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(effects: [effect]), mask: nil, backgroundRemoval: nil,
+            blendMode: .normal, blendIntensity: 1, shape: nil, text: nil,
+            role: .adjustment, renderOrder: 3
+        )
+        adjustment.adjustmentTargets = AdjustmentLayerTargets(mode: .excluding, trackIDs: [excluded])
+        _ = try renderPixel(clips: [first, second, third, adjustment], x: 50, y: 50, renderer: renderer)
+        #expect(recorder.extents == [CGRect(x: 0, y: 0, width: 100, height: 100)])
+    }
+
+    @MainActor
+    @Test func selectiveAdjustmentKeepsExcludedMiddleLayerInStackOrder() throws {
+        let recorder = AdjustmentExtentRecorder()
+        let renderer = try MetalFrameRenderer(effectRegistry: EffectRenderRegistry(modules: [recorder]))
+        let excluded = UUID()
+        var bottom = shapeDescriptor(transform: ClipTransform(),
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1), width: 100, height: 100, renderOrder: 0)
+        bottom.layerID = UUID()
+        var middle = shapeDescriptor(transform: ClipTransform(),
+            color: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1), width: 40, height: 40, renderOrder: 1)
+        middle.layerID = excluded
+        var top = shapeDescriptor(transform: ClipTransform(),
+            color: RGBAColor(red: 0, green: 0, blue: 1, alpha: 1), width: 10, height: 10, renderOrder: 2)
+        top.layerID = UUID()
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .sepia))
+        var adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+            clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(), adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(effects: [effect]), mask: nil, backgroundRemoval: nil,
+            blendMode: .normal, blendIntensity: 1, shape: nil, text: nil,
+            role: .adjustment, renderOrder: 3
+        )
+        adjustment.adjustmentTargets = AdjustmentLayerTargets(mode: .excluding, trackIDs: [excluded])
+        let clips = [bottom, middle, top, adjustment]
+        let middlePixel = try renderPixel(clips: clips, x: 35, y: 50, renderer: renderer)
+        let topPixel = try renderPixel(clips: clips, x: 50, y: 50, renderer: renderer)
+        #expect(middlePixel[1] > middlePixel[0] + 60 && middlePixel[1] > middlePixel[2] + 60)
+        #expect(topPixel[2] > topPixel[0] + 60 && topPixel[2] > topPixel[1] + 60)
+    }
+
+    @MainActor
     @Test func adjustmentLayerOnlyAffectsContentBelowDuringItsTimelineRange() throws {
         let background = shapeDescriptor(
             transform: ClipTransform(),
@@ -2582,6 +2679,25 @@ struct CanvasAndRenderingTests {
         #expect(abs(Int(adjustedBackground[1]) - Int(adjustedBackground[2])) < 12)
         #expect(untouchedForeground[1] > untouchedForeground[0] + 60)
         #expect(untouchedForeground[1] > untouchedForeground[2] + 60)
+
+        var targetedProject = project
+        let backgroundTrackID = targetedProject.tracks[2].id
+        guard case .adjustment(var targeted) = targetedProject.tracks[1].items[0] else {
+            Issue.record("Expected adjustment")
+            return
+        }
+        targeted.targets = AdjustmentLayerTargets(mode: .selected, trackIDs: [backgroundTrackID])
+        targetedProject.tracks[1].items[0] = .adjustment(targeted)
+        let targetedRender = try await CompositionRenderService().makeComposition(for: targetedProject)
+        let targetedInstruction = try #require(
+            targetedRender.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction
+        )
+        let backgroundDescriptor = try #require(targetedInstruction.clips.first { $0.clipID == background.id })
+        let adjustmentDescriptor = try #require(targetedInstruction.clips.first { $0.clipID == targeted.id })
+        #expect(backgroundDescriptor.layerID == backgroundTrackID)
+        #expect(adjustmentDescriptor.adjustmentTargets == targeted.targets)
+        let targetedPixel = try renderPixel(clips: targetedInstruction.clips, at: 0.5, x: 10, y: 10)
+        #expect(abs(Int(targetedPixel[0]) - Int(targetedPixel[1])) < 12)
     }
 
     @MainActor

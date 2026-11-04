@@ -47,17 +47,37 @@ struct AdjustmentScenePlacement {
     func transforms(at time: Double, referenceTime: Double? = nil,
                     components: String = "All") -> [CGAffineTransform] {
         var result = Array(repeating: CGAffineTransform.identity, count: clips.count)
-        var placement = CGAffineTransform.identity
         let bounds = CGRect(origin: .zero, size: canvasSize)
+        if !clips.contains(where: { $0.isAdjustmentLayer && $0.adjustmentTargets.mode != .all }) {
+            var placement = CGAffineTransform.identity
+            for index in clips.indices.reversed() {
+                result[index] = placement
+                let clip = clips[index]
+                let localTime = max(time - clip.timelineStart, 0)
+                guard clip.isAdjustmentLayer, clip.transform.opacity.value(at: localTime) > 0.000_001 else { continue }
+                let transform = EffectLayerMotion(transform: clip.transform, canvasSize: canvasSize, isGenerated: true)
+                    .placement(at: localTime, bounds: bounds,
+                        referenceTime: referenceTime.map { max($0 - clip.timelineStart, 0) }, components: components)
+                placement = transform.concatenating(placement)
+            }
+            return result
+        }
         for index in clips.indices.reversed() {
+            var placement = CGAffineTransform.identity
+            for laterIndex in clips.indices.reversed() where laterIndex > index {
+                let adjustment = clips[laterIndex]
+                let localTime = max(time - adjustment.timelineStart, 0)
+                guard adjustment.isAdjustmentLayer,
+                    adjustment.transform.opacity.value(at: localTime) > 0.000_001,
+                    adjustment.adjustmentTargets.mode == .all
+                        || clips[index].layerID.map(adjustment.adjustmentTargets.includes) == true
+                else { continue }
+                let transform = EffectLayerMotion(transform: adjustment.transform, canvasSize: canvasSize, isGenerated: true)
+                    .placement(at: localTime, bounds: bounds,
+                               referenceTime: referenceTime.map { max($0 - adjustment.timelineStart, 0) }, components: components)
+                placement = transform.concatenating(placement)
+            }
             result[index] = placement
-            let clip = clips[index]
-            let localTime = max(time - clip.timelineStart, 0)
-            guard clip.isAdjustmentLayer, clip.transform.opacity.value(at: localTime) > 0.000_001 else { continue }
-            let transform = EffectLayerMotion(transform: clip.transform, canvasSize: canvasSize, isGenerated: true)
-                .placement(at: localTime, bounds: bounds,
-                           referenceTime: referenceTime.map { max($0 - clip.timelineStart, 0) }, components: components)
-            placement = transform.concatenating(placement)
         }
         return result
     }
@@ -210,10 +230,40 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 colorSpace: resources.generatedColorSpace
             ) ?? CIColor.black
             var output = CIImage(color: backgroundColor).cropped(to: canvasRect)
+            let active = activeClips(in: plan, at: safeTime)
+            func isSelective(_ index: Int) -> Bool {
+                let targets = active[index].adjustmentTargets
+                if targets.mode == .selected { return true }
+                guard targets.mode == .excluding else { return false }
+                return active.prefix(index).contains { content in
+                    !content.isAdjustmentLayer
+                        && content.layerID.map { targets.trackIDs.contains($0) } == true
+                }
+            }
+            let lastTargetedIndex = active.indices.last { index in
+                let adjustment = active[index]
+                guard adjustment.isAdjustmentLayer, isSelective(index),
+                    adjustment.transform.opacity.value(at: max(0, safeTime - adjustment.timelineStart)) > 0.000_001,
+                    !adjustmentLayerIsNoOp(adjustment, at: max(0, safeTime - adjustment.timelineStart))
+                else { return false }
+                if adjustment.adjustmentTargets.mode == .excluding { return true }
+                return active.prefix(index).contains { content in
+                    !content.isAdjustmentLayer
+                        && content.layerID.map(adjustment.adjustmentTargets.includes) == true
+                }
+            }
+            if let lastTargetedIndex {
+                for adjustment in active.prefix(lastTargetedIndex + 1)
+                    where adjustment.isAdjustmentLayer && adjustment.adjustmentTargets.mode != .selected {
+                    output = try applyAdjustmentLayer(
+                        adjustment, to: output, canvasRect: canvasRect,
+                        at: max(0, safeTime - adjustment.timelineStart), compositionTime: safeTime,
+                        frameIndex: frameIndex, plan: plan, resources: frameResources
+                    )
+                }
+            }
             let initialBackground = output
             var motionScene = EffectMotionScene { _, _ in initialBackground }
-
-            let active = activeClips(in: plan, at: safeTime)
             let scenePlacement = AdjustmentScenePlacement(clips: active, canvasSize: plan.renderSize)
             let sceneTransforms = scenePlacement.transforms(at: safeTime)
             let needsMotionScene = active.contains { clip in
@@ -226,6 +276,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 let localTime = max(0, safeTime - clip.timelineStart)
                 let sceneTransform = sceneTransforms[clipIndex]
                 if clip.isAdjustmentLayer {
+                    if let lastTargetedIndex, clipIndex <= lastTargetedIndex { continue }
+                    if isSelective(clipIndex) { continue }
                     output = try measured("Adjustment Layer", id: signpostID) {
                         try applyAdjustmentLayer(
                             clip,
@@ -351,6 +403,44 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     var opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
                     opacity *= sourceResult.textAnimationSample?.opacity ?? 1
                     return applyOpacity(opacity, to: transformed)
+                }
+                if let lastTargetedIndex, clipIndex < lastTargetedIndex {
+                    for adjustment in active[(clipIndex + 1)...lastTargetedIndex] where adjustment.isAdjustmentLayer {
+                        guard adjustment.adjustmentTargets.mode == .all
+                            || clip.layerID.map(adjustment.adjustmentTargets.includes) == true
+                        else { continue }
+                        let frozenImage = image
+                        let motion = EffectLayerMotion(transform: clip.transform,
+                            canvasSize: plan.renderSize, isGenerated: isGeneratedLayer)
+                        let currentPlacement = motion.placement(at: localTime, bounds: placementExtent)
+                            .concatenating(sceneTransform)
+                        let hasAnimatedTransforms = !clip.transform.positionX.keyframes.isEmpty
+                            || !clip.transform.positionY.keyframes.isEmpty
+                            || !clip.transform.rotationDegrees.keyframes.isEmpty
+                            || !clip.transform.scale.keyframes.isEmpty
+                            || active.dropFirst(clipIndex + 1).contains(where: {
+                                $0.isAdjustmentLayer && (!$0.transform.positionX.keyframes.isEmpty
+                                    || !$0.transform.positionY.keyframes.isEmpty
+                                    || !$0.transform.rotationDegrees.keyframes.isEmpty
+                                    || !$0.transform.scale.keyframes.isEmpty)
+                            })
+                        let layerMotionScene = EffectMotionScene(hasAnimatedTransforms: hasAnimatedTransforms) { offset, components in
+                            let sampledSceneTransform = scenePlacement.transforms(
+                                at: max(safeTime - offset, 0), referenceTime: safeTime, components: components
+                            )[clipIndex]
+                            let sampledPlacement = motion.placement(
+                                at: max(localTime - offset, 0), bounds: placementExtent,
+                                referenceTime: localTime, components: components
+                            ).concatenating(sampledSceneTransform)
+                            return frozenImage.transformed(by: currentPlacement.inverted().concatenating(sampledPlacement))
+                        }
+                        image = try applyAdjustmentLayer(
+                            adjustment, to: image, canvasRect: canvasRect,
+                            at: max(0, safeTime - adjustment.timelineStart), compositionTime: safeTime,
+                            frameIndex: frameIndex, plan: plan, resources: frameResources,
+                            motionScene: layerMotionScene
+                        )
+                    }
                 }
                 if needsMotionScene {
                     // Freeze media pixels at the current frame; only placement is

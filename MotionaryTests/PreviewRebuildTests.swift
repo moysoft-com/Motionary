@@ -47,6 +47,40 @@ private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
 @Suite(.serialized)
 struct PreviewRebuildTests {
     @MainActor
+    @Test func adjustmentTargetChangesInvalidateAndRefreshPreview() async throws {
+        let shape = ShapeTimelineItem(
+            name: "Shape", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: .white, width: 64, height: 64),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        let shapeTrack = TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])
+        let adjustment = AdjustmentTimelineItem(timelineStart: 0, duration: 2)
+        let project = EditorProject(
+            title: "Adjustment targets",
+            renderSettings: RenderSettings(width: 96, height: 128, frameRate: 30),
+            tracks: [TimelineTrack(name: "Adjustment", kind: .visual, items: [.adjustment(adjustment)]), shapeTrack]
+        )
+        var updated = project
+        var changed = adjustment
+        changed.targets = AdjustmentLayerTargets(mode: .selected, trackIDs: [shapeTrack.id])
+        updated.tracks[0].items[0] = .adjustment(changed)
+        let invalidation = updated.renderInvalidation(comparedTo: project)
+        #expect(invalidation.contains(.previewFrame))
+        #expect(!invalidation.contains(.compositionTopology))
+
+        let service = CompositionRenderService()
+        _ = try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology, .audioMix])
+        let prepared = try #require(try await service.preparePreview(
+            for: updated, quality: .balanced, invalidation: invalidation
+        ))
+        let instruction = try #require(prepared.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        let descriptor = try #require(instruction.clips.first { $0.clipID == adjustment.id })
+        #expect(descriptor.adjustmentTargets == changed.targets)
+        #expect(!prepared.topologyWasRebuilt)
+    }
+
+    @MainActor
     @Test func seekingAfterSplitSurvivesTheScheduledPreviewRebuild() async throws {
         let shape = ShapeTimelineItem(
             name: "Split and seek", mediaID: MediaID(),

@@ -25,6 +25,7 @@ enum CoreEditorPanel: Hashable {
     case mask
     case removeBackground
     case blend
+    case adjustmentTargets
     case autoBeats
     case canvas
     case graph
@@ -147,6 +148,8 @@ struct ProjectEditorView: View {
                             isSupported = false
                         case .shape:
                             isSupported = clip.shape != nil
+                        case .adjustmentTargets:
+                            isSupported = false
                         case .transform, .adjust, .effects:
                             isSupported = clip.mediaType != .audio
                         case .audio:
@@ -174,7 +177,7 @@ struct ProjectEditorView: View {
                     } else if case .adjustment = viewModel.project.item(id: clipID) {
                         let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
                         switch panelToCheck {
-                        case .timeline, .transform, .adjust, .effects, .mask, .blend:
+                        case .timeline, .transform, .adjust, .effects, .mask, .blend, .adjustmentTargets:
                             break
                         default:
                             activePanel = .timeline
@@ -556,6 +559,8 @@ struct ProjectEditorView: View {
                 viewModel: viewModel,
                 item: propertyContextTimelineItem
             )
+        case .adjustmentTargets:
+            AdjustmentTargetsWorkspaceView(viewModel: viewModel, item: propertyContextTimelineItem)
         case .autoBeats:
             AutoBeatsWorkspaceView(
                 viewModel: viewModel,
@@ -802,7 +807,7 @@ extension CoreEditorPanel {
     var isPropertyPanel: Bool {
         isTextPanel || self == .shape || self == .transform || self == .adjust || self == .effects
             || self == .audio || self == .speed || self == .mask || self == .removeBackground
-            || self == .blend || self == .autoBeats
+            || self == .blend || self == .autoBeats || self == .adjustmentTargets
     }
 
     var isTextPanel: Bool {
@@ -834,7 +839,7 @@ extension CoreEditorPanel {
             .audio
         case .speed:
             nil
-        case .mask, .removeBackground, .blend, .autoBeats, .canvas, .timeline, .graph:
+        case .mask, .removeBackground, .blend, .adjustmentTargets, .autoBeats, .canvas, .timeline, .graph:
             nil
         }
     }

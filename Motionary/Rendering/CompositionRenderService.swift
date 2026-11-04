@@ -147,6 +147,8 @@ enum RenderLayerRole: Sendable, Equatable {
 
 /// Per-clip information consumed by the custom video compositor.
 struct RenderClipDescriptor: @unchecked Sendable {
+    var layerID: UUID? = nil
+    var adjustmentTargets: AdjustmentLayerTargets = AdjustmentLayerTargets()
     let trackID: CMPersistentTrackID
     let backgroundMaskTrackID: CMPersistentTrackID?
     /// Non-video visual sources are decoded once by the frame engine and use
@@ -1275,6 +1277,7 @@ final class CompositionRenderService {
             }
         }
 
+        renderClips = Self.annotateLayerTargets(renderClips, project: project)
         let duration = max(project.duration, 0)
         // A clip is never a reliable project clock: it can end before audio,
         // another layer, or a gap. Keep frame requests running to project end.
@@ -2139,7 +2142,28 @@ final class CompositionRenderService {
                 }
             }
         }
-        return descriptors
+        return annotateLayerTargets(descriptors, project: project)
+    }
+
+    private static func annotateLayerTargets(
+        _ descriptors: [RenderClipDescriptor], project: EditorProject
+    ) -> [RenderClipDescriptor] {
+        var layers: [UUID: UUID] = [:]
+        var targets: [UUID: AdjustmentLayerTargets] = [:]
+        for track in project.tracks {
+            for item in track.items {
+                layers[item.id] = track.id
+                if case .adjustment(let adjustment) = item {
+                    targets[item.id] = adjustment.targets
+                }
+            }
+        }
+        return descriptors.map { descriptor in
+            var descriptor = descriptor
+            descriptor.layerID = layers[descriptor.clipID]
+            descriptor.adjustmentTargets = targets[descriptor.clipID] ?? AdjustmentLayerTargets()
+            return descriptor
+        }
     }
 
     /// Returns whether the retained preview graph can accept a track-local

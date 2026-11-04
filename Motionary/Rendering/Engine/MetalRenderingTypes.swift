@@ -636,7 +636,7 @@ extension RenderClipDescriptor {
         if override.isHidden {
             transform.opacity = AnimatableProperty(baseValue: 0)
         }
-        return RenderClipDescriptor(
+        var result = RenderClipDescriptor(
             trackID: trackID,
             backgroundMaskTrackID: backgroundMaskTrackID,
             backgroundMaskImageURL: backgroundMaskImageURL,
@@ -661,6 +661,9 @@ extension RenderClipDescriptor {
             renderOrder: renderOrder,
             temporalSource: temporalSource
         )
+        result.layerID = layerID
+        result.adjustmentTargets = adjustmentTargets
+        return result
     }
 }
 

@@ -138,6 +138,16 @@ struct CoreToolBar: View {
                         }
                     }
 
+                    if case .adjustment = viewModel.selectedTimelineItem {
+                        CoreToolButton(
+                            systemName: "square.3.layers.3d",
+                            title: "Layers",
+                            isSelected: isPropertyToolSelected(.adjustmentTargets)
+                        ) {
+                            openPropertyPanel(.adjustmentTargets)
+                        }
+                    }
+
                     if supportsMask {
                         CoreToolButton(
                             systemName: "circle.dashed",

@@ -213,12 +213,32 @@ struct CaptionTimelineItem: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+/// Track identities remain stable when clips are moved or split.  A missing
+/// track is harmless, and can become active again after undo.
+struct AdjustmentLayerTargets: Codable, Equatable, Sendable {
+    enum Mode: String, Codable, CaseIterable, Sendable {
+        case all, selected, excluding
+    }
+
+    var mode: Mode = .all
+    var trackIDs: Set<UUID> = []
+
+    func includes(_ trackID: UUID) -> Bool {
+        switch mode {
+        case .all: true
+        case .selected: trackIDs.contains(trackID)
+        case .excluding: !trackIDs.contains(trackID)
+        }
+    }
+}
+
 struct AdjustmentTimelineItem: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     var name: String
     var timelineStart: Double
     var duration: Double
     var visuals: TimelineItemVisuals
+    var targets: AdjustmentLayerTargets
 
     var timelineEnd: Double { timelineStart + duration }
 
@@ -227,13 +247,32 @@ struct AdjustmentTimelineItem: Identifiable, Codable, Equatable, Sendable {
         name: String = "Adjustment",
         timelineStart: Double,
         duration: Double,
-        visuals: TimelineItemVisuals = TimelineItemVisuals()
+        visuals: TimelineItemVisuals = TimelineItemVisuals(),
+        targets: AdjustmentLayerTargets = AdjustmentLayerTargets()
     ) {
         self.id = id
         self.name = name
         self.timelineStart = max(0, timelineStart)
         self.duration = max(duration, 0.1)
         self.visuals = visuals
+        self.targets = targets
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, timelineStart, duration, visuals, targets
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(UUID.self, forKey: .id),
+            name: try container.decode(String.self, forKey: .name),
+            timelineStart: try container.decode(Double.self, forKey: .timelineStart),
+            duration: try container.decode(Double.self, forKey: .duration),
+            visuals: try container.decode(TimelineItemVisuals.self, forKey: .visuals),
+            targets: try container.decodeIfPresent(AdjustmentLayerTargets.self, forKey: .targets)
+                ?? AdjustmentLayerTargets()
+        )
     }
 }
 

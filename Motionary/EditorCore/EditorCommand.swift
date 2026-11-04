@@ -347,7 +347,8 @@ extension EditorProject {
                         blendMode: adjustment.visuals.blendMode,
                         blendIntensity: adjustment.visuals.blendIntensity,
                         shape: nil,
-                        text: nil
+                        text: nil,
+                        adjustmentTargets: adjustment.targets
                     )
                 case .caption, .compound:
                     nil
@@ -418,6 +419,7 @@ private struct RenderItemVisual: Equatable {
     let blendIntensity: Double
     let shape: ClipShape?
     let text: TextTimelineItem?
+    var adjustmentTargets: AdjustmentLayerTargets? = nil
 }
 
 private struct RenderClipAudio: Equatable {

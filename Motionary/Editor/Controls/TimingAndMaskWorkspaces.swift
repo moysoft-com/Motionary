@@ -2,6 +2,104 @@
 
 import SwiftUI
 
+struct AdjustmentTargetsWorkspaceView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    let item: TimelineItem?
+
+    var body: some View {
+        EditorWorkspaceShell(title: "Affected Layers", systemImage: "square.3.layers.3d") {
+            if case .adjustment(let adjustment) = item,
+                let location = viewModel.project.itemLocation(id: adjustment.id)
+            {
+                let tracks = Array(viewModel.project.tracks.dropFirst(location.track + 1))
+                    .filter { $0.kind == .visual || $0.kind == .shape || $0.kind == .text }
+                    .filter { !$0.items.contains(where: \.isAdjustmentLayer) }
+                VStack(alignment: .leading, spacing: 14) {
+                    Picker("Affect", selection: Binding(
+                        get: { adjustment.targets.mode },
+                        set: { mode in update(adjustment.id) { $0.mode = mode } }
+                    )) {
+                        Text("All").tag(AdjustmentLayerTargets.Mode.all)
+                        Text("Selected").tag(AdjustmentLayerTargets.Mode.selected)
+                        Text("Except").tag(AdjustmentLayerTargets.Mode.excluding)
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(adjustment.targets.mode == .all
+                        ? "Affects all visual layers below this adjustment."
+                        : adjustment.targets.mode == .selected
+                            ? "Choose the layers to affect. Effects are applied to each selected layer."
+                            : "Choose the layers to exclude. Effects are applied to each remaining layer.")
+                        .font(.caption)
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                    if adjustment.targets.mode != .all {
+                        if tracks.isEmpty {
+                            Text("There are no visual layers below this adjustment.")
+                                .font(.caption)
+                                .foregroundStyle(MotionaryTheme.textSecondary)
+                        }
+                        ForEach(tracks) { track in
+                            Button {
+                                update(adjustment.id) { targets in
+                                    if targets.trackIDs.contains(track.id) {
+                                        targets.trackIDs.remove(track.id)
+                                    } else {
+                                        targets.trackIDs.insert(track.id)
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: EditorWorkspaceControlStyle.horizontalSpacing) {
+                                    Image(systemName: timelineTrackIcon(for: track.kind))
+                                        .font(MotionaryDesign.Typography.compactIcon)
+                                        .foregroundStyle(MotionaryTheme.textSecondary)
+                                        .frame(width: 28, height: EditorWorkspaceControlStyle.height)
+                                    Text(track.name)
+                                        .font(MotionaryDesign.Typography.controlTitleStrong)
+                                        .foregroundStyle(MotionaryTheme.textPrimary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    if track.isMuted {
+                                        Text("Hidden")
+                                            .font(.caption)
+                                            .foregroundStyle(MotionaryTheme.textSecondary)
+                                    }
+                                    Image(systemName: adjustment.targets.trackIDs.contains(track.id)
+                                        ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(adjustment.targets.trackIDs.contains(track.id)
+                                            ? MotionaryTheme.textPrimary : MotionaryTheme.textSecondary)
+                                }
+                                .padding(.horizontal, EditorWorkspaceControlStyle.horizontalPadding)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: EditorWorkspaceControlStyle.height)
+                                .background(
+                                    EditorWorkspaceControlStyle.backgroundColor(),
+                                    in: RoundedRectangle(cornerRadius: EditorWorkspaceControlStyle.cornerRadius,
+                                        style: .continuous)
+                                )
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityValue(adjustment.targets.trackIDs.contains(track.id) ? "Selected" : "Not selected")
+                        }
+                    }
+                }
+                .disabled(viewModel.project.tracks[location.track].isLocked)
+            }
+        }
+    }
+
+    private func update(_ id: UUID, _ change: (inout AdjustmentLayerTargets) -> Void) {
+        viewModel.mutateProject { project in
+            guard let location = project.itemLocation(id: id),
+                !project.tracks[location.track].isLocked,
+                case .adjustment(var adjustment) = project.tracks[location.track].items[location.item]
+            else { return }
+            change(&adjustment.targets)
+            project.tracks[location.track].items[location.item] = .adjustment(adjustment)
+        }
+    }
+}
+
 struct SpeedWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let item: TimelineItem?

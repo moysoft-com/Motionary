@@ -7,6 +7,37 @@ import Testing
 
 @MainActor
 struct LayerManagementTests {
+    @Test func adjustmentTargetsRoundTripAndLegacyDefaults() throws {
+        let included = UUID()
+        let other = UUID()
+        let targets = AdjustmentLayerTargets(mode: .selected, trackIDs: [included])
+        let item = AdjustmentTimelineItem(timelineStart: 0, duration: 2, targets: targets)
+        let encoded = try JSONEncoder().encode(item)
+        let decoded = try JSONDecoder().decode(AdjustmentTimelineItem.self, from: encoded)
+        #expect(decoded.targets == targets)
+        #expect(decoded.targets.includes(included))
+        #expect(!decoded.targets.includes(other))
+
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object.removeValue(forKey: "targets")
+        let legacy = try JSONSerialization.data(withJSONObject: object)
+        let migrated = try JSONDecoder().decode(AdjustmentTimelineItem.self, from: legacy)
+        #expect(migrated.targets.mode == .all)
+        #expect(migrated.targets.includes(other))
+        #expect(!AdjustmentLayerTargets(mode: .excluding, trackIDs: [included]).includes(included))
+        #expect(AdjustmentLayerTargets(mode: .excluding, trackIDs: [included]).includes(other))
+
+        let split = try #require(TimelineItem.adjustment(item).split(at: 1))
+        guard case .adjustment(let left) = split.left,
+            case .adjustment(let right) = split.right
+        else {
+            Issue.record("Expected two adjustment layers")
+            return
+        }
+        #expect(left.targets == targets)
+        #expect(right.targets == targets)
+    }
+
     @Test func toolbarCanCreateMultipleTemporaryUndefinedLayers() async throws {
         let viewModel = EditorViewModel(
             projectID: UUID(),
