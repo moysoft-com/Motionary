@@ -7,6 +7,28 @@ import Testing
 
 @MainActor
 struct LayerManagementTests {
+    @Test func adjustmentWorkspaceExposesEarlierGroupsAsAtomicInputs() {
+        func shape(_ name: String) -> TimelineTrack {
+            TimelineTrack(name: name, kind: .shape, items: [.shape(ShapeTimelineItem(
+                name: name, mediaID: MediaID(), shape: ClipShape(kind: .rectangle, color: .white),
+                timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2)))])
+        }
+        let a = shape("A")
+        let b = shape("B")
+        let c = shape("C")
+        let lower = AdjustmentTimelineItem(timelineStart: 0, duration: 2,
+            targets: AdjustmentLayerTargets(mode: .selected, trackIDs: [a.id, b.id]))
+        let group = TimelineTrack(name: "Lower adjustment", kind: .visual, items: [.adjustment(lower)])
+        let upper = AdjustmentTimelineItem(timelineStart: 0, duration: 2)
+        let project = EditorProject(title: "Groups", tracks: [
+            TimelineTrack(name: "Upper", kind: .visual, items: [.adjustment(upper)]), c, group, b, a])
+        let inputs = project.adjustmentGroupInputs(for: upper.id, at: 1)
+        #expect(inputs.map(\.id) == [c.id, group.id])
+        #expect(inputs.last?.isGroup == true)
+        #expect(inputs.last?.memberIDs == Set([a.id, b.id, group.id]))
+        #expect(project.adjustmentGroupInputs(for: upper.id, at: 3).isEmpty)
+    }
+
     @Test func adjustmentTargetsRoundTripAndLegacyDefaults() throws {
         let included = UUID()
         let other = UUID()

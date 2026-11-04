@@ -159,3 +159,28 @@ Media effects run in project-pixel coordinates, matching generated and adjustmen
 layers. Proxy dimensions and export dimensions do not redefine an authored effect
 radius or procedural cell. Grain is added in perceptual color space so its contrast does not brighten dark
 pixels disproportionately when resampled. Scanlines integrate their authored pixel footprint.
+
+
+### Adjustment render groups
+
+Adjustment inputs are composited in project-canvas coordinates into a transparent
+canvas-sized image before running the adjustment stack once per contiguous run. Small layer extents
+must be expanded with a transparent canvas, not merely cropped. Preview and export
+use the same group compositor. Source preparation remains once per active clip;
+adding group members does not multiply adjustment effect invocations. Motion blur
+still samples the group's shared motion scene over its shutter interval.
+
+Excluded inputs retain their original depth and split selected inputs into
+contiguous runs. Each run is composited into a full canvas before effects are
+applied, preserving shared coordinates, transparency and the excluded input's
+stack position. The number of adjustment evaluations follows depth runs rather
+than source count. Spatial filters cannot mix pixels across an excluded depth
+boundary; this is the defined tradeoff for preserving the original flat stack.
+The canvas background remains outside selective runs. `All` includes it as before.
+
+Earlier adjustment outputs are atomic group inputs. Selecting any member includes
+the whole earlier group, and excluding any member excludes it. The workspace shows
+these groups as single rows and stores selections by stable track identities.
+The input list follows active sources at the playhead (clamped to the selected
+adjustment's interval). Effects, masks, opacity, and group transforms retain their
+canvas coordinate domain through nested groups.

@@ -2,7 +2,52 @@
 
 import Foundation
 
+struct AdjustmentGroupInput: Identifiable {
+    let track: TimelineTrack
+    var memberIDs: Set<UUID>
+    var isGroup = false
+    var sourceCount = 1
+    var id: UUID { track.id }
+}
+
 extension EditorProject {
+    /// The actual isolated inputs available below an adjustment at the playhead.
+    /// Earlier adjustments become atomic group inputs, matching the compositor.
+    func adjustmentGroupInputs(for itemID: UUID, at time: Double) -> [AdjustmentGroupInput] {
+        guard let location = itemLocation(id: itemID) else { return [] }
+        var inputs: [AdjustmentGroupInput] = []
+        for track in tracks.dropFirst(location.track + 1).reversed() where !track.isMuted {
+            guard track.kind == .visual || track.kind == .shape || track.kind == .text else { continue }
+            for item in track.items.sorted(by: { $0.timelineStart < $1.timelineStart })
+                where item.timelineStart <= time && item.timelineEnd > time {
+                if case .adjustment(let adjustment) = item {
+                    guard adjustment.visuals.transform.opacity.value(at: max(time - item.timelineStart, 0)) > 0.000_001 else { continue }
+                    func matches(_ input: AdjustmentGroupInput) -> Bool {
+                        switch adjustment.targets.mode {
+                        case .all: true
+                        case .selected: !input.memberIDs.isDisjoint(with: adjustment.targets.trackIDs)
+                        case .excluding: input.memberIDs.isDisjoint(with: adjustment.targets.trackIDs)
+                        }
+                    }
+                    let selected = inputs.filter(matches)
+                    guard !selected.isEmpty || adjustment.targets.mode == .all else { continue }
+                    let insertion = inputs.lastIndex(where: matches).map { anchor in
+                        inputs.prefix(anchor).filter { !matches($0) }.count
+                    } ?? inputs.count
+                    var members = selected.reduce(into: Set<UUID>()) { $0.formUnion($1.memberIDs) }
+                    members.insert(track.id)
+                    inputs.removeAll(where: matches)
+                    inputs.insert(AdjustmentGroupInput(track: track, memberIDs: members, isGroup: true, sourceCount: selected.reduce(0) { $0 + $1.sourceCount }), at: insertion)
+                } else if item.editableVisuals != nil {
+                    if !inputs.contains(where: { $0.id == track.id }) {
+                        inputs.append(AdjustmentGroupInput(track: track, memberIDs: [track.id]))
+                    }
+                }
+            }
+        }
+        return inputs.reversed()
+    }
+
     func item(id: UUID) -> TimelineItem? {
         tracks.lazy.flatMap(\.items).first { $0.id == id }
     }

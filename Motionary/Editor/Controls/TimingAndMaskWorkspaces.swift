@@ -5,15 +5,21 @@ import SwiftUI
 struct AdjustmentTargetsWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let item: TimelineItem?
+    @ObservedObject private var playbackState: PlaybackState
+
+    init(viewModel: EditorViewModel, item: TimelineItem?) {
+        self.viewModel = viewModel
+        self.item = item
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+    }
 
     var body: some View {
         EditorWorkspaceShell(title: "Affected Layers", systemImage: "square.3.layers.3d") {
             if case .adjustment(let adjustment) = item,
                 let location = viewModel.project.itemLocation(id: adjustment.id)
             {
-                let tracks = Array(viewModel.project.tracks.dropFirst(location.track + 1))
-                    .filter { $0.kind == .visual || $0.kind == .shape || $0.kind == .text }
-                    .filter { !$0.items.contains(where: \.isAdjustmentLayer) }
+                let inputs = viewModel.project.adjustmentGroupInputs(for: adjustment.id,
+                    at: min(max(playbackState.currentTime, adjustment.timelineStart), adjustment.timelineEnd - 0.000_001))
                 VStack(alignment: .leading, spacing: 14) {
                     Picker("Affect", selection: Binding(
                         get: { adjustment.targets.mode },
@@ -28,44 +34,53 @@ struct AdjustmentTargetsWorkspaceView: View {
                     Text(adjustment.targets.mode == .all
                         ? "Affects all visual layers below this adjustment."
                         : adjustment.targets.mode == .selected
-                            ? "Choose the layers to affect. Effects are applied to each selected layer."
-                            : "Choose the layers to exclude. Effects are applied to each remaining layer.")
+                            ? "Choose the inputs for one canvas-sized effect group."
+                            : "Unchecked inputs form one canvas-sized effect group.")
                         .font(.caption)
                         .foregroundStyle(MotionaryTheme.textSecondary)
                     if adjustment.targets.mode != .all {
-                        if tracks.isEmpty {
-                            Text("There are no visual layers below this adjustment.")
+                        if inputs.isEmpty {
+                            Text("There are no active visual inputs below this adjustment at this time.")
                                 .font(.caption)
                                 .foregroundStyle(MotionaryTheme.textSecondary)
                         }
-                        ForEach(tracks) { track in
+                        ForEach(inputs) { input in
+                            let track = input.track
+                            let isChecked = !adjustment.targets.trackIDs.isDisjoint(with: input.memberIDs)
                             Button {
                                 update(adjustment.id) { targets in
-                                    if targets.trackIDs.contains(track.id) {
-                                        targets.trackIDs.remove(track.id)
+                                    if !targets.trackIDs.isDisjoint(with: input.memberIDs) {
+                                        targets.trackIDs.subtract(input.memberIDs)
                                     } else {
                                         targets.trackIDs.insert(track.id)
                                     }
                                 }
                             } label: {
                                 HStack(spacing: EditorWorkspaceControlStyle.horizontalSpacing) {
-                                    Image(systemName: timelineTrackIcon(for: track.kind))
+                                    Image(systemName: input.isGroup ? "square.stack.3d.up" : timelineTrackIcon(for: track.kind))
                                         .font(MotionaryDesign.Typography.compactIcon)
                                         .foregroundStyle(MotionaryTheme.textSecondary)
                                         .frame(width: 28, height: EditorWorkspaceControlStyle.height)
-                                    Text(track.name)
-                                        .font(MotionaryDesign.Typography.controlTitleStrong)
-                                        .foregroundStyle(MotionaryTheme.textPrimary)
-                                        .lineLimit(1)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(track.name)
+                                            .font(MotionaryDesign.Typography.controlTitleStrong)
+                                            .foregroundStyle(MotionaryTheme.textPrimary)
+                                            .lineLimit(1)
+                                        if input.isGroup {
+                                            Text("Adjustment group · \(input.sourceCount) layers")
+                                                .font(.caption2)
+                                                .foregroundStyle(MotionaryTheme.textSecondary)
+                                        }
+                                    }
                                     Spacer()
                                     if track.isMuted {
                                         Text("Hidden")
                                             .font(.caption)
                                             .foregroundStyle(MotionaryTheme.textSecondary)
                                     }
-                                    Image(systemName: adjustment.targets.trackIDs.contains(track.id)
+                                    Image(systemName: isChecked
                                         ? "checkmark.circle.fill" : "circle")
-                                        .foregroundStyle(adjustment.targets.trackIDs.contains(track.id)
+                                        .foregroundStyle(isChecked
                                             ? MotionaryTheme.textPrimary : MotionaryTheme.textSecondary)
                                 }
                                 .padding(.horizontal, EditorWorkspaceControlStyle.horizontalPadding)
@@ -79,7 +94,7 @@ struct AdjustmentTargetsWorkspaceView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .accessibilityValue(adjustment.targets.trackIDs.contains(track.id) ? "Selected" : "Not selected")
+                            .accessibilityValue(isChecked ? "Selected" : "Not selected")
                         }
                     }
                 }
