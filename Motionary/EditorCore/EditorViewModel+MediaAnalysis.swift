@@ -163,7 +163,7 @@ extension EditorViewModel {
         }
     }
 
-    func analyzeSelectedAudioBeats(precision: AudioBeatModelPrecision = .fp16) {
+    func analyzeSelectedAudioBeats() {
         guard case .media(let item) = selectedTimelineItem,
             item.mediaType == .audio,
             !isPerformingLongTask
@@ -182,7 +182,7 @@ extension EditorViewModel {
             }
             do {
                 let analysis = try await AudioBeatAnalysisService().analyze(
-                    url: sourceURL, precision: precision
+                    url: sourceURL
                 ) { [weak self] progress in
                     Task { @MainActor in
                         self?.updateAnalysisProgress(progress, kind: .audioBeats)

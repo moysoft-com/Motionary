@@ -298,6 +298,8 @@ struct ItemMask: Codable, Equatable, Sendable {
     var roundnessScale: Double
     var rotationDegrees: Double
     var offsetScale: Double
+    var offsetX: Double
+    var offsetY: Double
     var isInverted: Bool
 
     /// Legacy initializer retained for existing call sites and decoded projects.
@@ -314,6 +316,8 @@ struct ItemMask: Codable, Equatable, Sendable {
         roundnessScale = shape == .roundedRectangle ? 0.36 : 0
         rotationDegrees = 0
         offsetScale = 0
+        offsetX = 0
+        offsetY = 0
         isInverted = false
     }
 
@@ -325,6 +329,8 @@ struct ItemMask: Codable, Equatable, Sendable {
         roundnessScale: Double? = nil,
         rotationDegrees: Double = 0,
         offsetScale: Double = 0,
+        offsetX: Double = 0,
+        offsetY: Double = 0,
         isInverted: Bool = false
     ) {
         self.shape = shape
@@ -337,6 +343,8 @@ struct ItemMask: Codable, Equatable, Sendable {
         )
         self.rotationDegrees = rotationDegrees.isFinite ? rotationDegrees : 0
         self.offsetScale = Self.bounded(offsetScale, to: -1...1)
+        self.offsetX = Self.bounded(offsetX, to: -1...1)
+        self.offsetY = Self.bounded(offsetY, to: -1...1)
         self.isInverted = isInverted
     }
 
@@ -360,6 +368,8 @@ struct ItemMask: Codable, Equatable, Sendable {
         case roundnessScale
         case rotationDegrees
         case offsetScale
+        case offsetX
+        case offsetY
         case isInverted
         case insetX
         case insetY
@@ -378,6 +388,8 @@ struct ItemMask: Codable, Equatable, Sendable {
                 roundnessScale: try container.decodeIfPresent(Double.self, forKey: .roundnessScale),
                 rotationDegrees: try container.decodeIfPresent(Double.self, forKey: .rotationDegrees) ?? 0,
                 offsetScale: try container.decodeIfPresent(Double.self, forKey: .offsetScale) ?? 0,
+                offsetX: try container.decodeIfPresent(Double.self, forKey: .offsetX) ?? 0,
+                offsetY: try container.decodeIfPresent(Double.self, forKey: .offsetY) ?? 0,
                 isInverted: try container.decodeIfPresent(Bool.self, forKey: .isInverted) ?? false
             )
         } else {
@@ -399,6 +411,8 @@ struct ItemMask: Codable, Equatable, Sendable {
         try container.encode(roundnessScale, forKey: .roundnessScale)
         try container.encode(rotationDegrees, forKey: .rotationDegrees)
         try container.encode(offsetScale, forKey: .offsetScale)
+        try container.encode(offsetX, forKey: .offsetX)
+        try container.encode(offsetY, forKey: .offsetY)
         try container.encode(isInverted, forKey: .isInverted)
     }
 

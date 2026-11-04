@@ -59,9 +59,10 @@ Choice controls participate in undo and persistence; numeric controls support ke
 
 Reverse Time has been removed. Persisted legacy markers are ignored by preview and export.
 
-Motion Blur integrates object transforms using the current image at every shutter
-sample. Movement inside video footage is never temporally sampled. Position,
-rotation and scale can be included independently in any combination. Static
+Motion Blur integrates object transforms and preceding Shake, Camera Wiggle and
+Zoom effects at every shutter sample. Movement inside video footage is never
+temporally sampled. For object transforms, position, rotation and scale can be
+included independently in any combination. Static
 objects pass through unchanged; blur can extend beyond the original object bounds.
 Masks are applied before integration. On adjustment layers, the compositor samples
 the placements of all underlying layers while freezing their source pixels,

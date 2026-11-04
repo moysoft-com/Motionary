@@ -6,6 +6,29 @@ import Testing
 @testable import Motionary
 
 struct TimelinePlacementTests {
+    @Test func snapDistanceRemainsSmallAtEveryZoom() {
+        #expect(TimelineSnapDistance.threshold(pixelsPerSecond: 20) == 0.08)
+        #expect(abs(TimelineSnapDistance.threshold(pixelsPerSecond: 100) - 0.06) < 0.0001)
+        #expect(abs(TimelineSnapDistance.threshold(pixelsPerSecond: 280) * 280 - 6) < 0.0001)
+    }
+
+    @Test func nearbySnapTargetsLeaveRoomForFreePlacement() {
+        let clip = TimelineClip(
+            name: "Moving",
+            source: ClipSource(url: URL(fileURLWithPath: "/tmp/moving.mov"), mediaType: .video, originalDuration: 1),
+            timelineStart: 2,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let project = EditorProject(title: "Snap", tracks: [TimelineTrack(name: "Layer", kind: .visual, clips: [clip])])
+        let session = TimelinePlacementDragSession(project: project, itemID: clip.id, currentTime: 1)!
+        let threshold = TimelineSnapDistance.threshold(pixelsPerSecond: 100)
+        let near = session.resolve(proposedStart: 1.04, proposedTrackIndex: 0, snapThreshold: threshold)
+        let outside = session.resolve(proposedStart: 1.09, proposedTrackIndex: 0, snapThreshold: threshold)
+        #expect(near.start == 1)
+        #expect(abs(outside.start - 1.09) < 0.0001)
+        #expect(!outside.snapped)
+    }
+
     @Test func snappingAlwaysChoosesNearestEligibleAnchor() async throws {
         let firstAnchor = TimelineClip(
             name: "First",

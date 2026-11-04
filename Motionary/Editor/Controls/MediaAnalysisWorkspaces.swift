@@ -225,7 +225,6 @@ struct RemoveBackgroundWorkspaceView: View {
 struct AutoBeatsWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let item: TimelineItem?
-    @State private var precision: AudioBeatModelPrecision = .fp16
 
     var body: some View {
         EditorWorkspaceShell(
@@ -241,17 +240,6 @@ struct AutoBeatsWorkspaceView: View {
             disablesContentWhenUnavailable: true
         ) {
             VStack(spacing: 14) {
-                Picker("Model precision", selection: $precision) {
-                    Text("Standard").tag(AudioBeatModelPrecision.fp16)
-                    Text("High precision").tag(AudioBeatModelPrecision.fp32)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityLabel("Beat analysis model precision")
-                if precision == .fp32 {
-                    Text("High precision uses more processing time.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 if let analysis = audioItem?.beatAnalysis {
                     HStack(spacing: 18) {
                         BeatMetric(title: "Tempo", value: String(format: "%.1f BPM", analysis.bpm))
@@ -287,13 +275,13 @@ struct AutoBeatsWorkspaceView: View {
                                 }
                             }
                         } label: {
-                            Label("Suggested cuts", systemImage: "scissors")
+                            Label("Suggested cuts", systemImage: "sparkles.2")
                         }
                     }
 
                     HStack(spacing: 8) {
                         EditorWorkspaceCommandButton(title: "Reanalyze", systemImage: "arrow.clockwise") {
-                            viewModel.analyzeSelectedAudioBeats(precision: precision)
+                            viewModel.analyzeSelectedAudioBeats()
                         }
 
                         EditorWorkspaceCommandButton(title: "Delete", systemImage: "trash", role: .destructive) {
@@ -310,19 +298,15 @@ struct AutoBeatsWorkspaceView: View {
                         title: "Analyze",
                         systemImage: "waveform.badge.magnifyingglass"
                     ) {
-                        viewModel.analyzeSelectedAudioBeats(precision: precision)
+                        viewModel.analyzeSelectedAudioBeats()
                     }
                 }
             }
             .disabled(viewModel.isPerformingLongTask)
         }
-        .onAppear { precision = audioItem?.beatAnalysis?.modelPrecision ?? .fp16 }
-        .onChange(of: audioItem?.id) { _, _ in
-            precision = audioItem?.beatAnalysis?.modelPrecision ?? .fp16
-        }
     }
 
-    private struct SuggestedCut: Identifiable {
+    struct SuggestedCut: Identifiable {
         let sourceTime: Double
         let timelineTime: Double
         let score: Double
@@ -330,9 +314,16 @@ struct AutoBeatsWorkspaceView: View {
     }
 
     private var suggestedCuts: [SuggestedCut] {
-        guard let audioItem, let analysis = audioItem.beatAnalysis else { return [] }
+        guard let audioItem else { return [] }
+        return Self.suggestedCuts(for: audioItem)
+    }
+
+    static func suggestedCuts(for audioItem: MediaTimelineItem) -> [SuggestedCut] {
+        guard let analysis = audioItem.beatAnalysis else { return [] }
         return analysis.markers.compactMap { marker -> SuggestedCut? in
-            let cutTime = marker.audibleOnset ?? marker.sourceTime
+            // Suggested cuts must land on the same beat positions shown and
+            // used for snapping in the timeline.
+            let cutTime = marker.sourceTime
             guard let score = marker.editScore, score.isFinite,
                   cutTime >= audioItem.sourceRange.start,
                   cutTime <= audioItem.sourceRange.end else { return nil }
@@ -343,7 +334,9 @@ struct AutoBeatsWorkspaceView: View {
             guard local >= 0.16, local <= audioItem.timelineDuration - 0.16 else { return nil }
             return SuggestedCut(sourceTime: cutTime,
                                 timelineTime: audioItem.timelineStart + local, score: score)
-        }.sorted { $0.score > $1.score }.prefix(8).map { $0 }
+        }.sorted {
+            $0.score == $1.score ? $0.timelineTime < $1.timelineTime : $0.score > $1.score
+        }.prefix(8).sorted { $0.timelineTime < $1.timelineTime }
     }
 
     private var audioItem: MediaTimelineItem? {

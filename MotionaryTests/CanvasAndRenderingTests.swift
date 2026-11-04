@@ -45,6 +45,17 @@ private final class DiagnosticsRecorder: @unchecked Sendable {
     }
 }
 
+private final class AdjustmentExtentRecorder: EffectRenderModule, @unchecked Sendable {
+    let moduleID: EffectModuleID = .sepia
+    private(set) var extents: [CGRect] = []
+
+    func render(_ image: CIImage, effect: EffectInstance, context: EffectRenderContext,
+                resources: MetalFrameResources) throws -> EffectRenderResult {
+        extents.append(image.extent)
+        return EffectRenderResult(image: image)
+    }
+}
+
 @Suite(.serialized)
 struct CanvasAndRenderingTests {
     @Test(arguments: [1.0, 0.45])
@@ -2574,6 +2585,130 @@ struct CanvasAndRenderingTests {
     }
 
     @MainActor
+    @Test(arguments: [0.1, 1.0, 10.0])
+    func adjustmentEffectsKeepCanvasExtentWhileZooming(scale: Double) throws {
+        let recorder = AdjustmentExtentRecorder()
+        let renderer = try MetalFrameRenderer(effectRegistry: EffectRenderRegistry(modules: [recorder]))
+        let object = shapeDescriptor(transform: ClipTransform(), color: .white,
+                                     width: 100, height: 100, renderOrder: 0)
+        var transform = ClipTransform()
+        transform.scale = AnimatableScale(baseValue: ScaleValue(x: scale, y: scale))
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .sepia))
+        let adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+            clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: transform, adjustments: AdjustmentSettings(), effectStack: EffectStack(effects: [effect]),
+            mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1,
+            shape: nil, text: nil, role: .adjustment, renderOrder: 1
+        )
+        _ = try renderPixel(clips: [object, adjustment], x: 50, y: 50, renderer: renderer)
+        #expect(recorder.extents == [CGRect(x: 0, y: 0, width: 100, height: 100)])
+    }
+
+    @MainActor
+    @Test func adjustmentChainsDiscardReplacedSceneBounds() throws {
+        let recorder = AdjustmentExtentRecorder()
+        let renderer = try MetalFrameRenderer(effectRegistry: EffectRenderRegistry(modules: [recorder]))
+        let object = shapeDescriptor(transform: ClipTransform(), color: .white,
+                                     width: 100, height: 100, renderOrder: 0)
+        func adjustment(scale: Double, order: Int, stack: EffectStack = EffectStack()) -> RenderClipDescriptor {
+            var transform = ClipTransform()
+            transform.scale = AnimatableScale(baseValue: ScaleValue(x: scale, y: scale))
+            return RenderClipDescriptor(
+                trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+                clipID: UUID(), timelineStart: 0, duration: 1,
+                sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+                transform: transform, adjustments: AdjustmentSettings(), effectStack: stack,
+                mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1,
+                shape: nil, text: nil, role: .adjustment, renderOrder: order
+            )
+        }
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .sepia))
+        let pixel = try renderPixel(clips: [object, adjustment(scale: 10, order: 1),
+                                           adjustment(scale: 0.1, order: 2),
+                                           adjustment(scale: 1, order: 3, stack: EffectStack(effects: [effect]))],
+                                    x: 50, y: 50, renderer: renderer)
+        #expect(recorder.extents == [CGRect(x: 0, y: 0, width: 100, height: 100)])
+        #expect(pixel[0] > 240)
+    }
+
+    @MainActor
+    @Test func adjustmentTransformLeavesProjectBackgroundInPlace() throws {
+        var transform = ClipTransform()
+        transform.positionX = AnimatableProperty(baseValue: 1)
+        let adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+            clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: transform, adjustments: AdjustmentSettings(), effectStack: EffectStack(),
+            mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1,
+            shape: nil, text: nil, role: .adjustment, renderOrder: 0
+        )
+        let pixel = try renderPixel(clips: [adjustment], x: 10, y: 50,
+                                    backgroundColor: RGBAColor(red: 0, green: 1, blue: 0, alpha: 1))
+        #expect(pixel[1] > 200)
+    }
+
+    @MainActor
+    @Test func adjustmentTransformRevealsContentOutsideCanvas() throws {
+        var objectTransform = ClipTransform()
+        objectTransform.positionX = AnimatableProperty(baseValue: 1.5)
+        let object = shapeDescriptor(
+            transform: objectTransform,
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+            renderOrder: 0
+        )
+        var transform = ClipTransform()
+        transform.positionX = AnimatableProperty(baseValue: -1)
+        let adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid, backgroundMaskTrackID: nil,
+            clipID: UUID(), timelineStart: 0, duration: 1,
+            sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: transform, adjustments: AdjustmentSettings(), effectStack: EffectStack(),
+            mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1,
+            shape: nil, text: nil, role: .adjustment, renderOrder: 1
+        )
+        let pixel = try renderPixel(clips: [object, adjustment], x: 75, y: 50)
+        #expect(pixel[0] > 200)
+    }
+
+    @MainActor
+    @Test func adjustmentTransformMovesUnderlyingComposite() throws {
+        let below = shapeDescriptor(
+            transform: ClipTransform(),
+            color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1),
+            renderOrder: 0
+        )
+        var transform = ClipTransform()
+        transform.positionX = AnimatableProperty(baseValue: 0.5)
+        let adjustment = RenderClipDescriptor(
+            trackID: kCMPersistentTrackID_Invalid,
+            backgroundMaskTrackID: nil,
+            clipID: UUID(),
+            timelineStart: 0,
+            duration: 1,
+            sourceTransform: .identity,
+            backgroundMaskSourceTransform: .identity,
+            transform: transform,
+            adjustments: AdjustmentSettings(),
+            effectStack: EffectStack(),
+            mask: nil,
+            backgroundRemoval: nil,
+            blendMode: .normal,
+            blendIntensity: 1,
+            shape: nil,
+            text: nil,
+            role: .adjustment,
+            renderOrder: 1
+        )
+        let original = try renderPixel(clips: [below, adjustment], x: 50, y: 50)
+        let moved = try renderPixel(clips: [below, adjustment], x: 75, y: 50)
+        #expect(original[0] < 30)
+        #expect(moved[0] > 200)
+    }
+
+    @MainActor
     @Test func adjustmentLayerEffectAndMaskOperateOnCanvasSizedComposite() throws {
         let background = shapeDescriptor(
             transform: ClipTransform(),
@@ -3235,7 +3370,8 @@ struct CanvasAndRenderingTests {
         x: Int,
         y: Int,
         backgroundColor: RGBAColor = .black,
-        livePreviewState: LivePreviewRenderState? = nil
+        livePreviewState: LivePreviewRenderState? = nil,
+        renderer: MetalFrameRenderer? = nil
     ) throws -> [UInt8] {
         var pixelBuffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
@@ -3251,7 +3387,7 @@ struct CanvasAndRenderingTests {
         )
         #expect(status == kCVReturnSuccess)
         let destination = try #require(pixelBuffer)
-        try MetalFrameRenderer().render(
+        try (renderer ?? MetalFrameRenderer()).render(
             plan: FrameRenderPlan(
                 renderSize: CGSize(width: 100, height: 100),
                 renderScale: 1,

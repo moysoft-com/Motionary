@@ -41,11 +41,8 @@ struct NeuralBeatIntegrationTests {
             try file.write(from: buffer)
         }
         let result = try await AudioBeatAnalysisService().analyze(url: url, fingerprint: "synthetic")
-        let highPrecision = try await AudioBeatAnalysisService().analyze(url: url, fingerprint: "synthetic", precision: .fp32)
-        #expect(highPrecision.modelPrecision == .fp32)
-        #expect(highPrecision.method == .neuralStructured)
-        #expect(abs(highPrecision.bpm - 120) < 4)
-        #expect(result.algorithmVersion == 5)
+        #expect(result.modelPrecision == .fp32)
+        #expect(result.algorithmVersion == NeuralBeatAnalyzer.algorithmVersion)
         #expect(result.method == .neuralStructured)
         #expect(abs(result.bpm - 120) < 4)
         #expect(result.markers.count >= 14)

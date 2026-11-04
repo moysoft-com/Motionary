@@ -748,30 +748,12 @@ struct PreviewTransformCanvas: View {
             if isSelectedItemActive,
                 let adjustment = selectedAdjustmentItem
             {
-                let frame = previewFrame(
-                    for: adjustment,
-                    transform: liveTransform ?? adjustment.visuals.transform
-                )
-                PreviewSelectionBox(
-                    frame: selectionFrame(from: frame),
-                    style: .adjustment,
-                    onDelete: viewModel.deleteSelectedClip,
-                    onDuplicate: viewModel.duplicateSelectedClip,
-                    onTap: handleSelectionBoxTap,
-                    onTransformChanged: { scaleFactor, rotationDelta in
-                        updateCombinedHandle(
-                            scaleFactor: scaleFactor,
-                            rotationDelta: rotationDelta,
-                            for: adjustment
-                        )
-                    },
-                    onTransformEnded: {
-                        finishPreviewGesture(.combinedHandle, itemID: adjustment.id)
-                    }
-                )
-                .gesture(dragGesture(for: adjustment, frame: frame))
-                .simultaneousGesture(scaleGesture(for: adjustment))
-                .id(adjustment.id)
+                Rectangle()
+                    .strokeBorder(MotionaryTheme.accent, lineWidth: 1.5)
+                    .frame(width: canvasFrame.width, height: canvasFrame.height)
+                    .position(x: canvasFrame.midX, y: canvasFrame.midY)
+                    .allowsHitTesting(false)
+                    .id(adjustment.id)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -901,7 +883,7 @@ struct PreviewTransformCanvas: View {
                     )
 
                 case .adjustment(let adjustmentInfo):
-                    let frame = previewFrame(for: adjustmentInfo.item)
+                    let frame = PreviewClipFrame(rect: canvasRect, rotationDegrees: 0)
                     guard frame.containsBorder(point, tolerance: 18) else { return nil }
                     return PreviewHitCandidate(
                         itemID: adjustmentInfo.item.id,

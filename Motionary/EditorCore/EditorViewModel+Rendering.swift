@@ -194,9 +194,10 @@ extension EditorViewModel {
     func rebuildPreview(
         seekTo time: Double? = nil,
         invalidation: EditorInvalidation,
-        generation: Int
+        generation: Int,
+        commandGeneration: Int? = nil
     ) async {
-        let seekTime = clampedTimelineTime(time ?? currentTime)
+        let requestedCommandGeneration = commandGeneration ?? playbackCommandGeneration
         let shouldResume = isPlaying || pendingPlaybackResumeAfterPreviewRebuild
         let requestedPreviewQuality = previewQuality
         let showBuildingUI =
@@ -222,6 +223,12 @@ extension EditorViewModel {
                 renderSessionID: UUID()
             )
             guard !Task.isCancelled, generation == previewGeneration else { return }
+            // A user may seek while the preview graph is being prepared. The
+            // newer playhead position takes precedence over the edit's older
+            // requested position, including after an AVPlayerItem replacement.
+            let seekTime = clampedTimelineTime(
+                requestedCommandGeneration == playbackCommandGeneration ? (time ?? currentTime) : currentTime
+            )
             updatePreviewProgress(0.58, generation: generation)
             if let prepared {
                 if let instruction = prepared.videoComposition?.instructions.first
@@ -266,18 +273,21 @@ extension EditorViewModel {
                 // unnecessary video decode/compositing work.
                 if !isScrubbing, requiresPlayerSynchronization {
                     updateCurrentTime(seekTime)
+                    let seekCommandGeneration = playbackCommandGeneration
                     let didSeek = await seekPlayerAndWait(to: seekTime)
                     guard !Task.isCancelled, generation == previewGeneration else { return }
-                    if didSeek != .completed {
-                        if didSeek == .timedOut {
-                            schedulePreviewRecovery(
-                                reason: .seekTimeout,
-                                resumePlayback: isPlaying || pendingPlaybackResumeAfterPreviewRebuild
-                            )
+                    if seekCommandGeneration == playbackCommandGeneration {
+                        if didSeek != .completed {
+                            if didSeek == .timedOut {
+                                schedulePreviewRecovery(
+                                    reason: .seekTimeout,
+                                    resumePlayback: isPlaying || pendingPlaybackResumeAfterPreviewRebuild
+                                )
+                                return
+                            }
+                        } else {
+                            updateCurrentTime(seekTime)
                         }
-                        if didSeek == .timedOut { return }
-                    } else {
-                        updateCurrentTime(seekTime)
                     }
                 }
                 guard !Task.isCancelled, generation == previewGeneration else { return }
@@ -301,7 +311,7 @@ extension EditorViewModel {
                 }
                 refinePreviewQualityAfterFastFrameIfNeeded(
                     requestedQuality: requestedPreviewQuality,
-                    seekTime: seekTime,
+                    seekTime: currentTime,
                     generation: generation
                 )
                 if !isScrubbing, isPlaying || pendingPlaybackResumeAfterPreviewRebuild
@@ -691,6 +701,7 @@ extension EditorViewModel {
         rotatePreviewRenderSession()
         previewGeneration &+= 1
         let rebuildGeneration = previewGeneration
+        let commandGeneration = playbackCommandGeneration
         previewState.status = .building(generation: rebuildGeneration)
         previewProgress = 0.04
         rebuildTask = Task { [weak self] in
@@ -703,7 +714,8 @@ extension EditorViewModel {
             await self.rebuildPreview(
                 seekTo: time,
                 invalidation: [.previewFrame, .compositionTopology, .audioMix],
-                generation: rebuildGeneration
+                generation: rebuildGeneration,
+                commandGeneration: commandGeneration
             )
         }
     }

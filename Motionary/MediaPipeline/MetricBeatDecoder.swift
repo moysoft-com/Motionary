@@ -24,12 +24,19 @@ struct MetricBeatDecoder {
     /// Beat This's published direct peak rule, used only when structured
     /// decoding cannot produce a path. It makes no meter or calibration claim.
     static func decodeDirect(_ activations: RhythmActivations) throws -> Result {
+        guard activations.beatLogits.allSatisfy(\.isFinite),
+              activations.downbeatLogits.allSatisfy(\.isFinite) else {
+            throw AudioBeatAnalysisError.noReliableBeat
+        }
         let beat = activations.beatLogits.map(sigmoid)
         let downbeat = activations.downbeatLogits.map(sigmoid)
         guard beat.count >= 3, beat.count == downbeat.count,
               beat.allSatisfy(\.isFinite), downbeat.allSatisfy(\.isFinite),
               activations.hopSamples > 0, activations.sampleRate.isFinite,
-              activations.sampleRate > 0 else { throw AudioBeatAnalysisError.noReliableBeat }
+              activations.sampleRate > 0,
+              activations.sampleRate / Double(activations.hopSamples) <= 100_000 else {
+            throw AudioBeatAnalysisError.noReliableBeat
+        }
         let peakFrames = beat.indices.filter { index in
             guard beat[index] > 0.5 else { return false }
             let lower = max(0, index - 3), upper = min(beat.count - 1, index + 3)
@@ -61,6 +68,13 @@ struct MetricBeatDecoder {
     }
 
     static func decode(_ activations: RhythmActivations) throws -> Result {
+        guard activations.hopSamples > 0, activations.sampleRate.isFinite,
+              activations.sampleRate > 0,
+              activations.sampleRate / Double(activations.hopSamples) <= 100_000,
+              activations.beatLogits.allSatisfy(\.isFinite),
+              activations.downbeatLogits.allSatisfy(\.isFinite) else {
+            throw AudioBeatAnalysisError.noReliableBeat
+        }
         let beat = activations.beatLogits.map(sigmoid)
         let downbeat = activations.downbeatLogits.map(sigmoid)
         guard beat.count == downbeat.count, beat.count >= 100,

@@ -47,6 +47,73 @@ private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
 @Suite(.serialized)
 struct PreviewRebuildTests {
     @MainActor
+    @Test func seekingAfterSplitSurvivesTheScheduledPreviewRebuild() async throws {
+        let shape = ShapeTimelineItem(
+            name: "Split and seek", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: .white, width: 64, height: 64),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4)
+        )
+        let track = TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])
+        let project = EditorProject(title: "Split and seek",
+                                    renderSettings: RenderSettings(width: 96, height: 128, frameRate: 30),
+                                    tracks: [track])
+        let model = EditorViewModel(projectID: UUID(), projectStore: ProjectStore(),
+                                    initialContent: ProjectContent(editorProject: project))
+        defer { model.stop() }
+        model.selectTimelineItem(shape.id, trackID: track.id)
+        model.seek(to: 1)
+        _ = try #require(model.splitSelectedTimelineItem())
+        let rebuild = try #require(model.rebuildTask)
+        model.seek(to: 2.5)
+        await rebuild.value
+        #expect(abs(model.currentTime - 2.5) < 0.001)
+        #expect(model.player != nil)
+    }
+
+    @MainActor
+    @Test func laterSeekWinsWhilePreviewRebuildSeekIsInFlight() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        model.previewQuality = .balanced
+        await model.rebuildPreview(invalidation: [.previewFrame, .compositionTopology, .audioMix],
+                                   generation: model.previewGeneration)
+        let originalItem = try #require(model.player?.currentItem)
+        let controlled = ControlledSeekPlayer()
+        controlled.replaceCurrentItem(with: AVPlayerItem(asset: originalItem.asset))
+        if let observer = model.timeObserver {
+            model.player?.removeTimeObserver(observer)
+            model.timeObserver = nil
+        }
+        model.player = controlled
+        let generation = model.previewGeneration
+        let rebuild = Task { @MainActor in
+            await model.rebuildPreview(seekTo: 0.2, invalidation: [.previewFrame], generation: generation)
+        }
+        for _ in 0..<500 where controlled.pendingSeekCount < 1 {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        guard controlled.pendingSeekCount >= 1 else {
+            rebuild.cancel()
+            Issue.record("Preview rebuild did not start its seek")
+            return
+        }
+        model.seek(to: 0.7)
+        for _ in 0..<500 where controlled.pendingSeekCount < 2 {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        guard controlled.pendingSeekCount >= 2 else {
+            rebuild.cancel()
+            controlled.completeSeek(at: 0, finished: false)
+            Issue.record("The newer seek did not reach the player")
+            return
+        }
+        controlled.completeSeek(at: 1, finished: true)
+        controlled.completeSeek(at: 0, finished: true)
+        await rebuild.value
+        #expect(abs(model.currentTime - 0.7) < 0.001)
+    }
+
+    @MainActor
     @Test func generatedCustomCompositionPreviewPlayerAdvances() async throws {
         let shape = ShapeTimelineItem(
             name: "Clocked preview",

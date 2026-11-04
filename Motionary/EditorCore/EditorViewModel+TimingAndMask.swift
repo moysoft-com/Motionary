@@ -200,6 +200,8 @@ extension EditorViewModel {
         roundnessScale: Double? = nil,
         rotationDegrees: Double? = nil,
         offsetScale: Double? = nil,
+        offsetX: Double? = nil,
+        offsetY: Double? = nil,
         isInverted: Bool? = nil,
         interactive: Bool = false
     ) {
@@ -214,6 +216,8 @@ extension EditorViewModel {
             if let offsetScale, offsetScale.isFinite {
                 mask.offsetScale = min(max(offsetScale, -1), 1)
             }
+            if let offsetX, offsetX.isFinite { mask.offsetX = min(max(offsetX, -1), 1) }
+            if let offsetY, offsetY.isFinite { mask.offsetY = min(max(offsetY, -1), 1) }
             if let isInverted { mask.isInverted = isInverted }
             visuals.mask = mask
         }

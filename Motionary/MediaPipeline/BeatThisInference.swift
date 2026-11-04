@@ -31,7 +31,7 @@ struct BeatThisInference {
     private let model: MLModel
 
     init(
-        modelURL: URL? = Bundle.main.url(forResource: "BeatThis", withExtension: "mlmodelc"),
+        modelURL: URL? = Bundle.main.url(forResource: "BeatThisFP32", withExtension: "mlmodelc"),
         computeUnits: MLComputeUnits = .cpuOnly
     ) throws {
         guard let modelURL else { throw BeatThisInferenceError.modelMissing }

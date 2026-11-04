@@ -3,6 +3,35 @@ import Testing
 @testable import Motionary
 
 struct MetricBeatDecoderTests {
+    @Test func fallbackUsesDirectBeatsWhenStructuredPathFallsOutsideSound() throws {
+        let activations = RhythmActivations(beatLogits: [], downbeatLogits: [], sampleRate: 22_050, hopSamples: 441)
+        func result(_ frames: [Int]) -> MetricBeatDecoder.Result {
+            MetricBeatDecoder.Result(beats: frames.map { .init(frame: $0, probability: 0.8, downbeatProbability: 0.2) },
+                                     bpm: 60, periodicity: 0.5)
+        }
+        let (selected, method) = try NeuralBeatAnalyzer.selectRhythm(
+            activations: activations, audibleFrames: 100...200,
+            structured: { _ in result([0, 25, 50, 100, 125]) },
+            direct: { _ in result([75, 100, 125, 150, 225]) }
+        )
+        #expect(method == .neuralDirect)
+        #expect(selected.beats.map(\.frame) == [100, 125, 150])
+        #expect(abs(selected.bpm - 120) < 0.001)
+    }
+
+    @Test func cancellationDoesNotInvokeDirectFallback() {
+        let activations = RhythmActivations(beatLogits: [], downbeatLogits: [], sampleRate: 22_050, hopSamples: 441)
+        var invoked = false
+        #expect(throws: CancellationError.self) {
+            try NeuralBeatAnalyzer.selectRhythm(
+                activations: activations, audibleFrames: 0...200,
+                structured: { _ in throw CancellationError() },
+                direct: { _ in invoked = true; throw AudioBeatAnalysisError.noReliableBeat }
+            )
+        }
+        #expect(!invoked)
+    }
+
     @Test func periodicActivationsDecodeWithoutRequiringAudioOnsets() throws {
         var beat = [Float](repeating: -6, count: 500)
         var downbeat = beat
@@ -53,6 +82,20 @@ struct MetricBeatDecoderTests {
         let activations = RhythmActivations(beatLogits: beat, downbeatLogits: beat,
                                             sampleRate: 22_050, hopSamples: 441)
         #expect(throws: AudioBeatAnalysisError.self) { try MetricBeatDecoder.decodeDirect(activations) }
+    }
+
+    @Test func decodersRejectInvalidInputBeforeComputingTempo() {
+        var beat = [Float](repeating: -8, count: 500)
+        for frame in stride(from: 25, to: 500, by: 25) { beat[frame] = 4 }
+        let invalidClock = RhythmActivations(beatLogits: beat, downbeatLogits: beat,
+                                             sampleRate: 22_050, hopSamples: 0)
+        #expect(throws: AudioBeatAnalysisError.self) { try MetricBeatDecoder.decode(invalidClock) }
+        #expect(throws: AudioBeatAnalysisError.self) { try MetricBeatDecoder.decodeDirect(invalidClock) }
+        beat[25] = .infinity
+        let invalidLogit = RhythmActivations(beatLogits: beat, downbeatLogits: beat,
+                                             sampleRate: 22_050, hopSamples: 441)
+        #expect(throws: AudioBeatAnalysisError.self) { try MetricBeatDecoder.decode(invalidLogit) }
+        #expect(throws: AudioBeatAnalysisError.self) { try MetricBeatDecoder.decodeDirect(invalidLogit) }
     }
 
     @Test func unstructuredLowActivationsAreRejected() {

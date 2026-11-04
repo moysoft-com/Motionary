@@ -5,12 +5,17 @@ path, beat-synchronous meter selection, and local onset refinement. If the
 structured decoder fails, upstream-style direct peak picking is tried; if the
 neural path fails, the earlier signal-based tracker is tried. The selected
 method is persisted and the UI identifies the signal fallback. Failure of every
-level retains the existing analysis. Cancellation is propagated.
+level retains the existing analysis. Structured results are checked after
+excluding beats outside the audible boundaries; if fewer than three survive,
+direct peak picking is attempted before falling back to the signal tracker.
+Meter decoding operates on the retained beats. Cancellation is propagated.
 
-The timeline beat remains on the metric grid. The separate audible onset can
-be used for suggested cuts. Binary, ternary and quaternary subbeat *hypotheses*
+The timeline beat remains on the metric grid. Suggested cuts seek to that same
+visible beat position; the separately detected audible onset remains stored as
+analysis evidence. Binary, ternary and quaternary subbeat *hypotheses*
 are selectable in the editor; selecting them adds mapped timeline and snapping
-points. A beat-synchronous spectral and RMS/bass contrast analysis produces
+points. A beat-synchronous spectral and RMS/bass contrast analysis samples up
+to eight windows across each beat and produces
 accent, boundary, drop, break and edit-ranking metadata. These are heuristics,
 not verified section labels or calibrated cut probabilities. Nearby drop/break
 candidates are deduplicated. Ranked suggestions are exposed in the editor.
@@ -30,7 +35,9 @@ GPL-3.0 and the converted artifact's distribution provenance should be
 independently reviewed. No palmier-pro application source was copied.
 SHA-256 of `weights/weight.bin`:
 `e4f80e477a99bfc8e838c90d625e8be5a8d2f63e711865c3445d778fb527be37`.
-An optional FP32 conversion of the same small0 checkpoint was generated using
+The FP16 artifact remains in the repository for historical benchmarking, but
+is excluded from the app target; new analyses use the FP32 model exclusively.
+The FP32 conversion used for new analyses was generated from the same small0 checkpoint using
 the same external conversion workflow and passed its synthetic click gate.
 Its `weights/weight.bin` SHA-256 is
 `fffd124276272c39342f08bb83c05a647f99f58777406bb27d7ba6776db01b9f`.
@@ -71,12 +78,40 @@ representative genre benchmark. The structure analyzer ran on all 25 tracks,
 but this dataset does not label professional cuts, accents or drops and cannot
 validate their precision.
 
+An exploratory structure-only comparison used 27 short Live Music Archive
+recordings with [SALAMI](https://github.com/DDMAL/salami-data-public)
+upper-level human annotations (commit `8e4f95d18a3ab628c53011fa5a43e9d3be27965d`).
+Each method used the same artificial 120 BPM grid, local maxima at least three
+seconds apart, a fixed budget of one candidate per eight seconds, and a
+three-second matching window. Mean boundary F1 changed from 0.4052 for the
+previous midpoint-only features to 0.4196 for multiple windows; paired Wilcoxon
+p=0.53. A second, oracle-count comparison uses the known number of reference
+boundaries and is not an operational score. Two mismatched audio durations were
+excluded; the remaining audio was not independently aligned to the annotations.
+The sample is short, nonrandom, live-music-only, and does not validate drops,
+accents, cuts or end-to-end inference. Individual results and audio hashes are
+in `BeatStructureEvaluation.json`; `evaluate_salami_structure.py` reproduces
+the measurement with separately obtained audio and annotations. The broader
+window sampling changes ranking and increases computation; its performance on
+physical iPhones and iPads has not been measured.
+
 A research-only comparison against the public CASM API on the same GTZAN
 activations gave Beat F1 0.8818, Downbeat F1 0.7700 and Beat CMLt 0.7898. The
 [CASM repository](https://github.com/zhanh-he/casm-beat-tracking) did not
 contain an identifiable license when inspected; neither its code nor its
 configuration was copied into Motionary. This is not the authors' full published
 protocol. It improves F1 relative to this decoder while reducing beat CMLt.
+
+An independently implemented experimental adaptive decoder was also evaluated
+on the same stored activations. Its transition penalty depends on the margin
+between local autocorrelation tempo hypotheses; four penalty weights were
+explored on even-numbered tracks and checked on odd-numbered tracks. At weight
+1, held-out Beat F1 increased from 0.8761 to 0.8814, while Beat CMLt decreased
+from 0.7918 to 0.7888 (tracks without sufficient beats count as zero in this
+comparison). The paired F1 change was not statistically significant
+(Wilcoxon p=0.065). This is an exploratory split of one dataset, not an
+independent validation, and no downbeat results were established. The
+experimental decoder is not included in the application.
 
 ## PyTorch/Core ML parity
 
@@ -112,6 +147,17 @@ The procedure is `calibrate_confidence.py`. Raw beat probability, periodicity,
 and edit score must not be interpreted as calibrated correctness probabilities;
 the workspace labels the latter periodicity-derived value “Rhythm strength”.
 
+Further experiments added local activation and inter-beat-interval features
+to logistic and histogram-boosted models. The latter improved held-out GTZAN
+Brier score to 0.0828 and overall ECE to 0.0114, but on the 25 independent
+ARTBeaT recordings its 152 predictions at or above 0.95 had only 86.8% beat
+precision. Mixing even-numbered ARTBeaT tracks into training did not achieve
+95% precision on the odd-numbered ARTBeaT tracks for any evaluated weighting.
+These small exploratory splits do not prove a general impossibility; they do
+show that these candidates do not satisfy the requested cross-domain reliability.
+The reproducible experiment is `calibrate_context_experiment.py`; no
+experimental calibrator is shipped.
+
 There is no annotated professional edit-point set, multiple-rater evaluation,
 phrase-level ground truth, or validated 95% high-confidence edit precision.
 The present ranking must not be presented as meeting those targets. Complete
@@ -130,7 +176,7 @@ single measurements, not latency distributions or thermal/energy tests. The
 model remains CPU-only pending a broader device matrix. The iPad was offline.
 
 A separately converted FP32 graph occupies 13 MB instead of 6.6 MB and is
-available as the user-selectable “High precision” model. On the same phone its
+used for new analyses. On the same phone its
 initial CPU-only load/inference were 0.265/0.553 seconds, and `.all`
 0.519/4.951 seconds. On 500 tracks its beat-logit MAE was 0.0652, exact beat
 peaks occurred on 219 tracks, and peak F1 at 20 ms was 0.9965. For the same
@@ -145,3 +191,21 @@ allowing one sample of timestamp rounding tolerance. Synthetic tests, an
 ordinary WAV and a compressed fixture with a nonzero first presentation time
 pass on iOS 18.6 simulator. Other containers, edit lists and physical-device
 resampling still require verification.
+
+## Simulator verification
+
+The updated build and 36 selected beat, timing, model, timeline and decoder
+tests passed on an iPad Pro simulator running iOS 18.6. A full iPhone 16
+simulator run on the preceding build reported 367 passing and four failing
+test cases. On rerunning the affected suites with the updated build, one
+previously failing paused-preview test passed; two video-preview tests still
+failed with AVFoundation error -11800 (underlying OSStatus -12815), and the
+project-search UI test failed while waiting for the settings screen on
+iOS 18.6. These failures are outside the beat tests, but their cause has not
+been established and a completely passing editor suite cannot be claimed.
+The same 36 targeted tests passed on an iPhone 17 simulator running iOS 26.3.1.
+A full iOS 26.3.1 run was interrupted after ten minutes in the UI tests; its
+partial result is not a completed suite and cannot establish editor coverage.
+The complete `MotionaryTests` unit target was then run separately on iOS 26.3.1:
+352 test cases passed, with no failures. Xcode reported priority-inversion
+warnings from `CanvasAndRenderingTests`.

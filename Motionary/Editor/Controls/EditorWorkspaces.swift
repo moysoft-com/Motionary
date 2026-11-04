@@ -1935,7 +1935,8 @@ private struct PropertyScrubber: View {
 
     var body: some View {
         let metadata = clip.keyframeMetadata(for: target)
-        let value = displayedValue
+        let value = rulerTickPosition.map { value(at: $0, metadata: metadata) }
+            ?? displayedValue
         VStack {
             HStack(spacing: 8) {
                 Label(metadata.title, systemImage: metadata.systemImage)
@@ -2102,12 +2103,12 @@ private struct PropertyScrubber: View {
 
     @MainActor
     private func settleRulerAndFinish() async {
-        guard rulerTickPosition != nil else {
+        guard let position = rulerTickPosition else {
             finishScrubbing()
             return
         }
         let metadata = clip.keyframeMetadata(for: target)
-        let currentValue = displayedValue
+        let currentValue = value(at: position, metadata: metadata)
         let snappedPosition = tickPosition(for: currentValue, metadata: metadata)
         withAnimation(.spring(duration: 0.22, bounce: 0.12)) {
             rulerTickPosition = snappedPosition
@@ -2416,6 +2417,7 @@ struct EditorValueScrubber: View {
     @State private var momentumTask: Task<Void, Never>?
 
     var body: some View {
+        let displayedValue = tickPosition.map { value(at: $0) } ?? clamped(value)
         VStack(spacing: 6) {
             HStack(spacing: 8) {
                 Label(title, systemImage: systemImage)
@@ -2423,7 +2425,7 @@ struct EditorValueScrubber: View {
                     .labelStyle(.titleOnly)
                     .lineLimit(1)
                 Spacer()
-                Text(format(clamped(value)))
+                Text(format(displayedValue))
                     .font(MotionaryDesign.Typography.controlValue)
                     .foregroundStyle(MotionaryTheme.textSecondary)
             }
@@ -2443,7 +2445,7 @@ struct EditorValueScrubber: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(title)
-            .accessibilityValue(format(clamped(value)))
+            .accessibilityValue(format(displayedValue))
             .accessibilityHint("Swipe left to increase or right to decrease.")
             .accessibilityAdjustableAction { direction in
                 let delta: Double

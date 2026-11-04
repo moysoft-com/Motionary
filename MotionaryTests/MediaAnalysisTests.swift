@@ -10,6 +10,38 @@ import Testing
 @testable import Motionary
 
 struct MediaAnalysisTests {
+    @Test func suggestedCutsChooseBestEightAndDisplayThemInTimelineOrder() {
+        var markers: [AudioBeatMarker] = []
+        for index in 1...10 {
+            let score: Double = index == 1 || index == 10 ? 0.1 : Double(11 - index) / 10.0
+            markers.append(AudioBeatMarker(sourceTime: Double(index), strength: 0.8, editScore: score))
+        }
+        let item = MediaTimelineItem(
+            name: "Beat clip", mediaID: MediaID(), mediaType: .audio, timelineStart: 10,
+            sourceRange: TimeRangeValue(start: 0, duration: 12), speedMap: .constant(speed: 2),
+            beatAnalysis: AudioBeatAnalysis(bpm: 120, confidence: 0.8, markers: markers, sourceFingerprint: "source")
+        )
+        let cuts = AutoBeatsWorkspaceView.suggestedCuts(for: item)
+        let sourceTimes = cuts.map { $0.sourceTime }
+        let timelineTimes = cuts.map { $0.timelineTime }
+        #expect(sourceTimes == [2, 3, 4, 5, 6, 7, 8, 9])
+        #expect(timelineTimes == [11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5])
+    }
+
+    @Test func suggestedCutUsesVisibleBeatPositionInsteadOfNearbyOnset() throws {
+        let marker = AudioBeatMarker(sourceTime: 3, strength: 0.8, gridTime: 3,
+                                     audibleOnset: 3.08, editScore: 0.9)
+        let item = MediaTimelineItem(name: "Beat clip", mediaID: MediaID(), mediaType: .audio,
+                                     timelineStart: 10, sourceRange: TimeRangeValue(start: 2, duration: 4),
+                                     speedMap: .constant(speed: 2),
+                                     beatAnalysis: AudioBeatAnalysis(bpm: 120, confidence: 0.8,
+                                         markers: [marker], sourceFingerprint: "source"))
+        let cut = try #require(AutoBeatsWorkspaceView.suggestedCuts(for: item).first)
+        let visibleMarker = try #require(item.visibleBeatMarkers.first)
+        #expect(cut.sourceTime == visibleMarker.sourceTime)
+        #expect(cut.timelineTime == item.timelineStart + visibleMarker.localTimelineTime)
+    }
+
     @Test func syntheticOneHundredTwentyBPMTrackProducesStableGrid() throws {
         let samples = syntheticBeatSamples(
             beatTimes: (0..<24).map { Double($0) * 0.5 },

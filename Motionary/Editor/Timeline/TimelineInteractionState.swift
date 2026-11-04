@@ -31,9 +31,10 @@ struct TimelineVirtualizationConfiguration: Equatable, Sendable {
 enum TimelineScrollSynchronizationPolicy {
     static func shouldSynchronizeOnLayout(
         isPlaying: Bool,
-        isUserInteracting: Bool
+        isUserInteracting: Bool,
+        isDraggingItem: Bool = false
     ) -> Bool {
-        !isPlaying && !isUserInteracting
+        !isPlaying && !isUserInteracting && !isDraggingItem
     }
 }
 

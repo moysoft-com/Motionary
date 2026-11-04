@@ -406,6 +406,7 @@ extension EditorViewModel {
         rebuildTask?.cancel()
         previewGeneration &+= 1
         let generation = previewGeneration
+        let commandGeneration = playbackCommandGeneration
         rebuildTask = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -420,7 +421,8 @@ extension EditorViewModel {
             await self.rebuildPreview(
                 seekTo: time,
                 invalidation: effectiveInvalidation,
-                generation: generation
+                generation: generation,
+                commandGeneration: commandGeneration
             )
         }
     }

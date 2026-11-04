@@ -41,6 +41,7 @@
 			membershipExceptions = (
 				Info.plist,
 				MotionaryWB.icon,
+				Resources/BeatThis/BeatThis.mlmodelc,
 			);
 			target = 8C70C7BA2D7225A60070BD08 /* Motionary */;
 		};

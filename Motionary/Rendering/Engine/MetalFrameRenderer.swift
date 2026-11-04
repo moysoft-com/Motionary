@@ -38,6 +38,31 @@ struct TextFramePreparationMetrics: Equatable {
     let standaloneTextureUploadSubmissions: Int
 }
 
+/// Propagate scene placement to content before canvas compositing. Adjustment
+/// effects keep their canvas coordinates and never rasterize an enlarged scene.
+struct AdjustmentScenePlacement {
+    let clips: [RenderClipDescriptor]
+    let canvasSize: CGSize
+
+    func transforms(at time: Double, referenceTime: Double? = nil,
+                    components: String = "All") -> [CGAffineTransform] {
+        var result = Array(repeating: CGAffineTransform.identity, count: clips.count)
+        var placement = CGAffineTransform.identity
+        let bounds = CGRect(origin: .zero, size: canvasSize)
+        for index in clips.indices.reversed() {
+            result[index] = placement
+            let clip = clips[index]
+            let localTime = max(time - clip.timelineStart, 0)
+            guard clip.isAdjustmentLayer, clip.transform.opacity.value(at: localTime) > 0.000_001 else { continue }
+            let transform = EffectLayerMotion(transform: clip.transform, canvasSize: canvasSize, isGenerated: true)
+                .placement(at: localTime, bounds: bounds,
+                           referenceTime: referenceTime.map { max($0 - clip.timelineStart, 0) }, components: components)
+            placement = transform.concatenating(placement)
+        }
+        return result
+    }
+}
+
 /// Owns the complete GPU frame graph. The AVFoundation compositor only adapts
 /// asynchronous requests into this synchronous, bounded render operation.
 final class MetalFrameRenderer: @unchecked Sendable {
@@ -189,14 +214,17 @@ final class MetalFrameRenderer: @unchecked Sendable {
             var motionScene = EffectMotionScene { _, _ in initialBackground }
 
             let active = activeClips(in: plan, at: safeTime)
+            let scenePlacement = AdjustmentScenePlacement(clips: active, canvasSize: plan.renderSize)
+            let sceneTransforms = scenePlacement.transforms(at: safeTime)
             let needsMotionScene = active.contains { clip in
                 clip.isAdjustmentLayer && clip.effectStack.effects.contains {
                     $0.isEnabled && $0.moduleID == .motionBlur
                 }
             }
-            for clip in active {
+            for (clipIndex, clip) in active.enumerated() {
                 guard !isCancelled() else { throw MetalRenderingError.cancelled }
                 let localTime = max(0, safeTime - clip.timelineStart)
+                let sceneTransform = sceneTransforms[clipIndex]
                 if clip.isAdjustmentLayer {
                     output = try measured("Adjustment Layer", id: signpostID) {
                         try applyAdjustmentLayer(
@@ -237,7 +265,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                         plan: plan,
                         preparation: generatedPreparation
                     ),
-                    !estimatedBounds.insetBy(dx: -cullingMargin, dy: -cullingMargin)
+                    !estimatedBounds.applying(sceneTransform).insetBy(dx: -cullingMargin, dy: -cullingMargin)
                         .intersects(plan.viewport.overscanRect)
                 {
                     continue
@@ -263,7 +291,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     rasterScaleCorrection: sourceResult.rasterScaleCorrection,
                     textAnimationSample: sourceResult.textAnimationSample
                 )
-                guard projectedBounds.insetBy(dx: -cullingMargin, dy: -cullingMargin)
+                guard projectedBounds.applying(sceneTransform).insetBy(dx: -cullingMargin, dy: -cullingMargin)
                     .intersects(plan.viewport.overscanRect)
                 else { continue }
 
@@ -319,6 +347,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                         rasterScaleCorrection: sourceResult.rasterScaleCorrection,
                         textAnimationSample: sourceResult.textAnimationSample
                     )
+                    .transformed(by: sceneTransform)
                     var opacity = min(max(clip.transform.opacity.value(at: localTime), 0), 1)
                     opacity *= sourceResult.textAnimationSample?.opacity ?? 1
                     return applyOpacity(opacity, to: transformed)
@@ -331,12 +360,20 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     let motion = EffectLayerMotion(transform: clip.transform,
                         canvasSize: plan.renderSize, isGenerated: isGeneratedLayer)
                     let currentPlacement = motion.placement(at: localTime, bounds: placementExtent)
+                        .concatenating(sceneTransform)
                     motionScene = EffectMotionScene(hasAnimatedTransforms: previousScene.hasAnimatedTransforms
                         || !clip.transform.positionX.keyframes.isEmpty || !clip.transform.positionY.keyframes.isEmpty
-                        || !clip.transform.rotationDegrees.keyframes.isEmpty || !clip.transform.scale.keyframes.isEmpty) { offset, components in
+                        || !clip.transform.rotationDegrees.keyframes.isEmpty || !clip.transform.scale.keyframes.isEmpty
+                        || active.dropFirst(clipIndex + 1).contains(where: {
+                            $0.isAdjustmentLayer && (!$0.transform.positionX.keyframes.isEmpty
+                                || !$0.transform.positionY.keyframes.isEmpty || !$0.transform.rotationDegrees.keyframes.isEmpty
+                                || !$0.transform.scale.keyframes.isEmpty)
+                        })) { offset, components in
+                        let sampledSceneTransform = scenePlacement.transforms(at: max(safeTime - offset, 0),
+                                                                              referenceTime: safeTime, components: components)[clipIndex]
                         let relative = currentPlacement.inverted().concatenating(
                             motion.placement(at: max(localTime - offset, 0), bounds: placementExtent,
-                                referenceTime: localTime, components: components))
+                                referenceTime: localTime, components: components).concatenating(sampledSceneTransform))
                         return try MetalLayerCompositor.blend(
                             foreground: frozenImage.transformed(by: relative),
                             background: previousScene.sample(offset, components), in: canvasRect,
@@ -862,8 +899,6 @@ final class MetalFrameRenderer: @unchecked Sendable {
         let effectMask = adjustmentLayerMask(
             clip,
             canvasRect: canvasRect,
-            at: localTime,
-            renderSize: plan.renderSize,
             opacity: opacity
         )
         return blend(processed, over: source, alphaMask: effectMask, in: canvasRect)
@@ -872,23 +907,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
     private func adjustmentLayerMask(
         _ clip: RenderClipDescriptor,
         canvasRect: CGRect,
-        at localTime: Double,
-        renderSize: CGSize,
         opacity: Double
     ) -> CIImage {
         var mask = CIImage(color: CIColor(red: opacity, green: opacity, blue: opacity, alpha: opacity))
             .cropped(to: canvasRect)
         mask = applyMask(clip.mask, to: mask)
-        mask = place(
-            mask,
-            placementExtent: canvasRect,
-            clip: clip,
-            at: localTime,
-            renderSize: renderSize,
-            isGeneratedLayer: false,
-            rasterScaleCorrection: CGSize(width: 1, height: 1),
-            textAnimationSample: nil
-        )
         return mask
             .composited(over: transparentImage(croppedTo: canvasRect))
             .cropped(to: canvasRect)
@@ -900,22 +923,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
     ) -> Bool {
         guard clip.mask == nil,
             !clip.effectStack.effects.contains(where: \.isEnabled),
-            clip.blendMode == .normal || clip.blendIntensity <= 0.000_001,
-            !clip.transform.isFlippedHorizontally,
-            !clip.transform.isFlippedVertically
+            clip.blendMode == .normal || clip.blendIntensity <= 0.000_001
         else { return false }
 
-        let scale = clip.transform.scale.value(at: time)
-        let rotation = clip.transform.rotationDegrees.value(at: time)
-            .truncatingRemainder(dividingBy: 360)
         let adjustments = clip.adjustments
-        return abs(clip.transform.positionX.value(at: time)) <= 0.000_001
-            && abs(clip.transform.positionY.value(at: time)) <= 0.000_001
-            && abs(scale.x - 1) <= 0.000_001
-            && abs(scale.y - 1) <= 0.000_001
-            && abs(rotation) <= 0.000_001
-            && clip.transform.opacity.value(at: time) >= 0.999_999
-            && abs(adjustments.brightness.value(at: time)) <= 0.000_001
+        return abs(adjustments.brightness.value(at: time)) <= 0.000_001
             && abs(adjustments.contrast.value(at: time) - 1) <= 0.000_001
             && abs(adjustments.saturation.value(at: time) - 1) <= 0.000_001
             && abs(adjustments.exposure.value(at: time)) <= 0.000_001
@@ -1620,10 +1632,10 @@ final class MetalFrameRenderer: @unchecked Sendable {
         )
         let featherRadius = CGFloat(max(mask.featherScale, 0)) * max(extent.width, extent.height)
         let cacheKey = NSString(
-            format: "%@-%.2f-%.2f-%.2f-%.2f-%.4f-%.4f-%.4f-%.4f-%.2f-%.4f-%d",
+            format: "%@-%.2f-%.2f-%.2f-%.2f-%.4f-%.4f-%.4f-%.4f-%.2f-%.4f-%.4f-%.4f-%d",
             mask.shape.rawValue, extent.minX, extent.minY, extent.width, extent.height,
             mask.widthScale, mask.heightScale, mask.featherScale, mask.roundnessScale,
-            mask.rotationDegrees, mask.offsetScale, mask.isInverted ? 1 : 0
+            mask.rotationDegrees, mask.offsetScale, mask.offsetX, mask.offsetY, mask.isInverted ? 1 : 0
         )
         if let cached = maskImageCache.object(forKey: cacheKey) {
             return blend(image, with: cached, in: extent)
@@ -1685,7 +1697,10 @@ final class MetalFrameRenderer: @unchecked Sendable {
             context.cgContext.translateBy(x: 0, y: size.height)
             context.cgContext.scaleBy(x: 1, y: -1)
             let center = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
-            context.cgContext.translateBy(x: center.x, y: center.y)
+            context.cgContext.translateBy(
+                x: center.x + CGFloat(mask.offsetX) * extent.width,
+                y: center.y + CGFloat(mask.offsetY) * extent.height
+            )
             context.cgContext.rotate(by: CGFloat(mask.rotationDegrees) * .pi / 180)
             context.cgContext.translateBy(x: -center.x, y: -center.y)
             let offset = CGFloat(mask.offsetScale) * extent.height * 0.5

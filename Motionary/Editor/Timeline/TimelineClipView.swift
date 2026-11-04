@@ -2,6 +2,15 @@
 
 import SwiftUI
 
+enum TimelineItemCornerRadius {
+    static func value(shortestDuration: Double?, pixelsPerSecond: CGFloat, height: CGFloat) -> CGFloat {
+        let maxRadius = min(8, max(height, 0) / 2)
+        guard let shortestDuration else { return maxRadius }
+        let width = max(CGFloat(max(shortestDuration, 0)) * max(pixelsPerSecond, 0), 6)
+        return min(maxRadius, width / 2)
+    }
+}
+
 struct TimelineTrimPreview {
     let item: TimelineItem
     let result: TimelineTrimResult
@@ -19,6 +28,7 @@ struct TimelineItemBlock: View {
     let keyframeTolerance: Double
     let pixelsPerSecond: CGFloat
     let height: CGFloat
+    var cornerRadius: CGFloat = 8
     let allowsClipInteraction: Bool
     let onSelect: () -> Void
     let onBeginEdit: () -> Void
@@ -31,6 +41,7 @@ struct TimelineItemBlock: View {
     let onPreviewTrimEnd: (Double, TimelineItem?) -> TimelineTrimResult?
     let onFinishInteractiveEdit: () -> Void
     let onSnapGuideChanged: (Double?) -> Void
+    var onTrimPreviewChanged: ((TimelineItem?) -> Void)? = nil
     var workspaceContext: TimelineWorkspaceContext? = nil
 
     @State private var trimBaseline: TimelineItem?
@@ -60,11 +71,11 @@ struct TimelineItemBlock: View {
 
         ZStack {
             if isSelected && !isDragSourceHidden && !isDragGhost {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
                     .fill(MotionaryTheme.selected)
                     .frame(width: displayWidth + selectionExtension * 2, height: height + 4)
                     .overlay {
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
                             .stroke(MotionaryTheme.selected, lineWidth: 2)
                     }
                     .allowsHitTesting(false)
@@ -83,13 +94,14 @@ struct TimelineItemBlock: View {
                 visibleTimelineRange: visibleTimelineRange
             )
             .frame(width: displayWidth, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .foregroundStyle(Color.black.opacity(0.88))
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(timelineItemTint(for: previewItem))
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(
                         isSelected && !isDragSourceHidden && isDragGhost ? MotionaryTheme.selected : .clear,
                         lineWidth: 2
@@ -180,7 +192,6 @@ struct TimelineItemBlock: View {
             }
         }
         .offset(x: displayOffsetX)
-        .shadow(color: .black.opacity(isEditing && !isDragSourceHidden && !isDragGhost ? 0.28 : 0), radius: 12, y: 5)
         .zIndex(isDragGhost ? 120 : (isSelected ? 100 : (isEditing ? 80 : 0)))
         .transaction { transaction in
             if isEditing || isDragSourceHidden || isDragGhost {
@@ -232,6 +243,7 @@ struct TimelineItemBlock: View {
                         : baseline.trimmingEnd(by: result.appliedDelta),
                     result: result
                 )
+                onTrimPreviewChanged?(trimPreview?.item)
                 onSnapGuideChanged(result.snapped ? result.edgeTime : nil)
                 updateSnapHaptic(
                     kind: isStart ? "trim-start" : "trim-end",
@@ -273,6 +285,7 @@ struct TimelineItemBlock: View {
     }
 
     private func finishTimelineGesture() {
+        let wasTrimming = trimBaseline != nil || trimPreview != nil
         if committedInteractiveEdit {
             onFinishInteractiveEdit()
             EditorHaptics.editCommit()
@@ -280,6 +293,7 @@ struct TimelineItemBlock: View {
 
         trimBaseline = nil
         trimPreview = nil
+        if wasTrimming { onTrimPreviewChanged?(nil) }
         committedInteractiveEdit = false
         activeSnapKey = nil
         onSnapGuideChanged(nil)
@@ -603,7 +617,6 @@ struct TimelineClipFill: View {
             }
 
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .task(id: taskID) {
             let requestID = taskID
             if clip.mediaType == .audio {

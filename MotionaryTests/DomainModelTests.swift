@@ -459,6 +459,8 @@ struct DomainModelTests {
             roundnessScale: 1.4,
             rotationDegrees: 240,
             offsetScale: -2,
+            offsetX: 0.4,
+            offsetY: -0.7,
             isInverted: true
         )
         let decoded = try JSONDecoder().decode(
@@ -473,6 +475,8 @@ struct DomainModelTests {
         #expect(decoded.roundnessScale == 1)
         #expect(decoded.rotationDegrees == 240)
         #expect(decoded.offsetScale == -1)
+        #expect(decoded.offsetX == 0.4)
+        #expect(decoded.offsetY == -0.7)
         #expect(decoded.isInverted)
     }
 

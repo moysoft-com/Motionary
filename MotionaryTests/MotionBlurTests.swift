@@ -57,6 +57,28 @@ struct MotionBlurTests {
         #expect(pixels(try render("All", motion: motion)) == original)
     }
 
+    @Test(arguments: [EffectModuleID.shake, .cameraWiggle, .zoom])
+    func shutterSamplesPrecedingCameraEffects(id: EffectModuleID) throws {
+        let renderer = try MetalFrameRenderer()
+        let input = CIImage(color: .white).cropped(to: CGRect(x: 35, y: 20, width: 30, height: 20))
+            .composited(over: CIImage(color: .clear).cropped(to: bounds))
+        var motion = try #require(EffectRegistry.shared.makeEffect(moduleID: id))
+        if id == .zoom {
+            motion.parameters["mode"] = EffectParameterState(baseValue: .option("Pulse"))
+            motion.parameters["duration"] = EffectParameterState(baseValue: .scalar(0.5))
+        }
+        var blur = try #require(EffectRegistry.shared.makeEffect(moduleID: .motionBlur))
+        blur.parameters["shutter"] = EffectParameterState(baseValue: .scalar(720))
+        func render(_ effects: [EffectInstance]) throws -> [UInt8] {
+            pixels(try renderer.renderEffectsSynchronously(EffectStack(effects: effects),
+                to: input, at: 0.4, renderScale: 1, quality: .export))
+        }
+        let sharp = try render([motion])
+        #expect(try render([motion, blur]) != sharp)
+        blur.parameters["shutter"] = EffectParameterState(baseValue: .scalar(0))
+        #expect(try render([motion, blur]) == sharp)
+    }
+
     @Test func blurExpandsBoundsInsteadOfClippingObjectTrails() throws {
         let renderer = try MetalFrameRenderer()
         let input = CIImage(color: .white).cropped(to: bounds)

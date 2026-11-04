@@ -3,18 +3,37 @@ import Foundation
 /// Connects neural evidence, rhythmic decoding and timing refinement. A model
 /// response that cannot support a reliable path is reported as an error.
 struct NeuralBeatAnalyzer {
+    static let algorithmVersion = 6
+
+    /// Evaluate decoder output after removing model extrapolation outside the
+    /// audible signal. A structured path that only has a few usable beats
+    /// must not prevent the direct neural decoder from being tried.
+    static func selectRhythm(
+        activations: RhythmActivations,
+        audibleFrames: ClosedRange<Int>,
+        structured: (RhythmActivations) throws -> MetricBeatDecoder.Result = MetricBeatDecoder.decode,
+        direct: (RhythmActivations) throws -> MetricBeatDecoder.Result = MetricBeatDecoder.decodeDirect
+    ) throws -> (MetricBeatDecoder.Result, AudioBeatMethod) {
+        func usable(_ result: MetricBeatDecoder.Result) throws -> MetricBeatDecoder.Result {
+            let beats = result.beats.filter { audibleFrames.contains($0.frame) }
+            guard beats.count >= 3 else { throw AudioBeatAnalysisError.noReliableBeat }
+            guard beats.count != result.beats.count else { return result }
+            let intervals = zip(beats.dropFirst(), beats).map { $0.frame - $1.frame }.sorted()
+            let median = intervals[intervals.count / 2]
+            guard median > 0 else { throw AudioBeatAnalysisError.noReliableBeat }
+            let bpm = 60 * activations.sampleRate / (Double(activations.hopSamples) * Double(median))
+            return MetricBeatDecoder.Result(beats: beats, bpm: bpm, periodicity: result.periodicity)
+        }
+        do {
+            return (try usable(structured(activations)), .neuralStructured)
+        } catch AudioBeatAnalysisError.noReliableBeat {
+            return (try usable(direct(activations)), .neuralDirect)
+        }
+    }
+
     static func analyze(samples: UnsafeBufferPointer<Float>, fingerprint: String, engine: BeatThisInference,
                         modelPrecision: AudioBeatModelPrecision) throws -> AudioBeatAnalysis {
         let activations = try engine.analyze(samples: samples)
-        let result: MetricBeatDecoder.Result
-        let method: AudioBeatMethod
-        do {
-            result = try MetricBeatDecoder.decode(activations)
-            method = .neuralStructured
-        } catch AudioBeatAnalysisError.noReliableBeat {
-            result = try MetricBeatDecoder.decodeDirect(activations)
-            method = .neuralDirect
-        }
         // A model with global context can extrapolate beats into pure leading
         // or trailing padding. Do not discard beats inside the audible region,
         // including beats without a local transient.
@@ -26,13 +45,15 @@ struct NeuralBeatAnalyzer {
             throw AudioBeatAnalysisError.noReliableBeat
         }
         let edgeAllowance = Int((0.05 * activations.sampleRate).rounded())
+        let firstFrame = (max(firstSound - edgeAllowance, 0) + activations.hopSamples - 1) / activations.hopSamples
+        let lastFrame = min(lastSound + edgeAllowance, samples.count - 1) / activations.hopSamples
+        guard firstFrame <= lastFrame else { throw AudioBeatAnalysisError.noReliableBeat }
+        let (result, method) = try selectRhythm(activations: activations, audibleFrames: firstFrame...lastFrame)
         let downbeats = Set(MeterDecoder.decode(result.beats).map(\.beatIndex))
         var markers: [AudioBeatMarker] = []
         for (index, beat) in result.beats.enumerated() {
             try Task.checkCancellation()
             let grid = beat.frame * activations.hopSamples
-            guard grid >= max(firstSound - edgeAllowance, 0),
-                  grid <= min(lastSound + edgeAllowance, samples.count - 1) else { continue }
             let timing = BeatTimingRefiner.refine(gridSample: grid, samples: samples, sampleRate: activations.sampleRate)
             let gridTime = Double(timing.gridSample) / activations.sampleRate
             let onsetTime = timing.onsetSample.map { Double($0) / activations.sampleRate }
@@ -72,6 +93,6 @@ struct NeuralBeatAnalyzer {
         return AudioBeatAnalysis(bpm: result.bpm, confidence: result.periodicity,
                                  markers: markers, subbeats: subbeats, method: method, modelPrecision: modelPrecision,
                                  sourceFingerprint: fingerprint,
-                                 algorithmVersion: 5)
+                                 algorithmVersion: Self.algorithmVersion)
     }
 }

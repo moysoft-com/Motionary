@@ -26,15 +26,18 @@ struct EffectLayerMotion: Sendable {
     }
 }
 
-/// Integrate only the object's transform. Every sample uses the same current
-/// image, so motion inside a source video never produces temporal ghosting.
+/// Integrate object transforms and preceding camera-motion effects while keeping
+/// the source pixels frozen, so source video never produces temporal ghosting.
 struct MotionBlurEffectRenderer: EffectRenderModule {
     let moduleID: EffectModuleID = .motionBlur
 
     func render(_ image: CIImage, effect: EffectInstance, context: EffectRenderContext,
                 resources: MetalFrameResources) throws -> EffectRenderResult {
         let exposure = scalar("shutter", in: effect, at: context.clipTime) / 360 * context.frameDuration
-        guard exposure > 0.000001, context.layerMotion != nil || context.motionScene?.hasAnimatedTransforms == true else {
+        let motionEffects: Set<EffectModuleID> = [.shake, .cameraWiggle, .zoom]
+        let hasEffectMotion = context.temporalPrefix.effects.contains { motionEffects.contains($0.moduleID) }
+        guard exposure > 0.000001, context.layerMotion != nil ||
+                context.motionScene?.hasAnimatedTransforms == true || hasEffectMotion else {
             return EffectRenderResult(image: image)
         }
         let components: String
@@ -51,7 +54,7 @@ struct MotionBlurEffectRenderer: EffectRenderModule {
             return context.layerMotion?.placement(at: time, bounds: sourceBounds,
                 referenceTime: context.clipTime, components: components).concatenating(inverse) ?? .identity
         }
-        guard context.motionScene != nil || transforms.contains(where: {
+        guard hasEffectMotion || context.motionScene != nil || transforms.contains(where: {
             abs($0.a - 1) + abs($0.d - 1) + abs($0.b) + abs($0.c) + abs($0.tx) + abs($0.ty) > 0.000001
         }) else { return EffectRenderResult(image: image) }
         let outputBounds = transforms.reduce(image.extent) { $0.union(image.extent.applying($1)) }.integral
@@ -66,14 +69,23 @@ struct MotionBlurEffectRenderer: EffectRenderModule {
         var accumulated: CIImage?
         for (index, transform) in transforms.enumerated() {
             let source: CIImage
-            if let scene = context.motionScene {
-                let offset = exposure * (Double(index) + 0.5) / Double(count)
-                let sceneImage = try scene.sample(offset, components)
-                source = try EffectRenderRegistry.shared.render(context.temporalPrefix, to: sceneImage,
-                    context: EffectRenderContext(compositionTime: context.compositionTime,
-                        clipTime: context.clipTime, frameIndex: context.frameIndex, itemID: context.itemID,
-                        renderScale: context.renderScale, quality: context.quality),
-                    resources: resources, failurePolicy: .failOnUnavailableEffects)
+            let offset = exposure * (Double(index) + 0.5) / Double(count)
+            if context.motionScene != nil || hasEffectMotion, let input = context.effectInput {
+                let base = try context.motionScene?.sample(offset, components) ?? input
+                let sampleTime = max(context.clipTime - offset, 0)
+                var sampled = base
+                // Keep non-motion effects at the current time, while evaluating camera
+                // transforms at each shutter sample in their original stack order.
+                for prefixEffect in context.temporalPrefix.effects {
+                    let time = motionEffects.contains(prefixEffect.moduleID) ? sampleTime : context.clipTime
+                    sampled = try EffectRenderRegistry.shared.render(EffectStack(effects: [prefixEffect]), to: sampled,
+                        context: EffectRenderContext(compositionTime: context.compositionTime - (context.clipTime - time),
+                            clipTime: time, frameIndex: context.frameIndex, itemID: context.itemID,
+                            renderScale: context.renderScale, quality: context.quality,
+                            frameDuration: context.frameDuration),
+                        resources: resources, failurePolicy: .failOnUnavailableEffects)
+                }
+                source = sampled
             } else { source = image }
             let sample = source.transformed(by: transform.concatenating(downscale))
                 .composited(over: transparent).cropped(to: bounds)

@@ -227,7 +227,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             }
         }
 
-        guard !context.coordinator.isUserInteracting,
+        guard !isScrollDisabled, !context.coordinator.isUserInteracting,
             !scrollView.isTracking, !scrollView.isDecelerating,
             !context.coordinator.isOverscrolled(scrollView),
             playbackState?.isPlaying != true
@@ -550,7 +550,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             guard
                 TimelineScrollSynchronizationPolicy.shouldSynchronizeOnLayout(
                     isPlaying: parent.playbackState?.isPlaying == true,
-                    isUserInteracting: isUserInteracting
+                    isUserInteracting: isUserInteracting,
+                    isDraggingItem: parent.isScrollDisabled
                 )
             else { return }
             let resolvedContentSize = scrollContentSize(

@@ -399,39 +399,24 @@ extension AnimatableProperty where Value == Double {
 
     func trimmedStart(by delta: Double, oldDuration: Double) -> AnimatableProperty<Double> {
         guard !keyframes.isEmpty else { return self }
-        if delta >= 0 {
-            return split(at: min(delta, oldDuration)).right
+        let offset = min(delta, oldDuration)
+        guard offset != 0 else { return self }
+        let edgeValue = value(at: max(offset, 0))
+        let frames = keyframes.compactMap { frame -> Keyframe<Double>? in
+            guard frame.time >= offset else { return nil }
+            var shifted = frame
+            shifted.time = max(frame.time - offset, 0)
+            return shifted
         }
-
-        let extensionDuration = -delta
-        let edgeValue = value(at: 0)
-        var frames = keyframes
-        for index in frames.indices {
-            frames[index].time += extensionDuration
-        }
-        frames.insert(
-            Keyframe(time: 0, value: edgeValue, interpolation: .hold),
-            at: 0
-        )
         return AnimatableProperty(baseValue: edgeValue, keyframes: frames)
     }
 
     func trimmedEnd(newDuration: Double, oldDuration: Double) -> AnimatableProperty<Double> {
         guard !keyframes.isEmpty else { return self }
         let duration = max(newDuration, 0)
-        if duration <= oldDuration {
-            return split(at: duration).left
-        }
-
-        var frames = keyframes
-        let edgeValue = value(at: oldDuration)
-        if frames.last?.time ?? 0 < oldDuration - KeyframeMergeSupport.timeTolerance {
-            frames.append(Keyframe(time: oldDuration, value: edgeValue, interpolation: .hold))
-        } else if let lastIndex = frames.indices.last {
-            frames[lastIndex].interpolation = .hold
-        }
-        frames.append(Keyframe(time: duration, value: edgeValue))
-        return AnimatableProperty(baseValue: baseValue, keyframes: frames)
+        guard duration < oldDuration else { return self }
+        let frames = keyframes.filter { $0.time <= duration }
+        return AnimatableProperty(baseValue: frames.isEmpty ? value(at: duration) : baseValue, keyframes: frames)
     }
 
     func clamped(to range: ClosedRange<Double>) -> AnimatableProperty<Double> {

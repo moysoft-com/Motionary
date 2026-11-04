@@ -3,6 +3,24 @@ import Testing
 @testable import Motionary
 
 struct MusicStructureAnalyzerTests {
+    @Test func beatFeaturesIncludeSoundAwayFromTheMidpoint() throws {
+        let rate = 22_050.0
+        let beatSamples = 11_025
+        var samples = [Float](repeating: 0, count: beatSamples * 16)
+        for beat in 0..<16 {
+            let amplitude = beat < 8 ? 0.02 : 0.8
+            for i in 0..<Int(rate * 0.09) {
+                samples[beat * beatSamples + i] = Float(amplitude * sin(2 * .pi * 110 * Double(i) / rate))
+            }
+        }
+        let markers = (0..<16).map { AudioBeatMarker(sourceTime: Double($0) * 0.5, strength: 0.8) }
+        let evidence = try samples.withUnsafeBufferPointer {
+            try MusicStructureAnalyzer.analyze(markers: markers, samples: $0, sampleRate: rate)
+        }
+        #expect(evidence[8].boundary > 0.2)
+        #expect(evidence[8].accent > evidence[2].accent)
+    }
+
     @Test func contrastBasedDropAndEditRankingUseSeparateEvidence() throws {
         let sampleRate = 22_050.0
         let beatSamples = 11_025

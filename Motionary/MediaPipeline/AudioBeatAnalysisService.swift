@@ -36,7 +36,6 @@ struct AudioBeatAnalysisService {
     func analyze(
         url: URL,
         fingerprint: String? = nil,
-        precision: AudioBeatModelPrecision = .fp16,
         progress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> AudioBeatAnalysis {
         let sourceFingerprint: String
@@ -49,7 +48,6 @@ struct AudioBeatAnalysisService {
             try await Self.decodeAndAnalyze(
                 url: url,
                 sourceFingerprint: sourceFingerprint,
-                precision: precision,
                 progress: progress
             )
         }
@@ -76,7 +74,6 @@ struct AudioBeatAnalysisService {
     private static func decodeAndAnalyze(
         url: URL,
         sourceFingerprint: String,
-        precision: AudioBeatModelPrecision,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> AudioBeatAnalysis {
         try Task.checkCancellation()
@@ -199,8 +196,7 @@ struct AudioBeatAnalysisService {
             try pcmFile?.close()
             // If the neural paths cannot establish a rhythm, the existing DSP
             // tracker gets a chance to establish one independently.
-            let modelName = precision == .fp32 ? "BeatThisFP32" : "BeatThis"
-            let modelURL = Bundle.main.url(forResource: modelName, withExtension: "mlmodelc")
+            let modelURL = Bundle.main.url(forResource: "BeatThisFP32", withExtension: "mlmodelc")
             if let engine = try? BeatThisInference(modelURL: modelURL) {
                 let pcm = try Data(contentsOf: pcmURL, options: .mappedIfSafe)
                 guard pcm.count.isMultiple(of: MemoryLayout<Float>.stride) else {
@@ -210,7 +206,7 @@ struct AudioBeatAnalysisService {
                     let analysis = try pcm.withUnsafeBytes { bytes in
                         try NeuralBeatAnalyzer.analyze(samples: bytes.bindMemory(to: Float.self),
                                                        fingerprint: sourceFingerprint, engine: engine,
-                                                       modelPrecision: precision)
+                                                       modelPrecision: .fp32)
                     }
                     progress(1)
                     return analysis

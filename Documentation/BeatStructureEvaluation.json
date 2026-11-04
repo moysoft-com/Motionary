@@ -1,0 +1,284 @@
+{
+  "dataset": "SALAMI Live Music Archive subset",
+  "annotation_commit": "8e4f95d18a3ab628c53011fa5a43e9d3be27965d",
+  "grid_seconds": 0.5,
+  "tolerance_seconds": 3,
+  "fixed_candidate_interval_seconds": 8,
+  "minimum_candidate_spacing_seconds": 3,
+  "excluded_duration_mismatch": [
+    "970",
+    "1327"
+  ],
+  "tracks": [
+    {
+      "id": "1007",
+      "audio_sha256": "7b588003602c0d86398d06e79637d1e7ea72668ad8c11d230ee14b68529e3ea3",
+      "duration": 173.62140589569162,
+      "references": 7,
+      "baseline_fixed_f1": 0.42857142857142855,
+      "multiframe_fixed_f1": 0.5,
+      "baseline_oracle_f1": 0.5714285714285714,
+      "multiframe_oracle_f1": 0.42857142857142855
+    },
+    {
+      "id": "1032",
+      "audio_sha256": "53d33a809f4e891d18a768490fa2128fca60d1fbed979c50bcd591994b96f3fd",
+      "duration": 152.9208163265306,
+      "references": 11,
+      "baseline_fixed_f1": 0.4666666666666667,
+      "multiframe_fixed_f1": 0.6,
+      "baseline_oracle_f1": 0.36363636363636365,
+      "multiframe_oracle_f1": 0.45454545454545453
+    },
+    {
+      "id": "1078",
+      "audio_sha256": "4d9cd0021ef0f97792b2d12d6202a24d626dc80e15b45ffcee37947fbc5325af",
+      "duration": 177.12,
+      "references": 7,
+      "baseline_fixed_f1": 0.3448275862068965,
+      "multiframe_fixed_f1": 0.41379310344827586,
+      "baseline_oracle_f1": 0.14285714285714285,
+      "multiframe_oracle_f1": 0.2857142857142857
+    },
+    {
+      "id": "1136",
+      "audio_sha256": "f272f1ce4e09dc9fd5498b64f685f58c5cc4e647342be11906bca9751866d1d4",
+      "duration": 171.48,
+      "references": 2,
+      "baseline_fixed_f1": 0.17391304347826084,
+      "multiframe_fixed_f1": 0.17391304347826084,
+      "baseline_oracle_f1": 0.0,
+      "multiframe_oracle_f1": 0.0
+    },
+    {
+      "id": "1165",
+      "audio_sha256": "e578015260f8b72549465a6ebf1cb95cd2f316b608251cb797e05fe7189f502e",
+      "duration": 145.5,
+      "references": 20,
+      "baseline_fixed_f1": 0.7368421052631577,
+      "multiframe_fixed_f1": 0.6842105263157895,
+      "baseline_oracle_f1": 0.7,
+      "multiframe_oracle_f1": 0.75
+    },
+    {
+      "id": "1180",
+      "audio_sha256": "50c0f399dd579980fb627e213f3190f5881647d53bfda6a231e36d4c64f42cb5",
+      "duration": 157.2237641723356,
+      "references": 8,
+      "baseline_fixed_f1": 0.37037037037037035,
+      "multiframe_fixed_f1": 0.44444444444444436,
+      "baseline_oracle_f1": 0.375,
+      "multiframe_oracle_f1": 0.375
+    },
+    {
+      "id": "1182",
+      "audio_sha256": "e63eca8c9f6a8b7da980ee16e9b7b4f243a610a21bf21ab72edac973bb9c1a44",
+      "duration": 177.214693877551,
+      "references": 5,
+      "baseline_fixed_f1": 0.2962962962962963,
+      "multiframe_fixed_f1": 0.14814814814814814,
+      "baseline_oracle_f1": 0.0,
+      "multiframe_oracle_f1": 0.0
+    },
+    {
+      "id": "1210",
+      "audio_sha256": "236f2a13163a9544f774d5c04f6fcdf4bd2e7ea24f0d93e624b2afd735c0f82e",
+      "duration": 140.89333333333335,
+      "references": 8,
+      "baseline_fixed_f1": 0.48,
+      "multiframe_fixed_f1": 0.31999999999999995,
+      "baseline_oracle_f1": 0.25,
+      "multiframe_oracle_f1": 0.375
+    },
+    {
+      "id": "1226",
+      "audio_sha256": "4adcbe2d9b4c01e3017320cb9cc1723754a080ff88bce085d71f93f3604b5629",
+      "duration": 163.06666666666666,
+      "references": 2,
+      "baseline_fixed_f1": 0.18181818181818182,
+      "multiframe_fixed_f1": 0.18181818181818182,
+      "baseline_oracle_f1": 0.0,
+      "multiframe_oracle_f1": 0.5
+    },
+    {
+      "id": "1235",
+      "audio_sha256": "d1b1a58dc6d4eff71cf59115aa08c39aafd1cc10d2e8da77533523280f7012ad",
+      "duration": 162.94666666666666,
+      "references": 7,
+      "baseline_fixed_f1": 0.37037037037037035,
+      "multiframe_fixed_f1": 0.37037037037037035,
+      "baseline_oracle_f1": 0.2857142857142857,
+      "multiframe_oracle_f1": 0.0
+    },
+    {
+      "id": "1237",
+      "audio_sha256": "82888c81a8bcb593ca654df405cd5f65b68e42044e8e434e68d666e2b78ce453",
+      "duration": 113.44,
+      "references": 9,
+      "baseline_fixed_f1": 0.5217391304347826,
+      "multiframe_fixed_f1": 0.5217391304347826,
+      "baseline_oracle_f1": 0.4444444444444444,
+      "multiframe_oracle_f1": 0.4444444444444444
+    },
+    {
+      "id": "1238",
+      "audio_sha256": "8f854025aacef85e22a182d90e706554eea81e30c184059af719f5acb60581ef",
+      "duration": 175.50312925170067,
+      "references": 10,
+      "baseline_fixed_f1": 0.3225806451612903,
+      "multiframe_fixed_f1": 0.5161290322580645,
+      "baseline_oracle_f1": 0.3,
+      "multiframe_oracle_f1": 0.6
+    },
+    {
+      "id": "1256",
+      "audio_sha256": "ea181503d3e327f15f89e0af07aefd9da295b86631a6705158b504c3db576f27",
+      "duration": 107.2609977324263,
+      "references": 9,
+      "baseline_fixed_f1": 0.5454545454545455,
+      "multiframe_fixed_f1": 0.6363636363636364,
+      "baseline_oracle_f1": 0.5555555555555556,
+      "multiframe_oracle_f1": 0.5555555555555556
+    },
+    {
+      "id": "1272",
+      "audio_sha256": "09c418b4b8f682e460b42838da80dcbefc8c594797bb38a928705d21f0de0566",
+      "duration": 175.94666666666666,
+      "references": 4,
+      "baseline_fixed_f1": 0.16,
+      "multiframe_fixed_f1": 0.08,
+      "baseline_oracle_f1": 0.0,
+      "multiframe_oracle_f1": 0.25
+    },
+    {
+      "id": "1295",
+      "audio_sha256": "ee9f452c52134eda4ff9459f645d2e602aa51c3b8ebd8b4f936e537046dd52b6",
+      "duration": 105.61333333333333,
+      "references": 7,
+      "baseline_fixed_f1": 0.5,
+      "multiframe_fixed_f1": 0.5,
+      "baseline_oracle_f1": 0.14285714285714285,
+      "multiframe_oracle_f1": 0.14285714285714285
+    },
+    {
+      "id": "1347",
+      "audio_sha256": "c0e2aa4a9fbc1fdb603447d088d17576a535ab0b1acab1314b5085233d079ce4",
+      "duration": 159.42707482993197,
+      "references": 7,
+      "baseline_fixed_f1": 0.5384615384615384,
+      "multiframe_fixed_f1": 0.5384615384615384,
+      "baseline_oracle_f1": 0.7142857142857143,
+      "multiframe_oracle_f1": 0.7142857142857143
+    },
+    {
+      "id": "1359",
+      "audio_sha256": "776e156db69c55f93c6804caa2704913496463da754e5691ebe81edeabd5c5b8",
+      "duration": 94.56907029478458,
+      "references": 6,
+      "baseline_fixed_f1": 0.4705882352941177,
+      "multiframe_fixed_f1": 0.4705882352941177,
+      "baseline_oracle_f1": 0.16666666666666666,
+      "multiframe_oracle_f1": 0.3333333333333333
+    },
+    {
+      "id": "1382",
+      "audio_sha256": "ae3393cc1678e7713d5d10fce9682eb9888ece3067d48e94b7c83926789b3ae4",
+      "duration": 165.51183673469387,
+      "references": 4,
+      "baseline_fixed_f1": 0.16666666666666669,
+      "multiframe_fixed_f1": 0.16666666666666669,
+      "baseline_oracle_f1": 0.25,
+      "multiframe_oracle_f1": 0.25
+    },
+    {
+      "id": "1406",
+      "audio_sha256": "62af4ec354a81c6ceedf3178f46ce00fa46343c3db4554e45b6458091e44dfb5",
+      "duration": 169.9485260770975,
+      "references": 8,
+      "baseline_fixed_f1": 0.3448275862068965,
+      "multiframe_fixed_f1": 0.4137931034482759,
+      "baseline_oracle_f1": 0.25,
+      "multiframe_oracle_f1": 0.25
+    },
+    {
+      "id": "1408",
+      "audio_sha256": "cfb6fc627258909462fcbc7940b4a4e4d70b9079ad5373ba2bdaf68f7ba67274",
+      "duration": 161.07487528344672,
+      "references": 7,
+      "baseline_fixed_f1": 0.29629629629629634,
+      "multiframe_fixed_f1": 0.37037037037037035,
+      "baseline_oracle_f1": 0.2857142857142857,
+      "multiframe_oracle_f1": 0.42857142857142855
+    },
+    {
+      "id": "1434",
+      "audio_sha256": "7155eb5bf86ba7eb18de63c339f52d28b7fa207330f9de87d6e65248e8cf4399",
+      "duration": 98.98666666666666,
+      "references": 6,
+      "baseline_fixed_f1": 0.5555555555555556,
+      "multiframe_fixed_f1": 0.4444444444444444,
+      "baseline_oracle_f1": 0.5,
+      "multiframe_oracle_f1": 0.5
+    },
+    {
+      "id": "1444",
+      "audio_sha256": "9c639d205017b52999ae499a6edb57b29efdd6b352ceb57f38f01560ef99d956",
+      "duration": 123.71591836734694,
+      "references": 9,
+      "baseline_fixed_f1": 0.5833333333333334,
+      "multiframe_fixed_f1": 0.6666666666666667,
+      "baseline_oracle_f1": 0.5555555555555556,
+      "multiframe_oracle_f1": 0.6666666666666666
+    },
+    {
+      "id": "1446",
+      "audio_sha256": "8901d2f00c50952db0ba739643245f60d7b787e8f8b786d203d97ccb7ece50d1",
+      "duration": 172.38666666666666,
+      "references": 10,
+      "baseline_fixed_f1": 0.5806451612903225,
+      "multiframe_fixed_f1": 0.6451612903225806,
+      "baseline_oracle_f1": 0.5,
+      "multiframe_oracle_f1": 0.6
+    },
+    {
+      "id": "1474",
+      "audio_sha256": "af93bbde73c6ae17905139ebb4e16b3051f62c054d38b79208c46d8142d65358",
+      "duration": 143.12,
+      "references": 5,
+      "baseline_fixed_f1": 0.45454545454545453,
+      "multiframe_fixed_f1": 0.45454545454545453,
+      "baseline_oracle_f1": 0.4000000000000001,
+      "multiframe_oracle_f1": 0.4000000000000001
+    },
+    {
+      "id": "1491",
+      "audio_sha256": "3d3ddd094309afc1b91ae6b5a7f62a115aa42c9be34c66955b43addeef8359d2",
+      "duration": 160.36,
+      "references": 4,
+      "baseline_fixed_f1": 0.16666666666666669,
+      "multiframe_fixed_f1": 0.24999999999999997,
+      "baseline_oracle_f1": 0.25,
+      "multiframe_oracle_f1": 0.25
+    },
+    {
+      "id": "979",
+      "audio_sha256": "ea9a921077987fb071906de55201f93bce4b1fea42b448ef2010344cd887eac6",
+      "duration": 158.68,
+      "references": 7,
+      "baseline_fixed_f1": 0.3846153846153846,
+      "multiframe_fixed_f1": 0.46153846153846156,
+      "baseline_oracle_f1": 0.42857142857142855,
+      "multiframe_oracle_f1": 0.5714285714285714
+    },
+    {
+      "id": "981",
+      "audio_sha256": "05427ec342cf23ebc4b7c0ddfac8712600681d5c8debd3bd0b78d5214a9497ee",
+      "duration": 163.64902494331065,
+      "references": 8,
+      "baseline_fixed_f1": 0.4999999999999999,
+      "multiframe_fixed_f1": 0.35714285714285715,
+      "baseline_oracle_f1": 0.25,
+      "multiframe_oracle_f1": 0.375
+    }
+  ]
+}

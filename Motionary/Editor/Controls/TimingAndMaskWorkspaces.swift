@@ -202,6 +202,28 @@ struct MaskWorkspaceView: View {
                             .disabled(!isEnabled)
                         }
                         maskScrubber(
+                            title: "Offset X",
+                            value: mask.offsetX * unitSpace.width,
+                            range: -unitSpace.width...unitSpace.width,
+                            update: {
+                                viewModel.setSelectedMaskGeometry(
+                                    offsetX: $0 / max(unitSpace.width, 0.000_001), interactive: true
+                                )
+                            }
+                        )
+                        .disabled(!isEnabled)
+                        maskScrubber(
+                            title: "Offset Y",
+                            value: mask.offsetY * unitSpace.height,
+                            range: -unitSpace.height...unitSpace.height,
+                            update: {
+                                viewModel.setSelectedMaskGeometry(
+                                    offsetY: $0 / max(unitSpace.height, 0.000_001), interactive: true
+                                )
+                            }
+                        )
+                        .disabled(!isEnabled)
+                        maskScrubber(
                             title: "Rotation",
                             value: mask.rotationDegrees,
                             range: -10_000...10_000,

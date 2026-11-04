@@ -25,6 +25,9 @@ struct TimelineRenderTrackSnapshot: Equatable {
     let items: [TimelineRenderItem]
     let prefixMaximumTimelineEnds: [Double]
     private let itemIndexByID: [UUID: Int]
+    private let shortestItemID: UUID?
+    private let shortestDuration: Double?
+    private let secondShortestDuration: Double?
 
     init(track: TimelineTrack) {
         sourceTrack = track
@@ -44,6 +47,21 @@ struct TimelineRenderTrackSnapshot: Equatable {
             }
         items = renderItems
 
+        var shortest: (id: UUID, duration: Double)?
+        var secondShortest: Double?
+        for renderItem in renderItems {
+            let duration = renderItem.item.placementDuration
+            if shortest == nil || duration < shortest!.duration {
+                secondShortest = shortest?.duration
+                shortest = (renderItem.id, duration)
+            } else if secondShortest == nil || duration < secondShortest! {
+                secondShortest = duration
+            }
+        }
+        shortestItemID = shortest?.id
+        shortestDuration = shortest?.duration
+        secondShortestDuration = secondShortest
+
         var indicesByID: [UUID: Int] = [:]
         indicesByID.reserveCapacity(renderItems.count)
         for (index, renderItem) in renderItems.enumerated() {
@@ -61,6 +79,10 @@ struct TimelineRenderTrackSnapshot: Equatable {
     func item(withID itemID: UUID) -> TimelineRenderItem? {
         guard let index = itemIndexByID[itemID] else { return nil }
         return items[index]
+    }
+
+    func minimumItemDuration(excluding itemID: UUID? = nil) -> Double? {
+        itemID != nil && itemID == shortestItemID ? secondShortestDuration : shortestDuration
     }
 }
 

@@ -32,32 +32,41 @@ struct MusicStructureAnalyzer {
             if index & 127 == 0 { try Task.checkCancellation() }
             let startTime = markers[index].gridTime ?? markers[index].sourceTime
             let endTime = index + 1 < markers.count ? (markers[index + 1].gridTime ?? markers[index + 1].sourceTime) : startTime + 0.25
-            let center = Int(((startTime + endTime) * 0.5 * sampleRate).rounded())
-            var input = zeros
+            let start = max(0, min(samples.count, Int((startTime * sampleRate).rounded())))
+            let end = max(start, min(samples.count, Int((endTime * sampleRate).rounded())))
+            // Sample across the interval, rather than inferring a whole beat's
+            // timbre and loudness from a single 46 ms midpoint snapshot.
+            let frameCount = min(8, max(1, Int(ceil(Double(end - start) / Double(size)))))
             var energy = 0.0
-            for j in 0..<size {
-                let sample = center - size / 2 + j
-                if sample >= 0, sample < samples.count {
-                    let value = samples[sample]
-                    input[j] = value * window[j]
-                    energy += Double(value * value)
-                }
-            }
-            var real = zeros, imag = zeros
-            transform.transform(inputReal: input, inputImaginary: zeros, outputReal: &real, outputImaginary: &imag)
+            var validSamples = 0
             var bands = [Double](repeating: 0, count: 12)
             var bass = 0.0
-            for bin in 1..<(size / 2) {
-                let frequency = Double(bin) * sampleRate / Double(size)
-                let magnitude = hypot(Double(real[bin]), Double(imag[bin]))
-                if frequency < 180 { bass += magnitude * magnitude }
-                // Log-spaced timbral bands retain changes across the spectrum.
-                let band = min(max(Int(log2(max(frequency, 50) / 50) * 2), 0), bands.count - 1)
-                bands[band] += magnitude
+            for frame in 0..<frameCount {
+                let center = start + Int((Double(end - start) * (Double(frame) + 0.5) / Double(frameCount)).rounded())
+                var input = zeros
+                for j in 0..<size {
+                    let sample = center - size / 2 + j
+                    if sample >= start, sample < end {
+                        let value = samples[sample]
+                        input[j] = value * window[j]
+                        energy += Double(value * value)
+                        validSamples += 1
+                    }
+                }
+                var real = zeros, imag = zeros
+                transform.transform(inputReal: input, inputImaginary: zeros, outputReal: &real, outputImaginary: &imag)
+                for bin in 1..<(size / 2) {
+                    let frequency = Double(bin) * sampleRate / Double(size)
+                    let magnitude = hypot(Double(real[bin]), Double(imag[bin]))
+                    if frequency < 180 { bass += magnitude * magnitude }
+                    let band = min(max(Int(log2(max(frequency, 50) / 50) * 2), 0), bands.count - 1)
+                    bands[band] += magnitude
+                }
             }
             let norm = sqrt(bands.reduce(0) { $0 + $1 * $1 })
             if norm > 1e-12 { bands = bands.map { $0 / norm } }
-            features.append(Features(rms: sqrt(energy / Double(size)), bass: sqrt(bass) / Double(size), spectrum: bands))
+            features.append(Features(rms: sqrt(energy / Double(max(validSamples, 1))),
+                                     bass: sqrt(bass / Double(frameCount)) / Double(size), spectrum: bands))
         }
         let levels = features.map(\.rms).sorted()
         let typical = levels[levels.count / 2]

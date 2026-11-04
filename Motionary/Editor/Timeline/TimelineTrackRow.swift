@@ -2,8 +2,38 @@
 
 import SwiftUI
 
+enum TimelineTrackBackgroundRange {
+    static func visible(projectEnd: Double, visibleRange: ClosedRange<Double>, previewEnd: Double?) -> ClosedRange<Double>? {
+        let end = max(projectEnd, previewEnd ?? 0, 0)
+        guard end > 0 else { return nil }
+        let lower = min(max(visibleRange.lowerBound, 0), end)
+        let upper = min(max(visibleRange.upperBound, previewEnd ?? 0, lower), end)
+        return upper > lower ? lower...upper : nil
+    }
+}
+
+enum TimelineTrackBackgroundRadius {
+    static func calculate(items: [TimelineItem], range: ClosedRange<Double>, pixelsPerSecond: CGFloat,
+                          itemRadius: CGFloat, inset: CGFloat, height: CGFloat) -> CGFloat {
+        let maximum = min(8 + inset, max(height, 0) / 2)
+        let adjacent = min(maximum, max(itemRadius, 0) + inset)
+        let scale = max(pixelsPerSecond, 0)
+        let contentWidth = CGFloat(max(range.upperBound - range.lowerBound, 0)) * scale
+        var radius = maximum
+        for item in items {
+            let start = CGFloat(item.timelineStart - range.lowerBound) * scale
+            let end = start + max(CGFloat(item.placementDuration) * scale, 6)
+            guard end >= 0, start <= contentWidth else { continue }
+            let distance = min(max(start, 0), max(contentWidth - end, 0))
+            radius = min(radius, adjacent + distance)
+        }
+        return radius
+    }
+}
+
 struct TimelineTrackRow: View {
     let track: TimelineTrack
+    let trackSnapshot: TimelineRenderTrackSnapshot?
     let items: [TimelineRenderItem]
     let trackIndex: Int
     let trackCount: Int
@@ -37,7 +67,11 @@ struct TimelineTrackRow: View {
     let onTrackDragBegan: () -> Void
     let onTrackDragChanged: (TimelineLongPressDragValue) -> Void
     let onTrackDragEnded: (Bool) -> Void
+    var onTrackTrimPreviewChanged: ((TimelineItem?) -> Void)? = nil
     var workspaceContext: TimelineWorkspaceContext? = nil
+    @State private var activeTrimPreview: TimelineItem?
+
+    private let itemInset: CGFloat = 4
 
     private var isFocusedTrack: Bool {
         workspaceContext == nil || track.items.contains { $0.id == selectedClipID }
@@ -60,20 +94,20 @@ struct TimelineTrackRow: View {
             .zIndex(300)
 
             if let backgroundRange = visibleTrackBackgroundRange {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: backgroundRadius(in: backgroundRange), style: .continuous)
                     .fill(MotionaryTheme.surfaceSubtle)
                     .frame(
                         width: max(
-                            10 + CGFloat(backgroundRange.upperBound - backgroundRange.lowerBound)
+                            itemInset * 2 + CGFloat(backgroundRange.upperBound - backgroundRange.lowerBound)
                                 * pixelsPerSecond,
-                            10
+                            itemInset * 2
                         ),
                         height: height
                     )
                     .offset(
                         x: centerPadding
                             + CGFloat(backgroundRange.lowerBound) * pixelsPerSecond
-                            - 5
+                            - itemInset
                     )
                     .contentShape(Rectangle())
                     .opacity(isFocusedTrack ? 1 : 0.35)
@@ -93,7 +127,8 @@ struct TimelineTrackRow: View {
                     currentTime: currentTime,
                     keyframeTolerance: keyframeTolerance,
                     pixelsPerSecond: pixelsPerSecond,
-                    height: height - 8,
+                    height: height - itemInset * 2,
+                    cornerRadius: itemCornerRadius,
                     allowsClipInteraction: true,
                     onSelect: { onSelectClip(item.id) },
                     onBeginEdit: { onBeginEditClip(item.id) },
@@ -114,6 +149,10 @@ struct TimelineTrackRow: View {
                     },
                     onFinishInteractiveEdit: onFinishInteractiveEdit,
                     onSnapGuideChanged: onSnapGuideChanged,
+                    onTrimPreviewChanged: {
+                        activeTrimPreview = $0
+                        onTrackTrimPreviewChanged?($0)
+                    },
                     workspaceContext: workspaceContext
                 )
                 .saturation(workspaceContext == nil || selectedClipID == item.id ? 1 : 0)
@@ -136,6 +175,38 @@ struct TimelineTrackRow: View {
         )
     }
 
+    private var itemCornerRadius: CGFloat {
+        let movingAway = activeClipDrag.map {
+            $0.sourceTrackIndex == trackIndex && $0.resolvedPlacement.trackIndex != trackIndex
+        } ?? false
+        let excludedID = activeTrimPreview?.id ?? (movingAway ? activeClipDrag?.clipID : nil)
+        var shortest = trackSnapshot?.minimumItemDuration(excluding: excludedID)
+        if let activeTrimPreview {
+            shortest = min(shortest ?? activeTrimPreview.placementDuration, activeTrimPreview.placementDuration)
+        }
+        if let drag = activeClipDrag, drag.sourceTrackIndex != trackIndex,
+           drag.resolvedPlacement.trackIndex == trackIndex {
+            shortest = min(shortest ?? drag.itemSnapshot.placementDuration, drag.itemSnapshot.placementDuration)
+        }
+        return TimelineItemCornerRadius.value(shortestDuration: shortest, pixelsPerSecond: pixelsPerSecond,
+                                              height: height - itemInset * 2)
+    }
+
+    private func backgroundRadius(in range: ClosedRange<Double>) -> CGFloat {
+        var displayedItems = items.compactMap { renderItem -> TimelineItem? in
+            if renderItem.id == activeClipDrag?.clipID { return nil }
+            return activeTrimPreview?.id == renderItem.id ? activeTrimPreview : renderItem.item
+        }
+        if let drag = activeClipDrag, drag.resolvedPlacement.trackIndex == trackIndex {
+            var ghost = drag.itemSnapshot
+            ghost.timelineStart = drag.resolvedPlacement.start
+            displayedItems.append(ghost)
+        }
+        return TimelineTrackBackgroundRadius.calculate(items: displayedItems, range: range,
+                                                      pixelsPerSecond: pixelsPerSecond,
+                                                      itemRadius: itemCornerRadius, inset: itemInset, height: height)
+    }
+
     private var trackReorderOffset: CGFloat {
         guard let activeTrackDrag else { return 0 }
         if activeTrackDrag.trackID == track.id {
@@ -154,12 +225,14 @@ struct TimelineTrackRow: View {
     }
 
     private var visibleTrackBackgroundRange: ClosedRange<Double>? {
-        let timelineEnd = max(projectDuration, 0)
-        guard timelineEnd > 0 else { return nil }
-        let lowerBound = min(max(visibleTimelineRange.lowerBound, 0), timelineEnd)
-        let upperBound = min(max(visibleTimelineRange.upperBound, lowerBound), timelineEnd)
-        guard upperBound > lowerBound else { return nil }
-        return lowerBound...upperBound
+        let dragEnd = activeClipDrag.flatMap { drag -> Double? in
+            guard drag.resolvedPlacement.trackIndex == trackIndex else { return nil }
+            return drag.resolvedPlacement.start + drag.itemSnapshot.placementDuration
+        }
+        let previewEnd = max(dragEnd ?? 0, activeTrimPreview?.timelineEnd ?? 0)
+        return TimelineTrackBackgroundRange.visible(projectEnd: projectDuration,
+                                                    visibleRange: visibleTimelineRange,
+                                                    previewEnd: previewEnd > 0 ? previewEnd : nil)
     }
 
 }

@@ -319,6 +319,7 @@ extension EditorViewModel {
         _ clipID: UUID,
         by seconds: Double,
         baseline: TimelineItem? = nil,
+        snapThreshold: Double = 0.16,
         rebuild: Bool = true,
         interactive: Bool = false
     ) -> TimelineTrimResult? {
@@ -353,6 +354,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: currentItem.id,
             requiredKind: currentItem.requiredTrackKind,
+            snapThreshold: snapThreshold,
             snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
@@ -404,7 +406,8 @@ extension EditorViewModel {
     func previewTrimClipStart(
         _ clipID: UUID,
         by seconds: Double,
-        baseline: TimelineItem? = nil
+        baseline: TimelineItem? = nil,
+        snapThreshold: Double = 0.16
     ) -> TimelineTrimResult? {
         guard let location = project.itemLocation(id: clipID) else { return nil }
         let item = project.tracks[location.track].items[location.item]
@@ -432,6 +435,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: item.id,
             requiredKind: item.requiredTrackKind,
+            snapThreshold: snapThreshold,
             snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
@@ -459,6 +463,7 @@ extension EditorViewModel {
         _ clipID: UUID,
         by seconds: Double,
         baseline: TimelineItem? = nil,
+        snapThreshold: Double = 0.16,
         rebuild: Bool = true,
         interactive: Bool = false
     ) -> TimelineTrimResult? {
@@ -482,6 +487,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: currentItem.id,
             requiredKind: currentItem.requiredTrackKind,
+            snapThreshold: snapThreshold,
             snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {
@@ -530,7 +536,8 @@ extension EditorViewModel {
     func previewTrimClipEnd(
         _ clipID: UUID,
         by seconds: Double,
-        baseline: TimelineItem? = nil
+        baseline: TimelineItem? = nil,
+        snapThreshold: Double = 0.16
     ) -> TimelineTrimResult? {
         guard let location = project.itemLocation(id: clipID) else { return nil }
         let item = project.tracks[location.track].items[location.item]
@@ -547,6 +554,7 @@ extension EditorViewModel {
             proposedEdge,
             excluding: item.id,
             requiredKind: item.requiredTrackKind,
+            snapThreshold: snapThreshold,
             snapAnchors: [currentTime] + project.beatSnapAnchors()
         )
         if snap.snapped {

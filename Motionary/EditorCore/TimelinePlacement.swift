@@ -2,6 +2,13 @@
 
 import Foundation
 
+/// Keeps magnetic snapping small in both screen space and timeline time.
+enum TimelineSnapDistance {
+    static func threshold(pixelsPerSecond: Double) -> Double {
+        min(0.08, 6 / max(pixelsPerSecond, 1))
+    }
+}
+
 /// Immutable indexes for one timeline-item drag. Building this once at gesture
 /// start keeps project copying, item sorting, snap-anchor scans, and gap
 /// construction out of the per-frame drag path.

@@ -113,6 +113,7 @@ struct CoreTimelineLayout: View {
     @State private var displayTime: Double = 0
     @State private var horizontalScrollOffset: CGFloat = 0
     @State private var clipDragScrollOffset: CGSize = .zero
+    @State private var activeTrimPreview: TimelineItem?
     @StateObject private var viewportState = TimelineViewportState()
     @StateObject private var scrollPresentationState = TimelineScrollPresentationState()
     let size: CGSize
@@ -176,7 +177,11 @@ struct CoreTimelineLayout: View {
             max(viewModel.lastPlayableTime, 0)
         )
     }
-    private var contentWidth: CGFloat { max(CGFloat(viewModel.duration) * pixelsPerSecond, 0) + centerPadding * 2 }
+    private var displayDuration: Double {
+        let dragEnd = activeClipDrag.map { $0.resolvedPlacement.start + $0.itemSnapshot.placementDuration } ?? 0
+        return max(viewModel.duration, dragEnd, activeTrimPreview?.timelineEnd ?? 0)
+    }
+    private var contentWidth: CGFloat { max(CGFloat(displayDuration) * pixelsPerSecond, 0) + centerPadding * 2 }
     private var rowCount: Int { max(viewModel.project.tracks.count, 1) }
     // Increased contentHeight to make room for the ruler inside the scroll view.
     private var contentHeight: CGFloat {
@@ -210,7 +215,7 @@ struct CoreTimelineLayout: View {
                 trackOriginY: trackOriginY,
                 rowStride: trackHeight + rowSpacing,
                 trackCount: showsOnlySelectedTrack ? 1 : snapshot.tracks.count,
-                duration: snapshot.duration
+                duration: displayDuration
             ),
             onScrubStart: { viewModel.beginScrub() },
             onScrubChanged: { viewModel.updateScrub(to: $0) },
@@ -230,6 +235,7 @@ struct CoreTimelineLayout: View {
                 activeTrackDrag: $activeTrackDrag,
                 activeTrimSnapTime: $activeTrimSnapTime,
                 activeClipSnapKey: $activeClipSnapKey,
+                activeTrimPreview: $activeTrimPreview,
                 viewportState: viewportState,
                 scrollPresentationState: scrollPresentationState,
                 contentWidth: contentWidth,
@@ -274,7 +280,6 @@ struct CoreTimelineLayout: View {
             currentTime: scrollVisibleTime,
             maximumTimelineTime: viewModel.lastPlayableTime,
             pixelsPerSecond: pixelsPerSecond,
-            centerPadding: centerPadding,
             width: size.width
         )
     }
@@ -334,36 +339,23 @@ private struct TimelineRulerOverlay: View {
     let currentTime: Double
     let maximumTimelineTime: Double
     let pixelsPerSecond: CGFloat
-    let centerPadding: CGFloat
     let width: CGFloat
-    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        let safePixelsPerSecond = max(pixelsPerSecond, 1)
-        let rulerContentWidth = max(
-            CGFloat(max(duration, 4)) * safePixelsPerSecond + centerPadding * 2,
-            width
-        )
         let clampedTime = min(max(currentTime, 0), max(maximumTimelineTime, 0))
         let progress = min(max(scrollState.verticalOffset / 60, 0), 1)
         let easedProgress = progress * progress * (3 - 2 * progress)
 
-        EmbeddedTimelineRuler(
+        FixedTimelineRuler(
             duration: duration,
-            pixelsPerSecond: safePixelsPerSecond,
-            centerPadding: centerPadding
+            currentTime: clampedTime,
+            pixelsPerSecond: pixelsPerSecond
         )
-        .frame(width: rulerContentWidth, height: 30, alignment: .topLeading)
-        .offset(x: pixelAligned(-CGFloat(clampedTime) * safePixelsPerSecond), y: -15 * easedProgress)
+        .offset(y: -15 * easedProgress)
         .frame(width: width, height: 30, alignment: .topLeading)
         .clipped()
         .allowsHitTesting(false)
         .transaction { $0.animation = nil }
-    }
-
-    private func pixelAligned(_ value: CGFloat) -> CGFloat {
-        let scale = max(displayScale, 1)
-        return (value * scale).rounded() / scale
     }
 }
 

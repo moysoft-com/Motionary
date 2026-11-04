@@ -16,6 +16,7 @@ struct TimelineTracksContent: View {
     @Binding var activeTrackDrag: TimelineTrackDragState?
     @Binding var activeTrimSnapTime: Double?
     @Binding var activeClipSnapKey: String?
+    @Binding var activeTrimPreview: TimelineItem?
     @ObservedObject var viewportState: TimelineViewportState
     let scrollPresentationState: TimelineScrollPresentationState
     let contentWidth: CGFloat
@@ -60,6 +61,13 @@ struct TimelineTracksContent: View {
 
             if let activeClipDrag {
                 let ghostItem = dragGhostItem(for: activeClipDrag)
+                let destinationIndex = activeClipDrag.resolvedPlacement.trackIndex
+                let destinationTrack = snapshot.tracks.indices.contains(destinationIndex)
+                    ? snapshot.tracks[destinationIndex] : nil
+                let otherShortest = destinationTrack.flatMap {
+                    snapshot.trackSnapshotsByID[$0.id]?.minimumItemDuration(excluding: ghostItem.id)
+                }
+                let shortest = min(otherShortest ?? ghostItem.placementDuration, ghostItem.placementDuration)
                 TimelineItemBlock(
                     item: ghostItem,
                     media: mediaDescriptor(for: ghostItem),
@@ -72,6 +80,9 @@ struct TimelineTracksContent: View {
                     keyframeTolerance: viewModel.keyframeTimeTolerance,
                     pixelsPerSecond: pixelsPerSecond,
                     height: trackHeight - 8,
+                    cornerRadius: TimelineItemCornerRadius.value(shortestDuration: shortest,
+                                                                 pixelsPerSecond: pixelsPerSecond,
+                                                                 height: trackHeight - 8),
                     allowsClipInteraction: false,
                     onSelect: {},
                     onBeginEdit: {},
@@ -212,6 +223,7 @@ struct TimelineTracksContent: View {
         )
         return TimelineTrackRow(
             track: track,
+            trackSnapshot: snapshot.trackSnapshotsByID[track.id],
             items: snapshot.items(
                 in: track.id,
                 intersecting: viewportState.window.timeRange,
@@ -255,6 +267,7 @@ struct TimelineTracksContent: View {
                     clipID,
                     by: delta,
                     baseline: baseline,
+                    snapThreshold: TimelineSnapDistance.threshold(pixelsPerSecond: Double(pixelsPerSecond)),
                     interactive: interactive
                 )
             },
@@ -262,7 +275,8 @@ struct TimelineTracksContent: View {
                 viewModel.previewTrimClipStart(
                     clipID,
                     by: delta,
-                    baseline: baseline
+                    baseline: baseline,
+                    snapThreshold: TimelineSnapDistance.threshold(pixelsPerSecond: Double(pixelsPerSecond))
                 )
             },
             onTrimEnd: { clipID, delta, baseline, interactive in
@@ -271,6 +285,7 @@ struct TimelineTracksContent: View {
                     clipID,
                     by: delta,
                     baseline: baseline,
+                    snapThreshold: TimelineSnapDistance.threshold(pixelsPerSecond: Double(pixelsPerSecond)),
                     interactive: interactive
                 )
             },
@@ -278,7 +293,8 @@ struct TimelineTracksContent: View {
                 viewModel.previewTrimClipEnd(
                     clipID,
                     by: delta,
-                    baseline: baseline
+                    baseline: baseline,
+                    snapThreshold: TimelineSnapDistance.threshold(pixelsPerSecond: Double(pixelsPerSecond))
                 )
             },
             onFinishInteractiveEdit: {
@@ -298,6 +314,7 @@ struct TimelineTracksContent: View {
             onTrackDragEnded: { commit in
                 finishTrackDrag(commit: commit)
             },
+            onTrackTrimPreviewChanged: { activeTrimPreview = $0 },
             workspaceContext: workspaceContext
         )
     }
@@ -357,7 +374,8 @@ struct TimelineTracksContent: View {
         )
         let placement = placementSession.resolve(
             proposedStart: rawStart,
-            proposedTrackIndex: targetIndex
+            proposedTrackIndex: targetIndex,
+            snapThreshold: TimelineSnapDistance.threshold(pixelsPerSecond: Double(pixelsPerSecond))
         )
         updateClipSnapHaptic(placement)
         activeClipDrag = TimelineClipDragState(
