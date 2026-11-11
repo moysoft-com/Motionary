@@ -41,7 +41,17 @@ final class MotionaryUITests: XCTestCase {
                                       timeout: 15), .completed)
         XCTAssertFalse(next.isEnabled)
         XCTAssertTrue(previous.isEnabled)
+        let adjustment = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH 'timeline-item-' AND label == 'Adjustment'"
+        )).firstMatch
+        XCTAssertTrue(adjustment.exists)
+        let clipEndAtProjectEnd = adjustment.frame.maxX
         previous.tap()
+        let moved = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in adjustment.frame.maxX > clipEndAtProjectEnd + 24 },
+            object: adjustment
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [moved], timeout: 4), .completed)
         XCTAssertTrue(previous.isEnabled)
         previous.tap()
         XCTAssertTrue(next.isEnabled)
@@ -49,6 +59,8 @@ final class MotionaryUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 3))
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: enabled, object: play)],
                                       timeout: 8), .completed)
+        XCTAssertFalse(next.isEnabled)
+        XCTAssertTrue(previous.isEnabled)
     }
 
     @MainActor

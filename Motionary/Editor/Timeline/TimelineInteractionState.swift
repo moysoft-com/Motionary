@@ -38,6 +38,46 @@ enum TimelineScrollSynchronizationPolicy {
     }
 }
 
+/// AVPlayer's clock can be corrected as the decoder and audio timebase
+/// synchronize. Within a playback run, only display samples reachable at
+/// playback speed. An explicit seek establishes a new anchor immediately.
+struct TimelinePlaybackPosition {
+    private(set) var time: Double
+    private var timestamp: CFTimeInterval
+    private var forwardCorrection: (time: Double, timestamp: CFTimeInterval)?
+
+    init(time: Double, timestamp: CFTimeInterval) {
+        self.time = time
+        self.timestamp = timestamp
+    }
+
+    mutating func accept(_ sample: Double, at now: CFTimeInterval, frameDuration: Double) -> Double {
+        let advance = sample - time
+        let elapsed = max(now - timestamp, 0)
+        guard advance >= 0 else {
+            forwardCorrection = nil
+            return time
+        }
+        if advance > elapsed + frameDuration {
+            defer { forwardCorrection = (sample, now) }
+            // Drop an isolated future sample. If the clock keeps advancing
+            // from the corrected position, close the gap gradually so it
+            // cannot strand the ruler behind the player.
+            guard let previous = forwardCorrection else { return time }
+            let interval = max(now - previous.timestamp, 0)
+            let sourceAdvance = sample - previous.time
+            guard sourceAdvance >= 0, sourceAdvance <= interval + frameDuration else { return time }
+            time += min(advance, interval * 1.25)
+            timestamp = now
+            return time
+        }
+        forwardCorrection = nil
+        time = sample
+        timestamp = now
+        return time
+    }
+}
+
 @MainActor
 final class TimelineViewportState: ObservableObject {
     @Published private(set) var window: TimelineViewportWindow = .initial
@@ -144,8 +184,25 @@ final class TimelineViewportState: ObservableObject {
 @MainActor
 final class TimelineScrollPresentationState: ObservableObject {
     @Published private(set) var horizontalOffset: CGFloat = 0
-    @Published private(set) var hasResolvedHorizontalOffset = false
     @Published private(set) var verticalOffset: CGFloat = 0
+    private var rulerSample: TimelineRulerSample?
+    private weak var ruler: TimelineRulerSurface?
+
+    func attachRuler(_ surface: TimelineRulerSurface) {
+        guard ruler !== surface else { return }
+        ruler = surface
+        if let rulerSample { surface.present(rulerSample) }
+    }
+
+    func detachRuler(_ surface: TimelineRulerSurface) {
+        if ruler === surface { ruler = nil }
+    }
+
+    func presentRuler(_ sample: TimelineRulerSample) {
+        guard rulerSample != sample else { return }
+        rulerSample = sample
+        ruler?.present(sample)
+    }
 
     func update(verticalOffset: CGFloat) {
         guard abs(self.verticalOffset - verticalOffset) >= 0.5 else { return }
@@ -153,7 +210,6 @@ final class TimelineScrollPresentationState: ObservableObject {
     }
 
     func update(horizontalOffset: CGFloat) {
-        if !hasResolvedHorizontalOffset { hasResolvedHorizontalOffset = true }
         guard abs(self.horizontalOffset - horizontalOffset) >= 0.5 else { return }
         self.horizontalOffset = horizontalOffset
     }

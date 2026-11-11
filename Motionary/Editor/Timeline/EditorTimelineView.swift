@@ -113,7 +113,7 @@ struct CoreTimelineLayout: View {
     @State private var clipDragScrollOffset: CGSize = .zero
     @State private var activeTrimPreview: TimelineItem?
     @StateObject private var viewportState = TimelineViewportState()
-    // Keep the reference stable. The ruler and overlays observe its per-frame values.
+    // Keep the reference stable across UIKit scroll and SwiftUI layout passes.
     @State private var scrollPresentationState = TimelineScrollPresentationState()
     let size: CGSize
     let trackHeight: CGFloat
@@ -122,20 +122,25 @@ struct CoreTimelineLayout: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            ZStack(alignment: .topLeading) {
-                timelineScroll
-                if !showsOnlySelectedTrack { rulerOverlay }
-            }
-            .mask {
-                TimelineTrackViewportMask(
-                    scrollState: scrollPresentationState,
-                    tracks: workspaceContext?.displayedTracks(in: snapshot.tracks) ?? snapshot.tracks,
-                    centerPadding: centerPadding,
-                    trackHeight: trackHeight,
-                    rowStride: trackHeight + rowSpacing,
-                    activeTrackDrag: activeTrackDrag,
-                    trackOriginY: trackOriginY
-                )
+            timelineScroll
+                .mask {
+                    TimelineTrackViewportMask(
+                        scrollState: scrollPresentationState,
+                        tracks: workspaceContext?.displayedTracks(in: snapshot.tracks) ?? snapshot.tracks,
+                        centerPadding: centerPadding,
+                        trackHeight: trackHeight,
+                        rowStride: trackHeight + rowSpacing,
+                        activeTrackDrag: activeTrackDrag,
+                        trackOriginY: trackOriginY
+                    )
+                }
+            if !showsOnlySelectedTrack {
+                // Track headers can change the mask below the ruler. Give
+                // the native ruler only the stationary edge treatment.
+                rulerOverlay.mask(alignment: .top) {
+                    TimelineHorizontalEdgeMask()
+                        .frame(width: size.width, height: size.height)
+                }
             }
             playhead
             if !showsOnlySelectedTrack { pullToAddIndicator }
@@ -150,7 +155,6 @@ struct CoreTimelineLayout: View {
     private var trackOriginY: CGFloat { showsOnlySelectedTrack ? 4 : 38 }
 
     private var centerPadding: CGFloat { size.width / 2 }
-    private var duration: Double { max(viewModel.duration, 0.1) }
     private var visibleTime: Double { playbackState.currentTime }
     private var displayDuration: Double {
         let dragEnd = activeClipDrag.map { $0.resolvedPlacement.start + $0.itemSnapshot.placementDuration } ?? 0
@@ -251,14 +255,9 @@ struct CoreTimelineLayout: View {
     }
 
     private var rulerOverlay: some View {
-        TimelineRulerOverlay(
-            scrollState: scrollPresentationState,
-            duration: snapshot.duration,
-            currentTime: playbackState.currentTime,
-            maximumTimelineTime: viewModel.lastPlayableTime,
-            pixelsPerSecond: pixelsPerSecond,
-            width: size.width
-        )
+        TimelineRulerOverlay(scrollState: scrollPresentationState)
+            .frame(width: size.width, height: 30, alignment: .topLeading)
+            .allowsHitTesting(false)
     }
 
     private var timelineContentRevision: Int {
@@ -308,36 +307,6 @@ struct CoreTimelineLayout: View {
             }
     }
 
-}
-
-private struct TimelineRulerOverlay: View {
-    @ObservedObject var scrollState: TimelineScrollPresentationState
-    let duration: Double
-    let currentTime: Double
-    let maximumTimelineTime: Double
-    let pixelsPerSecond: CGFloat
-    let width: CGFloat
-
-    var body: some View {
-        // Ruler and clips follow the same UIKit scroll sample. A separate
-        // display clock or deferred root binding can lag by a UI transaction.
-        let time = scrollState.hasResolvedHorizontalOffset
-            ? Double(scrollState.horizontalOffset / max(pixelsPerSecond, 1)) : currentTime
-        let clampedTime = min(max(time, 0), max(maximumTimelineTime, 0))
-        let progress = min(max(scrollState.verticalOffset / 60, 0), 1)
-        let easedProgress = progress * progress * (3 - 2 * progress)
-
-        FixedTimelineRuler(
-            duration: duration,
-            currentTime: clampedTime,
-            pixelsPerSecond: pixelsPerSecond
-        )
-        .offset(y: -15 * easedProgress)
-        .frame(width: width, height: 30, alignment: .topLeading)
-        .clipped()
-        .allowsHitTesting(false)
-        .transaction { $0.animation = nil }
-    }
 }
 
 /// Alpha-only fade following the panel contour, with a wider horizontal transition.

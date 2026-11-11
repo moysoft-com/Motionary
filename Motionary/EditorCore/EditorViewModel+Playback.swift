@@ -553,6 +553,7 @@ extension EditorViewModel {
             flushDeferredPreviewRebuild(seekTo: clamped)
         }
         updateCurrentTime(clamped)
+        playbackState.timelineNavigationRevision &+= 1
         if previewRecoveryCircuitIsOpen {
             schedulePreviewRebuild(seekTo: clamped, delay: false)
             return
@@ -727,11 +728,18 @@ extension EditorViewModel {
     }
 
     var canNavigateForward: Bool {
-        cachedTimelineEvaluationIndex().nextNavigationPoint(
+        nextNavigationTarget != nil
+    }
+
+    private var nextNavigationTarget: Double? {
+        // The exclusive project end and the last playable frame share the
+        // same timeline position. Avoid offering a second forward step there.
+        guard livePreviewPresentationTime(currentTime) < livePreviewPresentationTime(lastPlayableTime) else { return nil }
+        return cachedTimelineEvaluationIndex().nextNavigationPoint(
             after: currentTime,
             tolerance: keyframeTimeTolerance,
             selectedItemID: selectedTimelineItemID
-        ) != nil
+        )
     }
 
     func navigateBackward() {
@@ -744,11 +752,7 @@ extension EditorViewModel {
     }
 
     func navigateForward() {
-        guard let target = cachedTimelineEvaluationIndex().nextNavigationPoint(
-            after: currentTime,
-            tolerance: keyframeTimeTolerance,
-            selectedItemID: selectedTimelineItemID
-        ) else { return }
+        guard let target = nextNavigationTarget else { return }
         seek(to: target)
     }
 

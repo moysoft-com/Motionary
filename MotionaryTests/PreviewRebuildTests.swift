@@ -624,6 +624,23 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
+    @Test func forwardEditPointIsDisabledAtTheLastPlayableFrame() {
+        let model = makeGeneratedLayerViewModel(duration: 4)
+        defer { model.stop() }
+        model.updateCurrentTime(model.lastPlayableTime)
+        let revision = model.playbackState.timelineNavigationRevision
+        #expect(!model.canNavigateForward)
+        model.navigateForward()
+        #expect(model.currentTime == model.lastPlayableTime)
+        #expect(model.playbackState.timelineNavigationRevision == revision)
+
+        #expect(model.canNavigateBackward)
+        model.navigateBackward()
+        #expect(model.currentTime == 0)
+        #expect(model.playbackState.timelineNavigationRevision == revision + 1)
+    }
+
+    @MainActor
     @Test func navigatingBeyondLastFrameSupersedesScrubAndCanSeekBack() async throws {
         // The short partial frame rounds down to the exclusive composition end.
         let model = makeGeneratedLayerViewModel(duration: 120.0005)

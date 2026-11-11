@@ -169,7 +169,7 @@ struct TimelineGestureTests {
     }
 
     @MainActor
-    @Test func aDeferredLayoutSampleCannotRewindTheRuler() async {
+    @Test func aDeferredLayoutSampleCannotRewindTheTrackOverlay() async {
         let state = TimelineScrollPresentationState()
         let coordinator = TimelineScrollContainer(
             pixelsPerSecond: .constant(88), currentTime: 118, duration: 120,
@@ -186,6 +186,147 @@ struct TimelineGestureTests {
             DispatchQueue.main.async { continuation.resume() }
         }
         #expect(state.horizontalOffset == 10_472)
+    }
+
+    @MainActor
+    @Test func previousEditPointMovesTracksAndRulerDuringEndBounce() async throws {
+        let playback = PlaybackState()
+        let state = TimelineScrollPresentationState()
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        state.attachRuler(ruler)
+        var scrubCallbacks: [Double] = []
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: .constant(88), currentTime: 120, duration: 120,
+            maximumTimelineTime: 119.9667, contentRevision: 0,
+            contentSize: CGSize(width: 10_860, height: 400), isScrollDisabled: false,
+            playbackState: playback, scrollPresentationState: state,
+            onScrubStart: {}, onScrubChanged: { scrubCallbacks.append($0) },
+            onScrubEnd: { scrubCallbacks.append($0) },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = coordinator.scrollContentSize(for: CGSize(width: 10_860, height: 400), in: scroll)
+        scroll.contentOffset = CGPoint(x: scroll.contentSize.width - scroll.bounds.width, y: 40)
+        scroll.delegate = coordinator
+        coordinator.attach(to: scroll)
+        defer { coordinator.stopInteractions(in: scroll) }
+        let band = try #require(ruler.layer.sublayers?.first)
+        let endpointPosition = band.position
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: -40, y: 0))
+        scroll.contentOffset.x += 15
+        #expect(coordinator.isOverscrolled(scroll))
+
+        playback.currentTime = 118
+        playback.timelineNavigationRevision &+= 1
+        #expect(scroll.contentOffset == CGPoint(x: 10_384, y: 40))
+        #expect(state.horizontalOffset == scroll.contentOffset.x)
+        #expect(band.position != endpointPosition)
+
+        coordinator.scrollViewDidEndDecelerating(scroll)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        #expect(scroll.contentOffset == CGPoint(x: 10_384, y: 40))
+        #expect(scrubCallbacks.isEmpty)
+    }
+
+    @Test func playbackClockRejectsBriefJumpsInEitherDirection() {
+        var clock = TimelinePlaybackPosition(time: 100, timestamp: 0)
+        #expect(clock.accept(100.016, at: 0.016, frameDuration: 1 / 30) == 100.016)
+        #expect(clock.accept(100.25, at: 0.032, frameDuration: 1 / 30) == 100.016)
+        #expect(clock.accept(99.97, at: 0.048, frameDuration: 1 / 30) == 100.016)
+        #expect(clock.accept(100.064, at: 0.064, frameDuration: 1 / 30) == 100.064)
+        // A missed display callback may legitimately cover more than one frame.
+        #expect(clock.accept(100.2, at: 0.2, frameDuration: 1 / 30) == 100.2)
+    }
+
+    @Test func persistentClockCorrectionCatchesUpWithoutJumpingOrFreezing() {
+        var clock = TimelinePlaybackPosition(time: 20, timestamp: 0)
+        #expect(clock.accept(20.25, at: 0.02, frameDuration: 1 / 30) == 20)
+        var previous = clock.time
+        for frame in 2...80 {
+            let elapsed = Double(frame) / 50
+            let time = clock.accept(20.23 + elapsed, at: elapsed, frameDuration: 1 / 30)
+            #expect(time > previous)
+            #expect(time - previous < 0.06)
+            previous = time
+        }
+        #expect(abs(clock.time - 21.83) < 0.000_001)
+    }
+
+    @MainActor
+    @Test func rulerWindowRebuildKeepsTheSameTickCoordinates() throws {
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        func visibleTickPositions(offset: CGFloat) throws -> [CGFloat] {
+            ruler.present(TimelineRulerSample(horizontalOffset: offset, verticalOffset: 0,
+                                              pixelsPerSecond: 88, duration: 7_200))
+            let band = try #require(ruler.layer.sublayers?.first)
+            let ticks = try #require(band.sublayers?.compactMap { $0 as? CAShapeLayer }
+                .first(where: { $0.lineWidth == 1.1 })?.path)
+            var positions: [CGFloat] = []
+            ticks.applyWithBlock { element in
+                guard element.pointee.type == .moveToPoint else { return }
+                let x = element.pointee.points[0].x + band.position.x
+                if (20...280).contains(x) { positions.append(x) }
+            }
+            return positions
+        }
+        let previous = try visibleTickPositions(offset: 599_999)
+        let next = try visibleTickPositions(offset: 600_001)
+        #expect(!previous.isEmpty)
+        #expect(next == previous.map { $0 - 2 })
+    }
+
+    @MainActor
+    @Test func rulerClipsTicksAndLabelsAtTheActualEndOfAShortProject() throws {
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        ruler.present(TimelineRulerSample(horizontalOffset: 84, verticalOffset: 0,
+                                          pixelsPerSecond: 280, duration: 0.4))
+        let band = try #require(ruler.layer.sublayers?.first)
+        #expect(band.masksToBounds)
+        #expect(band.position.x + band.bounds.maxX == 178)
+        let layers = try #require(band.sublayers)
+        for label in layers.compactMap({ $0 as? CATextLayer }) where !label.isHidden {
+            #expect(label.frame.maxX <= band.bounds.maxX)
+        }
+        for ticks in layers.compactMap({ $0 as? CAShapeLayer }) {
+            #expect((ticks.path?.boundingBox.maxX ?? 0) <= band.bounds.maxX + 0.5)
+        }
+    }
+
+    @MainActor
+    @Test func layoutAndNativeScrollCallbacksKeepTheLastPlaybackPosition() {
+        let playback = PlaybackState()
+        playback.currentTime = 116
+        playback.isPlaying = true
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: .constant(88), currentTime: 116, duration: 120,
+            contentRevision: 0, contentSize: CGSize(width: 10_860, height: 400),
+            isScrollDisabled: false, playbackState: playback,
+            onScrubStart: {}, onScrubChanged: { _ in }, onScrubEnd: { _ in },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 10_860, height: 400)
+        coordinator.attach(to: scroll)
+        defer { coordinator.stopInteractions(in: scroll) }
+        coordinator.handlePlaybackFrame()
+        #expect(scroll.contentOffset.x == 10_208)
+
+        playback.currentTime = 115.5
+        scroll.contentOffset.x = 10_000
+        coordinator.synchronizeToCurrentTime(in: scroll)
+        #expect(scroll.contentOffset.x == 10_208)
+        scroll.contentOffset.x = 10_500
+        coordinator.scrollViewDidScroll(scroll)
+        #expect(scroll.contentOffset.x == 10_208)
+
+        playback.currentTime = 117
+        coordinator.handlePlaybackFrame()
+        #expect(scroll.contentOffset.x == 10_296)
     }
 
     @MainActor
