@@ -6,8 +6,8 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Depth analysis is addressed by source time and written atomically. The
-/// stabilized track is evaluated lazily, so a seek never analyzes an entire clip.
+/// Depth analysis is prepared before a video track is installed and cached by
+/// source time, so playback and seeking only read completed frames.
 final class DepthBakeStore: @unchecked Sendable {
     static let shared = DepthBakeStore()
     static let width = 518
@@ -70,6 +70,9 @@ final class DepthBakeStore: @unchecked Sendable {
                     identityByURL[source.url] = identity
                     track = try shared.makeTrack(source: source, effect: effect, directory: directory,
                                                  sampleRanges: ranges, sourceIdentity: identity)
+                    if let track {
+                        try await prepareTrack(track, effectID: effect.id)
+                    }
                 } else {
                     track = nil
                     try shared.createDirectory(directory)
@@ -185,22 +188,38 @@ final class DepthBakeStore: @unchecked Sendable {
         let track = try shared.makeTrack(source: source, effect: effect,
             directory: shared.root.appendingPathComponent(effect.id.uuidString),
             sampleRanges: ranges, sourceIdentity: sourceIdentity(source.url, projectDirectory: nil))
-        for index in 0...Int(ceil(track.duration * rate)) {
-            try Task.checkCancellation()
-            _ = try shared.sample(track, index: index)
-        }
+        try await prepareTrack(track, effectID: effect.id)
     }
 
     static func prepare(_ clips: [RenderClipDescriptor]) async throws {
-        for clip in try await prepare(clips, projectDirectory: nil) {
-            for analysis in clip.depthAnalyses.values {
-                guard let track = analysis.track else { continue }
-                for index in 0...Int(ceil(track.duration * rate)) {
-                    try Task.checkCancellation()
-                    _ = try shared.sample(track, index: index)
+        _ = try await prepare(clips, projectDirectory: nil)
+    }
+
+    private static func prepareTrack(_ track: VideoTrack, effectID: UUID) async throws {
+        let work = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let last = Int(ceil(track.duration * rate))
+            let missing = (0...last).filter {
+                !FileManager.default.fileExists(atPath: track.directory.appendingPathComponent("\($0).png").path)
+            }
+            guard !missing.isEmpty else { return }
+            let id = UUID()
+            func report(_ progress: Double?) {
+                NotificationCenter.default.post(name: preparationProgress, object: nil,
+                    userInfo: ["id": id, "effectID": effectID, "progress": progress as Any])
+            }
+            report(0)
+            defer { report(nil) }
+            for (offset, index) in missing.enumerated() {
+                try Task.checkCancellation()
+                _ = try shared.sample(track, index: index)
+                if offset % 8 == 0 || offset == missing.count - 1 {
+                    report(Double(offset + 1) / Double(missing.count))
                 }
             }
+            try Task.checkCancellation()
         }
+        try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
     }
 
     func image(source: EffectTemporalSource, effect: EffectInstance, time: Double) throws -> CIImage {
@@ -339,7 +358,7 @@ final class DepthBakeStore: @unchecked Sendable {
         return CIImage(cgImage: image)
     }
 
-    func image(track: VideoTrack, time: Double, allowInference: Bool = true) throws -> CIImage {
+    func image(track: VideoTrack, time: Double, allowInference: Bool = false) throws -> CIImage {
         guard time.isFinite else { throw MetalRenderingError.sourceFrameUnavailable }
         let position = min(max(time, 0), track.duration) * Self.rate
         let index = Int(floor(position))
