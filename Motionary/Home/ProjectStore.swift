@@ -220,7 +220,7 @@ final class ProjectStore: ObservableObject {
         projectFolderURL(for: projectID).appendingPathComponent("content.json")
     }
 
-    private func projectFolderURL(for projectID: UUID) -> URL {
+    func projectFolderURL(for projectID: UUID) -> URL {
         let documentsURL =
             fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory

@@ -14,6 +14,7 @@ final class PreviewFrameCache: @unchecked Sendable {
         let frame: CVPixelBuffer
         let bytes: Int
     }
+    private static let timeScale = 600_000.0
     private let lock = NSLock()
     private var frames: [Key: Entry] = [:]
     private var recency: [Key] = []
@@ -52,10 +53,10 @@ final class PreviewFrameCache: @unchecked Sendable {
     func frameNear(at time: Double, sessionID: UUID, window: Double, revision: UInt64)
         -> (frame: CVPixelBuffer, time: Double)?
     {
-        guard time.isFinite, time >= 0, window >= 0, window.isFinite else { return nil }
-        guard time < Double(Int64.max) / 600 else { return nil }
-        let queryTime = Int64((time * 600).rounded())
-        let windowTicks = Int64((window * 600).rounded()) + 1
+        guard time.isFinite, time >= 0, window >= 0, window < Double(Int64.max / 2) / Self.timeScale else { return nil }
+        guard time < Double(Int64.max) / Self.timeScale else { return nil }
+        let queryTime = Int64((time * Self.timeScale).rounded())
+        let windowTicks = Int64((window * Self.timeScale).rounded()) + 1
         lock.lock()
         defer { lock.unlock() }
         var bestKey: Key?
@@ -72,7 +73,7 @@ final class PreviewFrameCache: @unchecked Sendable {
         guard let key = bestKey, let entry = frames[key] else { return nil }
         recency.removeAll { $0 == key }
         recency.append(key)
-        return (entry.frame, Double(key.time) / 600)
+        return (entry.frame, Double(key.time) / Self.timeScale)
     }
 
     func store(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision: UInt64) {
@@ -115,7 +116,7 @@ final class PreviewFrameCache: @unchecked Sendable {
     }
 
     private func key(at time: Double, sessionID: UUID, revision: UInt64) -> Key? {
-        guard time.isFinite, time >= 0, time < Double(Int64.max) / 600 else { return nil }
-        return Key(sessionID: sessionID, revision: revision, time: Int64((time * 600).rounded()))
+        guard time.isFinite, time >= 0, time < Double(Int64.max) / Self.timeScale else { return nil }
+        return Key(sessionID: sessionID, revision: revision, time: Int64((time * Self.timeScale).rounded()))
     }
 }

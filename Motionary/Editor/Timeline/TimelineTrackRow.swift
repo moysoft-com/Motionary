@@ -1,6 +1,7 @@
 // Timeline track row presentation, selection, deletion, and reorder interactions.
 
 import SwiftUI
+import UIKit
 
 enum TimelineTrackBackgroundRange {
     static func visible(projectEnd: Double, visibleRange: ClosedRange<Double>, previewEnd: Double?) -> ClosedRange<Double>? {
@@ -40,7 +41,7 @@ struct TimelineTrackRow: View {
     let selectedClipID: UUID?
     let activeClipDrag: TimelineClipDragState?
     let activeTrackDrag: TimelineTrackDragState?
-    let currentTime: Double
+    let playbackState: PlaybackState
     let keyframeTolerance: Double
     let projectDuration: Double
     let pixelsPerSecond: CGFloat
@@ -52,6 +53,9 @@ struct TimelineTrackRow: View {
     let onSelectTrack: () -> Void
     let onTapEmptySpace: () -> Void
     let onDeleteTrack: () -> Void
+    let onCopyTrack: () -> Void
+    let onCutTrack: () -> Void
+    let onPasteTrack: () -> Void
     let onSelectClip: (UUID) -> Void
     let onBeginEditClip: (UUID) -> Void
     let onClipDragBegan: (TimelineItem) -> Void
@@ -62,7 +66,7 @@ struct TimelineTrackRow: View {
     let onTrimEnd: (UUID, Double, TimelineItem?, Bool) -> TimelineTrimResult?
     let onPreviewTrimEnd: (UUID, Double, TimelineItem?) -> TimelineTrimResult?
     let onFinishInteractiveEdit: () -> Void
-    let mediaForItem: (TimelineItem) -> ClipMediaDescriptor?
+    let mediaForClip: (TimelineClip) -> ClipMediaDescriptor?
     let onSnapGuideChanged: (Double?) -> Void
     let onTrackDragBegan: () -> Void
     let onTrackDragChanged: (TimelineLongPressDragValue) -> Void
@@ -74,7 +78,8 @@ struct TimelineTrackRow: View {
     private let itemInset: CGFloat = 4
 
     private var isFocusedTrack: Bool {
-        workspaceContext == nil || track.items.contains { $0.id == selectedClipID }
+        guard workspaceContext != nil, let selectedClipID else { return workspaceContext == nil }
+        return trackSnapshot?.item(withID: selectedClipID) != nil
     }
 
     var body: some View {
@@ -86,6 +91,9 @@ struct TimelineTrackRow: View {
                 scrollPresentationState: scrollPresentationState,
                 onSelectTrack: onSelectTrack,
                 onDeleteTrack: onDeleteTrack,
+                onCopyTrack: onCopyTrack,
+                onCutTrack: onCutTrack,
+                onPasteTrack: onPasteTrack,
                 onTrackDragBegan: onTrackDragBegan,
                 onTrackDragChanged: onTrackDragChanged,
                 onTrackDragEnded: onTrackDragEnded
@@ -118,13 +126,14 @@ struct TimelineTrackRow: View {
                 let item = renderItem.item
                 TimelineItemBlock(
                     item: item,
-                    media: mediaForItem(item),
+                    media: renderItem.legacyClip.flatMap(mediaForClip),
                     keyframeTimes: renderItem.keyframeTimes,
                     visibleTimelineRange: visibleTimelineRange,
                     isSelected: selectedClipID == item.id,
                     isDragSourceHidden: activeClipDrag?.clipID == item.id,
                     isDragGhost: false,
-                    currentTime: currentTime,
+                    cachedMediaClip: renderItem.legacyClip,
+                    playbackState: playbackState,
                     keyframeTolerance: keyframeTolerance,
                     pixelsPerSecond: pixelsPerSecond,
                     height: height - itemInset * 2,
@@ -244,6 +253,9 @@ private struct TimelineTrackHeader: View {
     @ObservedObject var scrollPresentationState: TimelineScrollPresentationState
     let onSelectTrack: () -> Void
     let onDeleteTrack: () -> Void
+    let onCopyTrack: () -> Void
+    let onCutTrack: () -> Void
+    let onPasteTrack: () -> Void
     let onTrackDragBegan: () -> Void
     let onTrackDragChanged: (TimelineLongPressDragValue) -> Void
     let onTrackDragEnded: (Bool) -> Void
@@ -252,23 +264,19 @@ private struct TimelineTrackHeader: View {
 
     var body: some View {
         trackLabel
-            .overlay {
-                TimelineLongPressInteractionTarget(
-                    minimumPressDuration: 0.32,
-                    allowableMovement: 16,
-                    accessibilityIdentifier: "timeline-track-\(track.id.uuidString)",
-                    accessibilityLabel: track.name,
-                    onTap: onSelectTrack,
-                    onDoubleTap: {
-                        EditorHaptics.tap()
-                        isShowingDeleteConfirmation = true
-                    },
-                    onLongPressBegan: onTrackDragBegan,
-                    onLongPressChanged: onTrackDragChanged,
-                    onLongPressEnded: onTrackDragEnded
-                )
-                .frame(width: trackLabelWidth, height: height)
+            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .contextMenu {
+                Button("Cut", systemImage: "scissors", action: onCutTrack)
+                Button("Copy", systemImage: "doc.on.doc", action: onCopyTrack)
+                Button("Paste", systemImage: "doc.on.clipboard", action: onPasteTrack)
+                Divider()
+                Button("Delete", systemImage: "trash", role: .destructive) {
+                    isShowingDeleteConfirmation = true
+                }
             }
+            .onTapGesture(count: 2) { EditorHaptics.tap(); isShowingDeleteConfirmation = true }
+            .onTapGesture { onSelectTrack() }
+            .accessibilityIdentifier("timeline-track-\(track.id.uuidString)")
             .position(
                 x: trackLabelOffset + trackLabelWidth * 0.5,
                 y: height * 0.5
@@ -313,10 +321,204 @@ private struct TimelineTrackHeader: View {
                     }
                 }
                 .motionaryProminentButtonStyle()
+                .tint(.red)
             }
             .padding()
             .presentationCompactAdaptation(.popover)
         }
+    }
+}
+
+struct TimelineTrackReorderHandle: View {
+    let centerPadding: CGFloat
+    let height: CGFloat
+    @ObservedObject var scrollState: TimelineScrollPresentationState
+    let items: [TimelineRenderItem]
+    let pixelsPerSecond: CGFloat
+    let hiddenItemID: UUID?
+    let mediaForClip: (TimelineClip) -> ClipMediaDescriptor?
+    var viewportOverlay = false
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
+
+    let onBegan: () -> Void
+    let onChanged: (TimelineLongPressDragValue) -> Void
+    let onEnded: (Bool) -> Void
+
+    @State private var dragging = false
+    @State private var backgroundIsLight: Bool?
+
+    var body: some View {
+        handleLines
+        .frame(width: height, height: height)
+        .contentShape(Rectangle())
+        .task(id: sampleKey) {
+            await updateBackgroundBrightness()
+        }
+        .gesture(
+            DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                .onChanged { value in
+                    if !dragging {
+                        dragging = true
+                        onBegan()
+                    }
+                    onChanged(
+                        TimelineLongPressDragValue(
+                            translation: value.translation,
+                            locationInWindow: value.location
+                        )
+                    )
+                }
+                .onEnded { _ in
+                    if dragging {
+                        dragging = false
+                        onEnded(true)
+                    }
+                }
+        )
+        .onDisappear {
+            if dragging {
+                dragging = false
+                onEnded(false)
+            }
+        }
+        .accessibilityLabel("Reorder layer")
+        .position(
+            x: handleX - (viewportOverlay ? scrollState.horizontalOffset : 0),
+            y: height / 2
+        )
+    }
+
+    private var handleX: CGFloat {
+        scrollState.horizontalOffset + centerPadding * 2 - 23
+    }
+
+    private var handleLines: some View {
+        ZStack {
+            ForEach(0..<3, id: \.self) { index in
+                Capsule()
+                    .fill(handleColor)
+                    .frame(width: 13, height: 1.5)
+                    .background {
+                        Capsule().stroke(outlineColor, lineWidth: 1.2)
+                    }
+                    .offset(y: CGFloat(index - 1) * 5)
+            }
+        }
+        .frame(width: height, height: height)
+        .animation(.easeInOut(duration: 0.22), value: backgroundIsLight)
+        .animation(.easeInOut(duration: 0.22), value: colorScheme)
+    }
+
+    private var itemUnderHandle: TimelineRenderItem? {
+        items.last { renderItem in
+            let item = renderItem.item
+            let start = centerPadding + CGFloat(item.timelineStart) * pixelsPerSecond
+            let end = start + max(CGFloat(item.placementDuration) * pixelsPerSecond, 6)
+            return item.id != hiddenItemID && start <= handleX && end > handleX
+        }
+    }
+
+    private var handleColor: Color {
+        usesOpposite ? oppositeSecondary : MotionaryTheme.textSecondary
+    }
+
+    private var outlineColor: Color {
+        usesOpposite ? MotionaryTheme.textSecondary : oppositeSecondary
+    }
+
+    private var usesOpposite: Bool {
+        guard let backgroundIsLight else { return false }
+        return backgroundIsLight == (colorScheme == .dark)
+    }
+
+    /// Complement the resolved sRGB components while retaining the original alpha.
+    private var oppositeSecondary: Color {
+        let traits = UITraitCollection(userInterfaceStyle: colorScheme == .dark ? .dark : .light)
+        let color = UIColor(MotionaryTheme.textSecondary).resolvedColor(with: traits)
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        if color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+            return Color(.sRGB, red: Double(1 - red), green: Double(1 - green), blue: Double(1 - blue), opacity: Double(alpha))
+        }
+        var white: CGFloat = 0
+        if color.getWhite(&white, alpha: &alpha) {
+            return Color(.sRGB, white: Double(1 - white), opacity: Double(alpha))
+        }
+        return colorScheme == .dark ? .black.opacity(0.66) : .white.opacity(0.66)
+    }
+
+    private var sampleKey: String {
+        guard let item = itemUnderHandle else { return "empty" }
+        let localX = handleX - centerPadding - CGFloat(item.timelineStart) * pixelsPerSecond
+        let source: String
+        if case .media(let media) = item.item {
+            source = "\(media.mediaID.rawValue)-\(media.sourceRange.start)-\(media.sourceRange.duration)-\(media.speedMap.topologySignature)"
+        } else {
+            source = "generated"
+        }
+        return "\(item.id)-\(source)-\(Int(localX / 8))-\(pixelsPerSecond)-\(item.item.placementDuration)-\(colorScheme)"
+    }
+
+    @MainActor
+    private func updateBackgroundBrightness() async {
+        guard let renderItem = itemUnderHandle else { backgroundIsLight = nil; return }
+        let item = renderItem.item
+        guard case .media(let mediaItem) = item, mediaItem.mediaType != .audio,
+            let clip = renderItem.legacyClip, let media = mediaForClip(clip)
+        else {
+            let color = UIColor(timelineItemTint(for: item)).resolvedColor(with: UITraitCollection(userInterfaceStyle: colorScheme == .dark ? .dark : .light))
+            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+            if color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) {
+                updateBrightness(Double(0.2126 * red + 0.7152 * green + 0.0722 * blue))
+            } else {
+                backgroundIsLight = nil
+            }
+            return
+        }
+        let size = media.naturalSize?.cgSize ?? CGSize(width: 16, height: 9)
+        let aspect = min(max(abs(size.width) / max(abs(size.height), 1), 0.35), 4)
+        let tileHeight = max(height - 8, 1)
+        let tileWidth = max(tileHeight * aspect, 24)
+        let localX = max(handleX - centerPadding - CGFloat(item.timelineStart) * pixelsPerSecond, 0)
+        let index = Int(localX / tileWidth)
+        let secondsPerTile = Double(tileWidth / max((pixelsPerSecond / 4).rounded() * 4, 4))
+        let image = await TimelineThumbnailLoader.tileImage(
+            for: clip, media: media, speedMap: mediaItem.speedMap, tileIndex: index,
+            tileWidth: tileWidth, tileHeight: tileHeight,
+            secondsPerTile: secondsPerTile, displayScale: displayScale
+        )
+        guard !Task.isCancelled else { return }
+        if let luminance = image.flatMap({ Self.brightness($0, tileX: localX - CGFloat(index) * tileWidth, tileSize: CGSize(width: tileWidth, height: tileHeight)) }) {
+            updateBrightness(luminance)
+        } else {
+            backgroundIsLight = nil
+        }
+    }
+
+    @MainActor
+    private func updateBrightness(_ value: Double) {
+        // Keep the current state through the middle range to prevent flicker.
+        if value >= 0.62 { backgroundIsLight = true }
+        else if value <= 0.38 { backgroundIsLight = false }
+        else if backgroundIsLight == nil { backgroundIsLight = value >= 0.5 }
+    }
+
+    private static func brightness(_ image: UIImage, tileX: CGFloat, tileSize: CGSize) -> Double? {
+        guard let source = image.cgImage, tileSize.width > 0, tileSize.height > 0 else { return nil }
+        let imageSize = CGSize(width: source.width, height: source.height)
+        let scale = max(tileSize.width / imageSize.width, tileSize.height / imageSize.height)
+        let cropX = (imageSize.width * scale - tileSize.width) / 2
+        let cropY = (imageSize.height * scale - tileSize.height) / 2
+        let region = CGRect(x: (tileX - 8 + cropX) / scale, y: (tileSize.height / 2 - 8 + cropY) / scale,
+                            width: 16 / scale, height: 16 / scale)
+            .intersection(CGRect(origin: .zero, size: imageSize)).integral
+        guard !region.isNull, !region.isEmpty, let crop = source.cropping(to: region) else { return nil }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let context = CGContext(data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return (0.2126 * Double(pixel[0]) + 0.7152 * Double(pixel[1]) + 0.0722 * Double(pixel[2])) / 255
     }
 }
 

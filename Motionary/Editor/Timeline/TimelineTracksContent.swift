@@ -28,7 +28,6 @@ struct TimelineTracksContent: View {
     let rowSpacing: CGFloat
     @Binding var clipDragScrollOffset: CGSize
     var workspaceContext: TimelineWorkspaceContext? = nil
-    var currentTime: Double = 0
     var trackOriginY: CGFloat = 38
 
     @State private var clipDragPlacementSession: TimelinePlacementDragSession?
@@ -76,7 +75,6 @@ struct TimelineTracksContent: View {
                     isSelected: activeClipDrag.selectedClipIDBeforeDrag == activeClipDrag.clipID,
                     isDragSourceHidden: false,
                     isDragGhost: true,
-                    currentTime: 0,
                     keyframeTolerance: viewModel.keyframeTimeTolerance,
                     pixelsPerSecond: pixelsPerSecond,
                     height: trackHeight - 8,
@@ -173,16 +171,12 @@ struct TimelineTracksContent: View {
     }
 
     private func trackIndex(containing clipID: UUID) -> Int? {
-        snapshot.tracks.firstIndex { track in
-            track.items.contains { $0.id == clipID }
-        }
+        snapshot.tracks.firstIndex { snapshot.trackSnapshotsByID[$0.id]?.item(withID: clipID) != nil }
     }
 
     private var visibleTrackIndices: [Int] {
-        if workspaceContext?.showsOnlySelectedTrack == true {
-            return snapshot.tracks.indices.filter { index in
-                snapshot.tracks[index].items.contains { $0.id == workspaceContext?.itemID }
-            }
+        if let workspaceContext, workspaceContext.showsOnlySelectedTrack {
+            return trackIndex(containing: workspaceContext.itemID).map { [$0] } ?? []
         }
         var indices = Set(viewportState.window.trackRange)
         if let selectedClipID = snapshot.selectedClipID,
@@ -234,7 +228,7 @@ struct TimelineTracksContent: View {
             selectedClipID: snapshot.selectedClipID,
             activeClipDrag: activeClipDrag,
             activeTrackDrag: activeTrackDrag,
-            currentTime: currentTime,
+            playbackState: viewModel.playbackState,
             keyframeTolerance: snapshot.keyframeTolerance,
             projectDuration: snapshot.duration,
             pixelsPerSecond: pixelsPerSecond,
@@ -246,6 +240,9 @@ struct TimelineTracksContent: View {
             onSelectTrack: { viewModel.selectClip(nil, trackID: track.id) },
             onTapEmptySpace: { viewModel.deselectTimeline() },
             onDeleteTrack: { viewModel.deleteLayer(track.id) },
+            onCopyTrack: { viewModel.copyLayer(track.id) },
+            onCutTrack: { viewModel.cutLayer(track.id) },
+            onPasteTrack: { viewModel.pasteLayer() },
             onSelectClip: { clipID in
                 viewModel.selectClip(clipID, trackID: track.id, revealInPreview: true)
             },
@@ -300,7 +297,7 @@ struct TimelineTracksContent: View {
             onFinishInteractiveEdit: {
                 viewModel.finishInteractiveEdit()
             },
-            mediaForItem: mediaDescriptor,
+            mediaForClip: { viewModel.project.mediaDescriptor(for: $0) },
             onSnapGuideChanged: { time in
                 activeTrimSnapTime = time
             },
@@ -434,7 +431,8 @@ struct TimelineTracksContent: View {
         )
         let targetIndex = targetTrackIndex(
             sourceTrackIndex: drag.sourceIndex,
-            translationY: clampedTranslation.height
+            translationY: clampedTranslation.height,
+            currentTargetIndex: drag.targetIndex
         )
         if targetIndex != drag.targetIndex {
             EditorHaptics.tap()
@@ -451,9 +449,11 @@ struct TimelineTracksContent: View {
 
     private func finishTrackDrag(commit: Bool) {
         guard let drag = activeTrackDrag else { return }
-        activeTrackDrag = nil
-        if commit {
-            viewModel.moveTrack(drag.trackID, to: drag.targetIndex)
+        withAnimation(.interactiveSpring(response: 0.22, dampingFraction: 0.86)) {
+            if commit {
+                viewModel.moveTrack(drag.trackID, to: drag.targetIndex)
+            }
+            activeTrackDrag = nil
         }
     }
 
@@ -464,6 +464,10 @@ struct TimelineTracksContent: View {
     ) -> Int {
         if workspaceContext?.showsOnlySelectedTrack == true { return sourceTrackIndex }
         let rowPosition = CGFloat(sourceTrackIndex) + translationY / max(trackHeight + rowSpacing, 1)
+        if let currentTargetIndex,
+            abs(rowPosition - CGFloat(currentTargetIndex)) < 0.6 {
+            return currentTargetIndex
+        }
         return min(max(Int(rowPosition.rounded()), 0), max(viewModel.project.tracks.count - 1, 0))
     }
 

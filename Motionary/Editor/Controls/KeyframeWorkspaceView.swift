@@ -21,11 +21,46 @@ struct KeyframeWorkspaceView: View {
                     contentStyle: .fixed,
                     disablesContentWhenUnavailable: true,
                     accessory: {
-                        Text(
-                            "\(formatClock(context.segment.startTime)) – \(formatClock(context.segment.endTime))"
-                        )
-                        .font(.caption.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(MotionaryTheme.textSecondary)
+                        Menu {
+                            Button("Cut", systemImage: "scissors") {
+                                EditorClipboard.graph = context.segment.interpolation
+                                viewModel.setInterpolation(
+                                    .linear,
+                                    section: context.segment.section,
+                                    startTime: context.segment.startTime
+                                )
+                            }
+                            Button("Copy", systemImage: "doc.on.doc") {
+                                EditorClipboard.graph = context.segment.interpolation
+                            }
+                            Button("Paste", systemImage: "doc.on.clipboard") {
+                                guard let graph = EditorClipboard.graph else { return }
+                                viewModel.setInterpolation(
+                                    graph,
+                                    section: context.segment.section,
+                                    startTime: context.segment.startTime
+                                )
+                            }
+                            .disabled(!context.isActive)
+                            Divider()
+                            Button("Delete", systemImage: "trash", role: .destructive) {
+                                viewModel.setInterpolation(
+                                    .linear,
+                                    section: context.segment.section,
+                                    startTime: context.segment.startTime
+                                )
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 16, weight: .semibold))
+                                .frame(width: 16, height: 16)
+                                .offset(x: 7)
+                                .frame(width: 36, height: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!context.isActive)
+                        .accessibilityLabel("Graph options")
                     },
                     content: {
                         EditorEasingGraph(

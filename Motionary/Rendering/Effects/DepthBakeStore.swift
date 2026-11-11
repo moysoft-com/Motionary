@@ -6,84 +6,114 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Immutable, time-addressed depth tracks. Inference runs during composition
-/// preparation, never in video rendering or in response to a scrub request.
+/// Depth analysis is addressed by source time and written atomically. The
+/// stabilized track is evaluated lazily, so a seek never analyzes an entire clip.
 final class DepthBakeStore: @unchecked Sendable {
     static let shared = DepthBakeStore()
     static let width = 518
     static let height = 392
     static let rate = 24.0
     static let preparationProgress = Notification.Name("MotionaryDepthPreparationProgress")
-    private let bakeLock = NSLock()
+    private let inferenceLock = NSLock()
+    private let directoryLock = NSLock()
     private let context = CIContext(options: [.cacheIntermediates: false])
     private let images = NSCache<NSString, CGImage>()
+    private let rawSamples = NSCache<NSString, NSData>()
     private let root: URL
+
+    struct Analysis: Sendable {
+        let directory: URL
+        let track: VideoTrack?
+        let stillFile: URL?
+    }
+
+    struct VideoTrack: Sendable {
+        let source: EffectTemporalSource
+        let sampleRanges: [CMTimeRange]
+        let duration: Double
+        let rawDirectory: URL
+        let directory: URL
+        let strength: Float
+    }
 
     private init() {
         root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DepthTracks-v6", isDirectory: true)
+            .appendingPathComponent("DepthMaps-v7", isDirectory: true)
         images.totalCostLimit = 32 * 1024 * 1024
-        images.countLimit = 100
+        images.countLimit = 160
+        rawSamples.totalCostLimit = 8 * 1024 * 1024
     }
 
-    static func prepare(_ clips: [RenderClipDescriptor]) async throws {
-        for clip in clips {
-            guard let source = clip.temporalSource else { continue }
+    static func projectDirectory(in projectFolder: URL) -> URL {
+        projectFolder.appendingPathComponent("DepthMaps-v7", isDirectory: true)
+    }
+
+    static func prepare(_ clips: [RenderClipDescriptor], projectDirectory: URL?) async throws -> [RenderClipDescriptor] {
+        var prepared = clips
+        var rangesByURL: [URL: [CMTimeRange]] = [:]
+        var identityByURL: [URL: String] = [:]
+        for index in clips.indices {
+            let clip = clips[index]
             for effect in clip.effectStack.effects where effect.moduleID == .depthMap && effect.isEnabled {
                 try Task.checkCancellation()
-                try await prepare(source: source, effect: effect)
+                let directory = (projectDirectory ?? shared.root).appendingPathComponent(effect.id.uuidString, isDirectory: true)
+                let track: VideoTrack?
+                if let source = clip.temporalSource {
+                    let ranges: [CMTimeRange]
+                    if let cached = rangesByURL[source.url] {
+                        ranges = cached
+                    } else {
+                        ranges = try await sampleRanges(for: source.url)
+                        rangesByURL[source.url] = ranges
+                    }
+                    let identity = identityByURL[source.url] ?? sourceIdentity(source.url, projectDirectory: projectDirectory)
+                    identityByURL[source.url] = identity
+                    track = try shared.makeTrack(source: source, effect: effect, directory: directory,
+                                                 sampleRanges: ranges, sourceIdentity: identity)
+                } else {
+                    track = nil
+                    try shared.createDirectory(directory)
+                }
+                let stillFile: URL?
+                if let url = clip.stillImageURL {
+                    let identity = identityByURL[url] ?? sourceIdentity(url, projectDirectory: projectDirectory)
+                    identityByURL[url] = identity
+                    stillFile = directory.appendingPathComponent("source-\(hash(Data(identity.utf8))).png")
+                } else {
+                    stillFile = nil
+                }
+                prepared[index].depthAnalyses[effect.id] = Analysis(
+                    directory: directory, track: track, stillFile: stillFile
+                )
             }
         }
+        return prepared
     }
 
-    static func prepare(source: EffectTemporalSource, effect: EffectInstance) async throws {
-        let work = Task.detached(priority: .userInitiated) { try await shared.prepareTrack(source: source, effect: effect) }
-        try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
-    }
-
-    private func prepareTrack(source: EffectTemporalSource, effect: EffectInstance) async throws {
-        let directory = root.appendingPathComponent(try signature(source, effect), isDirectory: true)
-        if hasCompletedTrack(at: directory) { return }
-        let asset = AVURLAsset(url: source.url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+    private static func sampleRanges(for url: URL) async throws -> [CMTimeRange] {
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw MetalRenderingError.sourceFrameUnavailable
         }
         let (trackRange, segments) = try await track.load(.timeRange, .segments)
         let editedRanges = segments.filter { !$0.isEmpty }.map { $0.timeMapping.target }
-        let sampleRanges = (editedRanges.isEmpty ? [trackRange] : editedRanges)
+        let ranges = (editedRanges.isEmpty ? [trackRange] : editedRanges)
             .filter { $0.start.isNumeric && $0.end.isNumeric && $0.duration > .zero }
-        guard !sampleRanges.isEmpty else { throw MetalRenderingError.sourceFrameUnavailable }
-        try bake(source: source, effect: effect, directory: directory,
-                 sampleRanges: sampleRanges)
+        guard !ranges.isEmpty else { throw MetalRenderingError.sourceFrameUnavailable }
+        return ranges
     }
 
-    private func hasCompletedTrack(at directory: URL) -> Bool {
-        bakeLock.lock()
-        defer { bakeLock.unlock() }
-        return reuseCompletedTrack(at: directory)
-    }
-
-    /// Called under the bake lock so pruning cannot race with reuse.
-    private func reuseCompletedTrack(at directory: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent("complete").path) else { return false }
-        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: directory.path)
-        return true
-    }
-
-    private func signature(_ source: EffectTemporalSource, _ effect: EffectInstance) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let attributes = try? FileManager.default.attributesOfItem(atPath: source.url.path)
+    private static func sourceIdentity(_ url: URL, projectDirectory: URL?) -> String {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let speed = try encoder.encode(source.speedMap).base64EncodedString()
-        let stability = Self.stability(of: effect)
-        let transform = source.sourceOrientation
-        let xLength = max(hypot(transform.a, transform.b), 0.000001)
-        let yLength = max(hypot(transform.c, transform.d), 0.000001)
-        let orientation = [transform.a / xLength, transform.b / xLength, transform.c / yLength, transform.d / yLength]
-            .map { String(format: "%.5f", Double($0)) }.joined(separator: ",")
-        let identity = "\(source.url.absoluteString)|\(modified)|\(source.sourceStart)|\(source.sourceDuration)|\(speed)|\(orientation)|\(stability)"
-        return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+        let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+        let location = url.deletingLastPathComponent() == projectDirectory?.deletingLastPathComponent()
+            ? url.lastPathComponent : url.absoluteString
+        return "\(location)|\(modified)|\(size)"
+    }
+
+    private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     static func stability(of effect: EffectInstance) -> String {
@@ -91,57 +121,144 @@ final class DepthBakeStore: @unchecked Sendable {
         return "Medium"
     }
 
-    private func bake(source: EffectTemporalSource, effect: EffectInstance,
-                      directory: URL, sampleRanges: [CMTimeRange]) throws {
-        bakeLock.lock()
-        defer { bakeLock.unlock() }
-        try Task.checkCancellation()
-        let complete = directory.appendingPathComponent("complete")
-        if reuseCompletedTrack(at: directory) { return }
-        let preparationID = UUID()
-        func report(_ progress: Double?) {
-            NotificationCenter.default.post(name: Self.preparationProgress, object: nil,
-                userInfo: ["id": preparationID, "effectID": effect.id, "progress": progress as Any])
-        }
-        report(0)
-        defer { report(nil) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer {
-            if !FileManager.default.fileExists(atPath: complete.path) {
-                try? FileManager.default.removeItem(at: directory)
-            }
-        }
+    private func makeTrack(source: EffectTemporalSource, effect: EffectInstance, directory: URL,
+                           sampleRanges: [CMTimeRange], sourceIdentity: String) throws -> VideoTrack {
         let duration = source.speedMap.timelineDuration(sourceDuration: source.sourceDuration)
-        guard duration.isFinite, duration > 0 else { throw MetalRenderingError.sourceFrameUnavailable }
-        let count = Int(ceil(duration * Self.rate)) + 1
+        guard duration.isFinite, duration > 0, duration < Double(Int.max / 2) / Self.rate else {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
+        let transform = source.sourceOrientation
+        let xLength = max(hypot(transform.a, transform.b), 0.000001)
+        let yLength = max(hypot(transform.c, transform.d), 0.000001)
+        let orientation = [transform.a / xLength, transform.b / xLength, transform.c / yLength, transform.d / yLength]
+            .map { String(format: "%.5f", Double($0)) }.joined(separator: ",")
+        let rawKey = Self.hash(Data("\(sourceIdentity)|\(orientation)".utf8))
+        let rawDirectory = directory.appendingPathComponent(rawKey, isDirectory: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let speed = try encoder.encode(source.speedMap).base64EncodedString()
         let stability = Self.stability(of: effect)
-        let strength: Float = stability == "High" ? 0.85 : stability == "Off" ? 0 : 0.6
+        let trackKey = Self.hash(Data("\(source.sourceStart)|\(source.sourceDuration)|\(speed)|\(stability)".utf8))
+        let trackDirectory = rawDirectory.appendingPathComponent(trackKey, isDirectory: true)
+        try createDirectory(trackDirectory)
         var rawSource = source
         rawSource.adjustments = AdjustmentSettings()
-        var previous: [UInt8]?
-        var current: [UInt8]?
-        func sample(_ index: Int) throws -> [UInt8] {
+        rawSource.depthSourceRevision = sourceIdentity
+        return VideoTrack(source: rawSource, sampleRanges: sampleRanges, duration: duration,
+                          rawDirectory: rawDirectory, directory: trackDirectory,
+                          strength: stability == "High" ? 0.85 : stability == "Off" ? 0 : 0.6)
+    }
+
+    private func createDirectory(_ url: URL) throws {
+        try directoryLock.withLock {
             try Task.checkCancellation()
-            return try autoreleasepool {
-                let time = min(Double(index) / Self.rate, max(0, duration - 0.0001))
-                let input = try rawSource.image(at: time,
-                    fitting: CGRect(x: 0, y: 0, width: Self.width, height: Self.height),
-                    quality: .export, videoSampleRanges: sampleRanges)
-                return try infer(input)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+    }
+
+    /// A removed effect loses all analysis variants. Disable, mute and undo
+    /// history do not require rescanning or evicting unrelated effects.
+    static func removeUnusedAnalyses(in projectFolder: URL, retaining effectIDs: Set<UUID>) {
+        let directory = projectDirectory(in: projectFolder)
+        let manager = FileManager.default
+        let retired = shared.directoryLock.withLock {
+            let entries = (try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+            return entries.compactMap { entry -> URL? in
+                let id = UUID(uuidString: entry.lastPathComponent)
+                if let id, effectIDs.contains(id) { return nil }
+                let retired = directory.appendingPathComponent("retired-\(UUID())")
+                guard (try? manager.moveItem(at: entry, to: retired)) != nil else { return nil }
+                return retired
             }
         }
-        current = try sample(0)
-        for index in 0..<count {
-            try Task.checkCancellation()
-            let next = index + 1 < count ? try sample(index + 1) : nil
-            let stabilized = Self.stabilized(current!, previous: previous, next: next, strength: strength)
-            try write(stabilized, to: directory.appendingPathComponent("\(index).png"))
-            if index % 8 == 0 || index == count - 1 { report(Double(index + 1) / Double(count)) }
-            previous = current
-            current = next
+        if !retired.isEmpty {
+            shared.images.removeAllObjects()
+            shared.rawSamples.removeAllObjects()
         }
-        try Data().write(to: complete, options: .atomic)
-        prune(except: directory)
+        for entry in retired { try? manager.removeItem(at: entry) }
+    }
+
+    // Explicit preparation is also used by clients that require a complete
+    // standalone analysis before consuming it.
+    static func prepare(source: EffectTemporalSource, effect: EffectInstance) async throws {
+        let ranges = try await sampleRanges(for: source.url)
+        let track = try shared.makeTrack(source: source, effect: effect,
+            directory: shared.root.appendingPathComponent(effect.id.uuidString),
+            sampleRanges: ranges, sourceIdentity: sourceIdentity(source.url, projectDirectory: nil))
+        for index in 0...Int(ceil(track.duration * rate)) {
+            try Task.checkCancellation()
+            _ = try shared.sample(track, index: index)
+        }
+    }
+
+    static func prepare(_ clips: [RenderClipDescriptor]) async throws {
+        for clip in try await prepare(clips, projectDirectory: nil) {
+            for analysis in clip.depthAnalyses.values {
+                guard let track = analysis.track else { continue }
+                for index in 0...Int(ceil(track.duration * rate)) {
+                    try Task.checkCancellation()
+                    _ = try shared.sample(track, index: index)
+                }
+            }
+        }
+    }
+
+    func image(source: EffectTemporalSource, effect: EffectInstance, time: Double) throws -> CIImage {
+        let track = try makeTrack(source: source, effect: effect,
+            directory: root.appendingPathComponent(effect.id.uuidString), sampleRanges: [],
+            sourceIdentity: Self.sourceIdentity(source.url, projectDirectory: nil))
+        return try image(track: track, time: time, allowInference: false)
+    }
+
+    private func sample(_ track: VideoTrack, index: Int, allowInference: Bool = true) throws -> CIImage {
+        let file = track.directory.appendingPathComponent("\(index).png")
+        if let existing = try? load(file) { return existing }
+        guard allowInference else { throw MetalRenderingError.sourceFrameUnavailable }
+        return try inferenceLock.withLock {
+            if let existing = try? load(file) { return existing }
+            func raw(_ index: Int) throws -> [UInt8] {
+                let time = min(Double(index) / Self.rate, max(0, track.duration - 0.0001))
+                let sourceTime = track.source.sourceStart
+                    + track.source.speedMap.sourceTime(at: time, sourceDuration: track.source.sourceDuration)
+                let ticks = CMTime(seconds: max(sourceTime, 0), preferredTimescale: 60_000).value
+                let file = track.rawDirectory.appendingPathComponent("\(ticks).lzfse")
+                let key = file.path as NSString
+                if let cached = rawSamples.object(forKey: key) { return Array(cached as Data) }
+                if let compressed = try? NSData(contentsOf: file, options: []),
+                    let bytes = try? compressed.decompressed(using: .lzfse) as Data,
+                    bytes.count == Self.width * Self.height
+                {
+                    rawSamples.setObject(bytes as NSData, forKey: key, cost: bytes.count)
+                    return Array(bytes)
+                }
+                let pixels = try autoreleasepool {
+                    let input = try track.source.image(at: time,
+                        fitting: CGRect(x: 0, y: 0, width: Self.width, height: Self.height),
+                        quality: .export, videoSampleRanges: track.sampleRanges)
+                    return try infer(input)
+                }
+                let bytes = Data(pixels) as NSData
+                let compressed = try bytes.compressed(using: .lzfse) as Data
+                do {
+                    try compressed.write(to: file, options: .atomic)
+                    rawSamples.setObject(bytes, forKey: key, cost: bytes.length)
+                } catch where !FileManager.default.fileExists(atPath: track.rawDirectory.path) {
+                    // An export can still reference a snapshot whose effect
+                    // was removed from the project during the export.
+                }
+                return pixels
+            }
+            let current = try raw(index)
+            let last = Int(ceil(track.duration * Self.rate))
+            let pixels: [UInt8]
+            if track.strength > 0, index > 0, index < last {
+                pixels = Self.stabilized(current, previous: try raw(index - 1),
+                                         next: try raw(index + 1), strength: track.strength)
+            } else {
+                pixels = current
+            }
+            return try store(pixels, at: file)
+        }
     }
 
     /// Symmetric local filtering has no playback-order dependency or trailing
@@ -183,12 +300,23 @@ final class DepthBakeStore: @unchecked Sendable {
         return pixels
     }
 
-    private func write(_ bytes: [UInt8], to url: URL) throws {
+    private func store(_ bytes: [UInt8], at url: URL) throws -> CIImage {
         let provider = CGDataProvider(data: Data(bytes) as CFData)!
         let image = CGImage(width: Self.width, height: Self.height, bitsPerComponent: 8, bitsPerPixel: 8,
             bytesPerRow: Self.width, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: [], provider: provider,
             decode: nil, shouldInterpolate: true, intent: .defaultIntent)!
-        let temp = url.appendingPathExtension("tmp")
+        do {
+            try write(image, to: url)
+            return try load(url)
+        } catch where !FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path) {
+            // A retired effect can still be rendered by an earlier snapshot.
+        }
+        return CIImage(cgImage: image)
+    }
+
+    private func write(_ image: CGImage, to url: URL) throws {
+        let temp = url.appendingPathExtension("\(UUID()).tmp")
+        defer { try? FileManager.default.removeItem(at: temp) }
         guard let destination = CGImageDestinationCreateWithURL(temp as CFURL, UTType.png.identifier as CFString, 1, nil) else {
             throw MetalRenderingError.sourceFrameUnavailable
         }
@@ -211,32 +339,37 @@ final class DepthBakeStore: @unchecked Sendable {
         return CIImage(cgImage: image)
     }
 
-    func image(source: EffectTemporalSource, effect: EffectInstance, time: Double) throws -> CIImage {
-        let directory = root.appendingPathComponent(try signature(source, effect))
-        let duration = source.speedMap.timelineDuration(sourceDuration: source.sourceDuration)
-        let position = min(max(time, 0), duration) * Self.rate
+    func image(track: VideoTrack, time: Double, allowInference: Bool = true) throws -> CIImage {
+        guard time.isFinite else { throw MetalRenderingError.sourceFrameUnavailable }
+        let position = min(max(time, 0), track.duration) * Self.rate
         let index = Int(floor(position))
-        let a = try load(directory.appendingPathComponent("\(index).png"))
-        let last = Int(ceil(duration * Self.rate))
+        let a = try sample(track, index: index, allowInference: allowInference)
+        let last = Int(ceil(track.duration * Self.rate))
         guard index < last, position > Double(index) else { return a }
-        let b = try load(directory.appendingPathComponent("\(index + 1).png"))
+        let b = try sample(track, index: index + 1, allowInference: allowInference)
         return a.applyingFilter("CIDissolveTransition", parameters: [kCIInputTargetImageKey: b, kCIInputTimeKey: position - Double(index)])
     }
 
-    func still(_ image: CIImage, effectID: UUID) throws -> CIImage {
-        // A still is content-addressed at model resolution, so output controls
-        // and editor rebuilds do not cause another inference.
-        let local = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
-            .transformed(by: CGAffineTransform(scaleX: CGFloat(Self.width) / image.extent.width, y: CGFloat(Self.height) / image.extent.height))
-        var pixels = [UInt8](repeating: 0, count: Self.width * Self.height * 4)
-        context.render(local, toBitmap: &pixels, rowBytes: Self.width * 4,
-            bounds: CGRect(x: 0, y: 0, width: Self.width, height: Self.height), format: .RGBA8,
-            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
-        let key = SHA256.hash(data: Data(pixels)).map { String(format: "%02x", $0) }.joined()
-        let file = root.appendingPathComponent("still-\(key).png")
+    func still(_ image: CIImage, effectID: UUID, directory: URL? = nil, sourceFile: URL? = nil) throws -> CIImage {
+        let file: URL
+        if let sourceFile {
+            file = sourceFile
+        } else {
+            // Generated and cutout images are addressed by their actual input
+            // pixels since text, shape, masks and source alpha can animate.
+            let local = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+                .transformed(by: CGAffineTransform(scaleX: CGFloat(Self.width) / image.extent.width,
+                                                   y: CGFloat(Self.height) / image.extent.height))
+            var pixels = [UInt8](repeating: 0, count: Self.width * Self.height * 4)
+            context.render(local, toBitmap: &pixels, rowBytes: Self.width * 4,
+                bounds: CGRect(x: 0, y: 0, width: Self.width, height: Self.height), format: .RGBA8,
+                colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+            let key = Self.hash(Data(pixels))
+            file = (directory ?? root).appendingPathComponent("still-\(key).png")
+        }
         if let cached = try? load(file) { return cached }
-        bakeLock.lock()
-        defer { bakeLock.unlock() }
+        inferenceLock.lock()
+        defer { inferenceLock.unlock() }
         if let cached = try? load(file) { return cached }
         let preparationID = UUID()
         NotificationCenter.default.post(name: Self.preparationProgress, object: nil,
@@ -245,22 +378,8 @@ final class DepthBakeStore: @unchecked Sendable {
             NotificationCenter.default.post(name: Self.preparationProgress, object: nil,
                 userInfo: ["id": preparationID])
         }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try write(infer(image), to: file)
-        return try load(file)
+        if directory == nil { try createDirectory(root) }
+        return try store(infer(image), at: file)
     }
 
-    private func prune(except current: URL) {
-        let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        let ordered = files.filter { $0 != current }.sorted {
-            ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) >
-            ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
-        }
-        // Keep a small number of completed analyses; active instructions may
-        // still refer to them, so only remove tracks older than a week.
-        for url in ordered.dropFirst(8) {
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()
-            if Date().timeIntervalSince(date) > 7 * 86400 { try? FileManager.default.removeItem(at: url) }
-        }
-    }
 }

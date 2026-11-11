@@ -74,6 +74,22 @@ struct PerformanceBenchmarkTests {
         service.livePreviewState.clearOverride(for: movingID)
         try await measurePlayback(preview)
 
+        // Compare the compositor outputs before the export codec changes the
+        // pixels. The fixture uses matching canvas and preview dimensions.
+        let exportComposition = try await service.makeComposition(for: project)
+        let exportFrames = AVAssetImageGenerator(asset: exportComposition.composition)
+        exportFrames.videoComposition = exportComposition.videoComposition
+        exportFrames.requestedTimeToleranceBefore = .zero
+        exportFrames.requestedTimeToleranceAfter = .zero
+        var previewReference = SHA256()
+        var exportReference = SHA256()
+        for frame in [0, 7, 8, 31, 57] {
+            let time = CMTime(value: Int64(frame), timescale: 30)
+            digest(try await generator.image(at: time).image, context: ci, into: &previewReference)
+            digest(try await exportFrames.image(at: time).image, context: ci, into: &exportReference)
+        }
+        #expect(previewReference.finalize() == exportReference.finalize())
+
         let start = clock.now
         let url = try await VideoExportService().export(
             project: project,
@@ -155,7 +171,7 @@ struct PerformanceBenchmarkTests {
                     ShapeTimelineItem(
                         name: "Shape", mediaID: mediaID,
                         shape: ClipShape(kind: .rectangle, color: .white, width: 200, height: 120),
-                        timelineStart: Double(cut * 150 + lane) / 600,
+                        timelineStart: Double(cut * 6) + Double(lane) / 600,
                         sourceRange: TimeRangeValue(start: 0, duration: 0.25)))
             }
             return TimelineTrack(name: "Shape \(lane)", kind: .shape, items: items)
@@ -164,11 +180,30 @@ struct PerformanceBenchmarkTests {
             title: "Dense preview preparation",
             renderSettings: RenderSettings(width: 960, height: 540, frameRate: 30), tracks: tracks)
         let service = CompositionRenderService()
-        _ = try await service.preparePreview(
-            for: project, quality: .balanced,
-            invalidation: [.previewFrame, .compositionTopology])
-        var timings: [Double] = []
         let clock = ContinuousClock()
+        let coldStart = clock.now
+        let initial = try #require(try await service.preparePreview(
+            for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology]
+        ))
+        print("PERF 2400 generated cuts cold preparation \(milliseconds(coldStart.duration(to: clock.now))) ms, duration=\(initial.duration) s")
+        #expect(initial.duration > 590)
+        let clockTrack = try #require(initial.composition.tracks(withMediaType: .video).first)
+        let segments = try await clockTrack.load(.segments)
+        let sources = Set(segments.compactMap { ($0 as? AVCompositionTrackSegment)?.sourceURL })
+        #expect(sources.count == 1)
+        #expect(segments.count > 100)
+        #expect(segments.allSatisfy { $0.timeMapping.source.duration.seconds <= 4 })
+        let generator = AVAssetImageGenerator(asset: initial.composition)
+        generator.videoComposition = initial.videoComposition
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        for frame in [119, 120, 121, 17_820] {
+            let time = CMTime(value: Int64(frame), timescale: 30)
+            let sample = try await generator.image(at: time)
+            #expect(CMTimeCompare(sample.actualTime, time) == 0)
+        }
+        var timings: [Double] = []
         var instructionCount = 0
         for _ in 0..<12 {
             let start = clock.now
@@ -291,7 +326,7 @@ struct PerformanceBenchmarkTests {
             let target = model.currentScrubPresentationTime()
             func presented() -> Bool {
                 guard let time = model.livePreviewPresentation.frameTime else { return false }
-                return abs(time - target) <= 1 / 30 + 0.000_1
+                return abs(time - target) < 0.000_01
             }
             while !presented(), start.duration(to: clock.now) < .milliseconds(600) {
                 try await Task.sleep(for: .milliseconds(2))
@@ -311,6 +346,21 @@ struct PerformanceBenchmarkTests {
         if !rendered.isEmpty { report("decoded scrub to rendered buffer", rendered) }
         #expect(missed == 0)
         report("decoded scrub input main actor", input)
+        // Simulate a rapid reversal burst with more input events than the
+        // decoder can service. The final exact frame still has to win.
+        for frame in [81, 6, 74, 9, 67, 12, 59, 15, 51, 20] {
+            model.updateScrub(to: Double(frame) / 30)
+            try await Task.sleep(for: .milliseconds(3))
+        }
+        let burstTarget = model.currentScrubPresentationTime()
+        let burstEnd = clock.now
+        while model.livePreviewPresentation.frameTime != burstTarget,
+            burstEnd.duration(to: clock.now) < .milliseconds(600)
+        {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(model.livePreviewPresentation.frameTime == burstTarget)
+        print("PERF reversal burst final frame \(milliseconds(burstEnd.duration(to: clock.now))) ms")
         let final = 1.7
         model.endScrub(at: final)
         let end = clock.now

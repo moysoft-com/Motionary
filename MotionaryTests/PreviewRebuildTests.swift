@@ -534,8 +534,7 @@ struct PreviewRebuildTests {
         for _ in 0..<100 where player.pendingSeekCount < 2 { try await Task.sleep(for: .milliseconds(2)) }
         guard player.pendingSeekCount == 2 else { Issue.record("Latest scrub seek was delayed"); return }
         #expect(player.seekRequests.map(\.time) == [0.1, 0.8])
-        // Movement retains decoder-friendly tolerance; only release is exact.
-        #expect(player.seekRequests.allSatisfy { $0.tolerance >= 1 / 30 })
+        #expect(player.seekRequests.allSatisfy { $0.tolerance == 0 })
         viewModel.updateScrub(to: 0.8)
         #expect(viewModel.pendingScrubSeekTime == nil)
         player.completeSeek(at: 1, finished: true)
@@ -777,6 +776,21 @@ struct PreviewRebuildTests {
         #expect(model.playbackState.isStartingPlayback)
         #expect(!model.isScrubbing)
         withExtendedLifetime(observation) {}
+    }
+
+    @MainActor
+    @Test func playbackRequestBeforePlayerInstallationCanBeQueuedAndCancelled() {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        model.rebuildTask = Task { try? await Task.sleep(for: .seconds(10)) }
+        #expect(model.player == nil)
+
+        model.togglePlayback()
+        #expect(model.pendingPlaybackResumeAfterPreviewRebuild)
+        #expect(model.playbackState.isStartingPlayback)
+        model.togglePlayback()
+        #expect(!model.pendingPlaybackResumeAfterPreviewRebuild)
+        #expect(!model.playbackState.isStartingPlayback)
     }
 
     @MainActor

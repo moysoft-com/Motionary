@@ -50,8 +50,10 @@ extension EditorViewModel {
         installEffectRenderDiagnosticsHandler()
         EditorAudioSession.configurePlayback()
         TimelineCacheLifecycle.installMemoryWarningHandler()
-        Task {
-            await TimelineThumbnailTileCache.shared.setActiveProject(projectID)
+        if project.tracks.contains(where: { !$0.isMuted && !$0.items.isEmpty && $0.kind != .audio }) {
+            Task.detached(priority: .userInitiated) {
+                try? MetalRenderResources.validateAvailability()
+            }
         }
         repairStoredMediaReferences()
         _ = prepareEnabledBackgroundRemovalArtifactsOnOpen()
@@ -64,7 +66,6 @@ extension EditorViewModel {
             delay: false,
             invalidation: [.previewFrame, .compositionTopology, .audioMix]
         )
-        persist()
     }
 
     func stop() {
@@ -91,11 +92,6 @@ extension EditorViewModel {
         pendingLiveVisualOverrideItemIDs.removeAll(keepingCapacity: true)
         autosaveTask = Task { [projectStore, projectID] in
             try? await projectStore.repository.save(content, projectID: projectID)
-        }
-        Task {
-            await TimelineThumbnailTileCache.shared.removeAll()
-            await TimelineAudioWaveformCache.shared.removeAll()
-            await MediaAssetCache.shared.removeAll()
         }
         rebuildTask?.cancel()
         rebuildTask = nil
@@ -233,8 +229,17 @@ extension EditorViewModel {
             )
             return
         }
-        guard let player else { return }
-        if playbackState.isStartingPlayback {
+        guard let player else {
+            if rebuildTask != nil {
+                pendingPlaybackResumeAfterPreviewRebuild.toggle()
+                playbackState.isStartingPlayback = pendingPlaybackResumeAfterPreviewRebuild
+            }
+            return
+        }
+        player.cancelPendingPrerolls()
+        scrubPrefetchTask?.cancel()
+        scrubPrefetchTask = nil
+        if playbackState.isStartingPlayback, !pendingPlaybackResumeAfterPreviewRebuild {
             pausePlaybackForUserCommand(player)
             return
         }
@@ -244,6 +249,9 @@ extension EditorViewModel {
         // frame, so release the overlay after the handoff as well.
         invalidateLivePreviewPresentation()
         let takingOverScrub = isScrubbing || scrubIsFinishing
+        let scrubPositionIsReady = !isScrubSeekInFlight && !isPreviewSeekInFlight
+            && player.currentItem?.status == .readyToPlay
+            && abs(player.currentTime().seconds - livePreviewPresentationTime(currentTime)) < 0.000_01
         if takingOverScrub {
             scrubSessionGeneration &+= 1
             scrubSeekGeneration &+= 1
@@ -266,6 +274,7 @@ extension EditorViewModel {
 
         if pendingPlaybackResumeAfterPreviewRebuild {
             pendingPlaybackResumeAfterPreviewRebuild = false
+            playbackState.isStartingPlayback = false
             isPlaying = false
             player.pause()
             return
@@ -292,7 +301,7 @@ extension EditorViewModel {
         }
 
         let restartingAtEnd = duration > 0 && currentTime >= lastPlayableTime
-        if takingOverScrub || restartingAtEnd {
+        if (takingOverScrub && !scrubPositionIsReady) || restartingAtEnd {
             if restartingAtEnd { updateCurrentTime(0) }
             let target = currentTime
             playbackState.isStartingPlayback = true
@@ -309,13 +318,19 @@ extension EditorViewModel {
                     if result == .timedOut { self.schedulePreviewRecovery(reason: .seekTimeout, resumePlayback: true) }
                     return
                 }
-                player.play()
-                self.isPlaying = true
-                self.startPlaybackWatchdog()
+                self.startPreparedPlayback(player)
             }
             return
         }
-        player.play()
+        startPreparedPlayback(player)
+    }
+
+    func startPreparedPlayback(_ player: AVPlayer) {
+        if player.status == .readyToPlay, lastPreviewRenderedFrameAt > 0 {
+            player.playImmediately(atRate: 1)
+        } else {
+            player.play()
+        }
         isPlaying = true
         startPlaybackWatchdog()
     }
@@ -599,10 +614,11 @@ extension EditorViewModel {
         scrubSessionGeneration &+= 1
         wasPlayingBeforeScrub = isPlaying
         stopPlaybackWatchdog()
+        player?.cancelPendingPrerolls()
         player?.pause()
         isPlaying = false
         isScrubbing = true
-        player?.currentItem?.seekingWaitsForVideoCompositionRendering = false
+        player?.currentItem?.seekingWaitsForVideoCompositionRendering = true
         if pendingPreviewInvalidation.contains(.compositionTopology) {
             // Source timing edits cannot wait until the gesture ends. Install
             // the new graph and then continue from the latest scrub position.
@@ -627,6 +643,7 @@ extension EditorViewModel {
         isScrubSeekInFlight = false
         lastIssuedScrubSeekTime = nil
         lastScrubUIUpdate = 0
+        lastScrubDirection = 0
         scrubSeekLatencyEstimate = 0
         scrubSeekGeneration &+= 1
         previewQuality = .interactive
@@ -713,6 +730,7 @@ extension EditorViewModel {
         scrubIsFinishing = false
         wasPlayingBeforeScrub = false
         flushDeferredPreviewRebuild(seekTo: time)
+        prerollPausedPreviewIfReady()
     }
 
     var navigationPoints: [Double] {

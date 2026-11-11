@@ -6,6 +6,27 @@ import Testing
 @testable import Motionary
 
 struct KeyframeEditingTests {
+    @Test func springPresetOscillatesRoundTripsAndSurvivesSplitting() throws {
+        let spring = KeyframeCurvePreset.spring.interpolation
+        #expect(spring.progress(at: 0) == 0)
+        #expect(abs(spring.progress(at: 1) - 1) < 0.000_001)
+        #expect(spring.progress(at: 0.3) > 1)
+        #expect(spring.progress(at: 0.65) < 1)
+        let data = try JSONEncoder().encode(spring)
+        #expect(try JSONDecoder().decode(KeyframeInterpolation.self, from: data) == spring)
+
+        let splitTime = 0.4
+        let splitValue = spring.progress(at: splitTime)
+        let pieces = spring.split(at: splitTime)
+        for step in 0...100 {
+            let time = Double(step) / 100
+            let reconstructed = time <= splitTime
+                ? splitValue * pieces.left.progress(at: time / splitTime)
+                : splitValue + (1 - splitValue) * pieces.right.progress(at: (time - splitTime) / (1 - splitTime))
+            #expect(abs(reconstructed - spring.progress(at: time)) < 0.000_001)
+        }
+    }
+
     @Test func cubicBezierSamplingMatchesHighPrecisionReference() {
         let curves: [(Double, Double, Double, Double)] = [
             (0.42, 0, 0.58, 1),

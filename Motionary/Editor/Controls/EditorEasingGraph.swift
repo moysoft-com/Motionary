@@ -102,6 +102,9 @@ struct EditorEasingGraph: View {
                 graphEndpoint(x: 0, y: 0, in: plot)
                 graphEndpoint(x: 1, y: 1, in: plot)
                 playhead(in: plot)
+                if case .spring(_, _, let damping, let frequency) = interpolation {
+                    graphHandle(at: point(x: (frequency - 2) / 6, y: (12 - damping) / 9, in: plot), isSelected: dragMode == .springHandle)
+                }
                 if let controlPoints = editableControlPoints {
                     handleLayer(controlPoints: controlPoints, plot: plot)
                 }
@@ -124,6 +127,7 @@ struct EditorEasingGraph: View {
         if case .cubicBezier(let control1, let control2) = interpolation {
             return (control1, control2)
         }
+        if case .spring = interpolation { return nil }
         guard exposesDefaultHandles else { return nil }
         return (
             KeyframeControlPoint(x: 0.33, y: 0.33),
@@ -220,6 +224,12 @@ struct EditorEasingGraph: View {
                     updateHandle(isFirst: true, location: gesture.location, plot: plot)
                 case .secondHandle:
                     updateHandle(isFirst: false, location: gesture.location, plot: plot)
+                case .springHandle:
+                    if case .spring(let start, let end, _, _) = interpolation {
+                        let x = min(max(Double((gesture.location.x - plot.minX) / plot.width), 0), 1)
+                        let y = min(max(Double((plot.maxY - gesture.location.y) / plot.height), 0), 1)
+                        onInterpolationChanged(.spring(start: start, end: end, damping: 12 - y * 9, frequency: 2 + x * 6))
+                    }
                 case .scrub:
                     viewModel.updateScrub(to: timelineTime(at: gesture.location.x, plot: plot))
                 case nil:
@@ -228,7 +238,7 @@ struct EditorEasingGraph: View {
             }
             .onEnded { gesture in
                 switch dragMode {
-                case .firstHandle, .secondHandle:
+                case .firstHandle, .secondHandle, .springHandle:
                     onHandleEnded()
                 case .scrub:
                     viewModel.endScrub(at: timelineTime(at: gesture.location.x, plot: plot))
@@ -243,6 +253,12 @@ struct EditorEasingGraph: View {
     }
 
     private func beginGraphDrag(at location: CGPoint, plot: CGRect) {
+        if case .spring(_, _, let damping, let frequency) = interpolation,
+            distance(from: location, to: point(x: (frequency - 2) / 6, y: (12 - damping) / 9, in: plot)) <= 32 {
+            dragMode = .springHandle
+            onHandleBegan()
+            return
+        }
         if let controlPoints = editableControlPoints {
             let firstDistance = distance(from: location, to: controlPointPosition(controlPoints.0, in: plot))
             let secondDistance = distance(from: location, to: controlPointPosition(controlPoints.1, in: plot))
@@ -340,6 +356,7 @@ struct EditorEasingGraph: View {
     }
 
     private enum DragMode {
+        case springHandle
         case firstHandle
         case secondHandle
         case scrub

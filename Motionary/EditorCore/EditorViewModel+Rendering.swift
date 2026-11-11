@@ -233,6 +233,7 @@ extension EditorViewModel {
         }
         defer {
             if generation == previewGeneration, marksPreviewAsBuilding {
+                playbackState.isStartingPlayback = false
                 isRenderingPreview = false
                 depthPreparationProgress = nil
             }
@@ -241,7 +242,7 @@ extension EditorViewModel {
             updatePreviewProgress(0.12, generation: generation)
             let prepared = try await renderService.preparePreview(
                 for: project,
-                quality: previewQuality,
+                quality: requestedPreviewQuality == .interactive ? .balanced : requestedPreviewQuality,
                 invalidation: invalidation,
                 renderSessionID: UUID(),
                 displayPixelSize: previewDisplayPixelSize
@@ -295,6 +296,10 @@ extension EditorViewModel {
                 // Replacing AVPlayerItem.audioMix is a live operation. Seeking
                 // for an audio-only change interrupts playback and performs
                 // unnecessary video decode/compositing work.
+                if requiresPlayerSynchronization {
+                    clearPendingLiveVisualOverrides()
+                }
+                var synchronizedFrame = false
                 if !isScrubbing, requiresPlayerSynchronization {
                     updateCurrentTime(seekTime)
                     let seekCommandGeneration = playbackCommandGeneration
@@ -310,6 +315,7 @@ extension EditorViewModel {
                                 return
                             }
                         } else {
+                            synchronizedFrame = true
                             updateCurrentTime(seekTime)
                         }
                     }
@@ -326,11 +332,12 @@ extension EditorViewModel {
                 pendingPreviewInvalidation.subtract(invalidation)
                 previewProgress = 1
                 resetPreviewRecoveryAttempts()
-                if !invalidation.intersection([.previewFrame, .compositionTopology]).isEmpty {
-                    clearPendingLiveVisualOverrides()
+                if synchronizedFrame {
+                    livePreviewPresentation.frame = nil
                 }
-                if !isPlaying && !pendingPlaybackResumeAfterPreviewRebuild {
-                    pendingLivePreviewFrameRefresh = true
+                if !isPlaying, !pendingPlaybackResumeAfterPreviewRebuild,
+                    pendingLivePreviewFrameRefresh || (requiresPlayerSynchronization && !synchronizedFrame)
+                {
                     scheduleLivePreviewFrameRefresh()
                 }
                 if isScrubbing, requiresPlayerSynchronization {
@@ -340,17 +347,16 @@ extension EditorViewModel {
                         updateScrub(to: currentTime)
                     }
                 }
-                refinePreviewQualityAfterFastFrameIfNeeded(
-                    requestedQuality: requestedPreviewQuality,
-                    seekTime: currentTime,
-                    generation: generation
-                )
-                if !isScrubbing, isPlaying || pendingPlaybackResumeAfterPreviewRebuild
+                if requestedPreviewQuality == .interactive, !isScrubbing,
+                    !renderService.livePreviewState.hasActiveOverrides
                 {
-                    player?.play()
-                    isPlaying = true
-                    startPlaybackWatchdog()
+                    setPreviewQualityForInteraction(false)
+                }
+                if !isScrubbing, isPlaying || pendingPlaybackResumeAfterPreviewRebuild, let player {
                     pendingPlaybackResumeAfterPreviewRebuild = false
+                    startPreparedPlayback(player)
+                } else {
+                    prerollPausedPreviewIfReady()
                 }
             } else {
                 replacePreviewPlayer(with: nil)
@@ -364,11 +370,7 @@ extension EditorViewModel {
                 if !invalidation.intersection([.previewFrame, .compositionTopology]).isEmpty {
                     clearPendingLiveVisualOverrides()
                 }
-                refinePreviewQualityAfterFastFrameIfNeeded(
-                    requestedQuality: requestedPreviewQuality,
-                    seekTime: seekTime,
-                    generation: generation
-                )
+                if !isScrubbing { setPreviewQualityForInteraction(false) }
                 if isScrubbing, scrubIsFinishing { endScrub(at: currentTime) }
             }
         } catch is CancellationError {
@@ -396,26 +398,6 @@ extension EditorViewModel {
         previewProgress = max(previewProgress, progress)
     }
 
-    private func refinePreviewQualityAfterFastFrameIfNeeded(
-        requestedQuality: PreviewQuality,
-        seekTime: Double,
-        generation: Int
-    ) {
-        guard generation == previewGeneration,
-            requestedQuality == .interactive,
-            !isScrubbing,
-            !isPlaying,
-            !renderService.livePreviewState.hasActiveOverrides
-        else { return }
-
-        previewQuality = .balanced
-        schedulePreviewRebuild(
-            seekTo: seekTime,
-            delay: true,
-            invalidation: [.previewFrame]
-        )
-    }
-
     func replacePreviewPlayer(with item: AVPlayerItem?) {
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
@@ -440,6 +422,7 @@ extension EditorViewModel {
             timeObserver = nil
         }
         removePreviewItemHealthObservers()
+        player?.cancelPendingPrerolls()
         player?.pause()
         player?.currentItem?.cancelPendingSeeks()
         player?.replaceCurrentItem(with: nil)
@@ -450,6 +433,7 @@ extension EditorViewModel {
         }
         lastPreviewRenderedFrameAt = 0
         lastPreviewRenderedTimelineTime = nil
+        item.seekingWaitsForVideoCompositionRendering = true
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.volume = 1
         player = newPlayer
@@ -768,6 +752,14 @@ extension EditorViewModel {
         }
     }
 
+    func prerollPausedPreviewIfReady() {
+        guard let player, player.status == .readyToPlay,
+            !isPlaying, !isScrubbing, !isPreviewSeekInFlight,
+            !pendingPlaybackResumeAfterPreviewRebuild
+        else { return }
+        player.preroll(atRate: 1, completionHandler: nil)
+    }
+
     @discardableResult
     func seekPlayerAndWait(to time: Double) async -> PreviewSeekResult {
         guard let player else { return .superseded }
@@ -790,12 +782,14 @@ extension EditorViewModel {
         to time: Double,
         toleranceBefore: CMTime,
         toleranceAfter: CMTime,
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        frameAligned: Bool = false
     ) async -> PreviewSeekResult {
         previewSeekGeneration &+= 1
         let generation = previewSeekGeneration
         isPreviewSeekInFlight = true
         lastPreviewRenderedTimelineTime = nil
+        player.cancelPendingPrerolls()
         let item = player.currentItem
         let boundedContinuation = BoundedSeekContinuation()
         let result: PreviewSeekResult = await withTaskCancellationHandler {
@@ -805,8 +799,9 @@ extension EditorViewModel {
                     boundedContinuation.resume(.superseded)
                     return
                 }
+                let timescale = frameAligned ? max(self.project.renderSettings.frameRate, 1) : 600
                 player.seek(
-                    to: CMTime(seconds: time, preferredTimescale: 600),
+                    to: CMTime(seconds: time, preferredTimescale: timescale),
                     toleranceBefore: toleranceBefore,
                     toleranceAfter: toleranceAfter
                 ) { finished in

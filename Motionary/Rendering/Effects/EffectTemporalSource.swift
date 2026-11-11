@@ -14,13 +14,20 @@ struct EffectTemporalSource: Sendable {
     var backgroundMatteURL: URL? = nil
     var sourceOrientation = CGAffineTransform.identity
     var matteOrientation = CGAffineTransform.identity
+    var depthSourceRevision: String?
 
     func image(at clipTime: Double, fitting extent: CGRect, quality: RenderQualityProfile,
                adjustmentTime: Double? = nil, applyCutout: Bool = false,
                renderScale: CGFloat = 1, videoSampleRanges: [CMTimeRange] = []) throws -> CIImage {
         let sourceTime = sourceStart + speedMap.sourceTime(at: clipTime, sourceDuration: sourceDuration)
+        let sampleRanges = videoSampleRanges.isEmpty && sourceDuration > 0
+            ? [CMTimeRange(
+                start: CMTime(seconds: sourceStart, preferredTimescale: 60_000),
+                duration: CMTime(seconds: sourceDuration, preferredTimescale: 60_000)
+            )]
+            : videoSampleRanges
         let image = try EffectTemporalFrameStore.shared.image(url: url, time: sourceTime,
-            size: extent.size, quality: quality, videoSampleRanges: videoSampleRanges)
+            size: extent.size, quality: quality, videoSampleRanges: sampleRanges, sourceRevision: depthSourceRevision)
         func fit(_ image: CIImage, orientation: CGAffineTransform) -> CIImage {
             // Apply exactly the same Core Image orientation as decoder buffers.
             // ImageGenerator's preferred-track rotation uses a different space.
@@ -72,7 +79,7 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
     private let lock = NSLock()
     private var urlLocks: [URL: NSLock] = [:]
     private let frames = NSCache<NSString, CGImage>()
-    private let generators = NSCache<NSURL, AVAssetImageGenerator>()
+    private let generators = NSCache<NSString, AVAssetImageGenerator>()
     private func lockFor(url: URL) -> NSLock {
         lock.lock()
         defer { lock.unlock() }
@@ -89,7 +96,7 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
     }
 
     func image(url: URL, time: Double, size: CGSize, quality: RenderQualityProfile,
-               videoSampleRanges: [CMTimeRange] = []) throws -> CIImage {
+               videoSampleRanges: [CMTimeRange] = [], sourceRevision: String? = nil) throws -> CIImage {
         let width = max(Int(size.width.rounded()), 1)
         let height = max(Int(size.height.rounded()), 1)
         let requested = CMTime(seconds: max(time, 0), preferredTimescale: 60_000)
@@ -108,7 +115,8 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
         } else {
             target = requested
         }
-        var key = "\(url.absoluteString)|\(target.value)/\(target.timescale)|\(width)x\(height)"
+        let assetKey = "\(url.absoluteString)|\(sourceRevision ?? "")"
+        var key = "\(assetKey)|\(target.value)/\(target.timescale)|\(width)x\(height)"
         if let range = videoSampleRange {
             // Approximate depth samples cannot satisfy exact temporal effects.
             key += "|depth|\(range.start.seconds)|\(range.end.seconds)"
@@ -123,21 +131,21 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
             throw MetalRenderingError.sourceFrameUnavailable
         }
         let generator: AVAssetImageGenerator
-        if let existing = generators.object(forKey: url as NSURL) {
+        if let existing = generators.object(forKey: assetKey as NSString) {
             generator = existing
         } else {
             generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
             generator.appliesPreferredTrackTransform = false
             generator.requestedTimeToleranceBefore = .zero
             generator.requestedTimeToleranceAfter = .zero
-            generators.setObject(generator, forKey: url as NSURL)
+            generators.setObject(generator, forKey: assetKey as NSString)
         }
         generator.maximumSize = CGSize(width: width, height: height)
         let frame: CGImage
         do {
             frame = try decode(generator, at: target, quality: quality)
         } catch {
-            generators.removeObject(forKey: url as NSURL)
+            generators.removeObject(forKey: assetKey as NSString)
             guard let range = videoSampleRange else { throw error }
             try Task.checkCancellation()
             // Some sources have irregular sample times or edit lists.
@@ -149,7 +157,14 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
             let tolerance = CMTime(value: 1, timescale: 12)
             retry.requestedTimeToleranceBefore = min(tolerance, target - range.start)
             retry.requestedTimeToleranceAfter = min(tolerance, range.end - target)
-            frame = try decode(retry, at: target, quality: quality)
+            do {
+                frame = try decode(retry, at: target, quality: quality)
+            } catch {
+                AppLogger.rendering.error(
+                    "Temporal source decode failed for \(url.lastPathComponent, privacy: .public) at \(target.seconds, privacy: .public) seconds after bounded retry: \(error.localizedDescription, privacy: .public)"
+                )
+                throw error
+            }
         }
         frames.setObject(frame, forKey: key as NSString, cost: frame.bytesPerRow * frame.height)
         return VideoSourceGeometry.engineImage(CIImage(cgImage: frame))

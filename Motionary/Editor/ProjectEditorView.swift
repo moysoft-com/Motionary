@@ -312,10 +312,6 @@ struct ProjectEditorView: View {
                 onSettingsChanged: { settings in
                     viewModel.saveExportSettings(settings)
                 },
-                onShare: { settings in
-                    isExportSettingsPresented = false
-                    viewModel.exportProject(settings: settings, saveToPhotos: false)
-                },
                 onExport: { settings in
                     isExportSettingsPresented = false
                     viewModel.exportProject(settings: settings)
@@ -861,7 +857,7 @@ extension CoreEditorPanel {
         case .audio:
             .audio
         case .speed:
-            nil
+            .speed
         case .mask, .removeBackground, .blend, .adjustmentTargets, .autoBeats, .canvas, .timeline, .graph:
             nil
         }

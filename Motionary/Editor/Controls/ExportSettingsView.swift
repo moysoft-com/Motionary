@@ -6,7 +6,6 @@ import UIKit
 struct ExportSettingsView: View {
     let project: EditorProject
     let onExport: (VideoExportSettings) -> Void
-    let onShare: ((VideoExportSettings) -> Void)?
     let onSettingsChanged: (VideoExportSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -18,12 +17,10 @@ struct ExportSettingsView: View {
     init(
         project: EditorProject,
         onSettingsChanged: @escaping (VideoExportSettings) -> Void = { _ in },
-        onShare: ((VideoExportSettings) -> Void)? = nil,
         onExport: @escaping (VideoExportSettings) -> Void
     ) {
         self.project = project
         self.onExport = onExport
-        self.onShare = onShare
         self.onSettingsChanged = onSettingsChanged
         var initialSettings = project.exportSettings ?? VideoExportSettings.recommended(for: project)
         if project.exportSettings == nil {
@@ -148,15 +145,8 @@ struct ExportSettingsView: View {
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Menu("Export") {
-                        Button("Save to Photos", systemImage: "photo") {
-                            onExport(settings.normalized)
-                        }
-                        if let onShare {
-                            Button("Save to Files or share", systemImage: "square.and.arrow.up") {
-                                onShare(settings.normalized)
-                            }
-                        }
+                    Button("Export") {
+                        onExport(settings.normalized)
                     }
                     .fontWeight(.semibold)
                     .disabled(settings.width < 2 || settings.height < 2)

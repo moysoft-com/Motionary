@@ -52,7 +52,8 @@ final class ProjectPosterService: @unchecked Sendable {
         let renderSettings = posterRenderSettings(for: project.renderSettings)
         let rendered = try await renderService.makePosterComposition(
             for: project,
-            renderSettings: renderSettings
+            renderSettings: renderSettings,
+            depthCacheDirectory: DepthBakeStore.projectDirectory(in: outputURL.deletingLastPathComponent())
         )
         try Task.checkCancellation()
         guard rendered.hasVideo, let videoComposition = rendered.videoComposition else {

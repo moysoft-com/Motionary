@@ -361,6 +361,38 @@ extension EditorViewModel {
         )
     }
 
+    func copyLayer(_ trackID: UUID) {
+        guard let track = project.tracks.first(where: { $0.id == trackID }) else { return }
+        EditorClipboard.track = track
+    }
+
+    func cutLayer(_ trackID: UUID) {
+        guard let track = project.tracks.first(where: { $0.id == trackID }) else { return }
+        EditorClipboard.track = track
+        deleteLayer(trackID)
+    }
+
+    func pasteLayer() {
+        guard var copy = EditorClipboard.track else { return }
+        let before = project.tracks
+        var after = project
+        copy.id = UUID()
+        copy.items = copy.items.map { $0.duplicated(startingAt: $0.timelineStart) }
+        let insertionIndex = selectedTrackID.flatMap { id in after.tracks.firstIndex { $0.id == id } } ?? 0
+        after.tracks.insert(copy, at: insertionIndex)
+        after.renumberTracks()
+        selectedClipID = nil
+        selectedTrackID = copy.id
+        commit(
+            EditorCommandFactory.trackStructure(
+                before: before,
+                after: after.tracks,
+                invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
+            ),
+            refreshTimeline: true
+        )
+    }
+
     func moveTrack(_ trackID: UUID, to proposedIndex: Int) {
         guard let sourceIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
         let before = project.tracks

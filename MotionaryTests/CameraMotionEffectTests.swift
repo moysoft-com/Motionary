@@ -22,6 +22,33 @@ struct CameraMotionEffectTests {
             .composited(over: CIImage(color: CIColor(red: 0, green: 0, blue: 1)).cropped(to: bounds))
     }
 
+    @Test func invertMirrorAndFlashRenderAndPreserveTransparency() throws {
+        let renderer = try MetalFrameRenderer()
+        func render(_ id: EffectModuleID, _ input: CIImage, _ time: Double = 0) throws -> [UInt8] {
+            let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: id))
+            return pixels(try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: input, at: time, renderScale: 1))
+        }
+        let original = pixels(pattern)
+        let mirrored = try render(.horizontalMirror, pattern)
+        #expect(Array(mirrored[0..<4]) == Array(original[(79 * 4)..<(80 * 4)]))
+        let inverted = try render(.invert, pattern)
+        #expect(inverted[0] < 10 && inverted[1] > 245 && inverted[2] > 245)
+        let clear = CIImage(color: .clear).cropped(to: bounds)
+        for id: EffectModuleID in [.invert, .horizontalMirror, .flash] {
+            #expect(try render(id, clear).allSatisfy { $0 == 0 })
+        }
+        #expect(try render(.flash, pattern, 0) != original)
+        #expect(try render(.flash, pattern, 0.2) == original)
+    }
+
+    @Test func flashesAreDeterministicAndVary() {
+        let samples = (0..<20).map { FlashSampling.intensity(time: Double($0), frequency: 1, duration: 0.1, seed: 42) }
+        #expect(Set(samples).count > 1)
+        #expect(samples[5] == FlashSampling.intensity(time: 5, frequency: 1, duration: 0.1, seed: 42))
+        #expect(FlashSampling.intensity(time: 5.5, frequency: 1, duration: 0.1, seed: 42) == 0)
+    }
+
     @Test func motionIsDeterministicAndWiggleHasSmoothTangents() {
         for smooth in [false, true] {
             let first = CameraMotionSampling.noise(at: 1.25, seed: 123, channel: 0, smooth: smooth)

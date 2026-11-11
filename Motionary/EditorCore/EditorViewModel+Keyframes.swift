@@ -661,6 +661,47 @@ extension EditorViewModel {
         }
     }
 
+    func copyEffect(_ effectID: UUID) {
+        guard let effect = selectedTimelineItem?.visualEditingClip()?.effectStack.effects.first(where: { $0.id == effectID }) else { return }
+        EditorClipboard.effect = effect
+    }
+
+    func cutEffect(_ effectID: UUID) {
+        copyEffect(effectID)
+        removeEffect(effectID)
+    }
+
+    func pasteEffect() {
+        guard var effect = EditorClipboard.effect else { return }
+        effect.id = UUID()
+        effect.mix.keyframes = effect.mix.keyframes.map { frame in
+            var copy = frame
+            copy.id = UUID()
+            return copy
+        }
+        effect.parameters = effect.parameters.mapValues { parameter in
+            var copy = parameter
+            copy.keyframes = parameter.keyframes.map { frame in
+                var frameCopy = frame
+                frameCopy.id = UUID()
+                return frameCopy
+            }
+            return copy
+        }
+        updateSelectedClip { clip in
+            guard clip.mediaType != .audio else { return }
+            if effect.moduleID == .depthMap {
+                guard self.selectedTimelineItem?.isAdjustmentLayer != true,
+                    !clip.effectStack.effects.contains(where: { $0.moduleID == .depthMap })
+                else { return }
+                clip.effectStack.effects.insert(effect, at: 0)
+            } else {
+                clip.effectStack.effects.append(effect)
+            }
+            self.activeKeyframeTarget = effect.parameterTargets.first
+        }
+    }
+
     func moveEffect(_ effectID: UUID, offset: Int) {
         updateSelectedClip { clip in
             guard let index = clip.effectStack.effects.firstIndex(where: { $0.id == effectID }) else { return }

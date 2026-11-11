@@ -213,6 +213,7 @@ private actor BlankVideoClockCache {
     }
 
     private var urls: [Key: URL] = [:]
+    private var preparations: [Key: Task<URL, Error>] = [:]
 
     func url(duration: Double, frameRate: Int32) async throws -> URL {
         let safeFrameRate = max(frameRate, 1)
@@ -226,12 +227,16 @@ private actor BlankVideoClockCache {
             return cached
         }
 
-        let result = try await MediaConversionHelper.writeBlankVideoClock(
-            duration: CMTimeGetSeconds(
-                CMTime(value: durationTicks, timescale: 600)
-            ),
-            frameRate: safeFrameRate
-        )
+        if let preparation = preparations[key] { return try await preparation.value }
+        let preparation = Task.detached(priority: .userInitiated) {
+            try await MediaConversionHelper.writeBlankVideoClock(
+                duration: CMTimeGetSeconds(CMTime(value: durationTicks, timescale: 600)),
+                frameRate: safeFrameRate
+            )
+        }
+        preparations[key] = preparation
+        defer { preparations[key] = nil }
+        let result = try await preparation.value
         urls[key] = result
         return result
     }

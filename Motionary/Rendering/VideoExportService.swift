@@ -102,7 +102,11 @@ enum VideoExportError: LocalizedError {
 
 struct VideoExportService {
     private static let coordinator = VideoExportCoordinator()
-    private let renderService = CompositionRenderService()
+    private let renderService: CompositionRenderService
+
+    init(depthCacheDirectory: URL? = nil) {
+        renderService = CompositionRenderService(depthCacheDirectory: depthCacheDirectory)
+    }
 
     func export(
         project: EditorProject,

@@ -673,7 +673,8 @@ struct EffectsWorkspaceView: View {
             EffectLibrarySheet(depthMapAvailable: clip.map {
                 viewModel.selectedTimelineItem?.isAdjustmentLayer != true && !$0.effectStack.effects.contains(where: { $0.moduleID == .depthMap })
             } ?? false) { moduleID in
-                if let effectID = viewModel.addEffect(moduleID: moduleID) {
+                if let effectID = viewModel.addEffect(moduleID: moduleID),
+                   moduleID != .invert && moduleID != .horizontalMirror {
                     openEffectDetail(effectID)
                 }
                 isLibraryPresented = false
@@ -1451,7 +1452,13 @@ private struct EffectStackDisclosureRow: View {
                 .gesture(reorderGesture)
                 .accessibilityLabel("Reorder \(displayName)")
 
-            Button(action: onToggleExpanded) {
+            Button {
+                guard isEnabled,
+                    effect.moduleID != .invert,
+                    effect.moduleID != .horizontalMirror
+                else { return }
+                onToggleExpanded()
+            } label: {
                 HStack(spacing: EditorWorkspaceControlStyle.horizontalSpacing) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(displayName)
@@ -1506,6 +1513,18 @@ private struct EffectStackDisclosureRow: View {
         .offset(y: rowOffset)
         .zIndex(isDragging ? 10 : 0)
         .animation(isDragging ? nil : .snappy(duration: 0.18, extraBounce: 0), value: rowOffset)
+        .contextMenu {
+            Button("Cut", systemImage: "scissors") { viewModel.cutEffect(effect.id) }
+                .disabled(!isEnabled)
+            Button("Copy", systemImage: "doc.on.doc") { viewModel.copyEffect(effect.id) }
+            Button("Paste", systemImage: "doc.on.clipboard") { viewModel.pasteEffect() }
+                .disabled(!isEnabled)
+            Divider()
+            Button("Delete", systemImage: "trash", role: .destructive) {
+                viewModel.removeEffect(effect.id)
+            }
+            .disabled(!isEnabled)
+        }
     }
 }
 

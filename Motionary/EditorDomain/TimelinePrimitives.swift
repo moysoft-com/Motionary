@@ -96,18 +96,24 @@ struct KeyframeControlPoint: Codable, Equatable, Sendable {
 enum KeyframeInterpolation: Codable, Equatable, Sendable {
     case linear
     case hold
+    case spring(start: Double, end: Double, damping: Double, frequency: Double)
     case cubicBezier(control1: KeyframeControlPoint, control2: KeyframeControlPoint)
 
     private enum CodingKeys: String, CodingKey {
         case kind
         case control1
         case control2
+        case start
+        case end
+        case damping
+        case frequency
     }
 
     private enum Kind: String, Codable {
         case linear
         case hold
         case cubicBezier
+        case spring
     }
 
     init(from decoder: Decoder) throws {
@@ -117,6 +123,13 @@ enum KeyframeInterpolation: Codable, Equatable, Sendable {
             self = .linear
         case .hold:
             self = .hold
+        case .spring:
+            self = .spring(
+                start: try container.decode(Double.self, forKey: .start),
+                end: try container.decode(Double.self, forKey: .end),
+                damping: try container.decodeIfPresent(Double.self, forKey: .damping) ?? 6,
+                frequency: try container.decodeIfPresent(Double.self, forKey: .frequency) ?? 3
+            )
         case .cubicBezier:
             self = .cubicBezier(
                 control1: try container.decode(KeyframeControlPoint.self, forKey: .control1),
@@ -132,6 +145,12 @@ enum KeyframeInterpolation: Codable, Equatable, Sendable {
             try container.encode(Kind.linear, forKey: .kind)
         case .hold:
             try container.encode(Kind.hold, forKey: .kind)
+        case .spring(let start, let end, let damping, let frequency):
+            try container.encode(Kind.spring, forKey: .kind)
+            try container.encode(start, forKey: .start)
+            try container.encode(end, forKey: .end)
+            try container.encode(damping, forKey: .damping)
+            try container.encode(frequency, forKey: .frequency)
         case .cubicBezier(let control1, let control2):
             try container.encode(Kind.cubicBezier, forKey: .kind)
             try container.encode(control1, forKey: .control1)
@@ -146,6 +165,12 @@ enum KeyframeInterpolation: Codable, Equatable, Sendable {
             return progress
         case .hold:
             return progress < 1 ? 0 : 1
+        case .spring(let start, let end, let damping, let frequency):
+            let startValue = springValue(at: start, damping: damping, frequency: frequency)
+            let endValue = springValue(at: end, damping: damping, frequency: frequency)
+            let difference = endValue - startValue
+            guard abs(difference) > KeyframeMergeSupport.timeTolerance else { return progress }
+            return (springValue(at: start + (end - start) * progress, damping: damping, frequency: frequency) - startValue) / difference
         case .cubicBezier(let control1, let control2):
             let parameter = solveBezierParameter(
                 x: progress,
@@ -161,6 +186,10 @@ enum KeyframeInterpolation: Codable, Equatable, Sendable {
     }
 }
 
+private func springValue(at progress: Double, damping: Double, frequency: Double) -> Double {
+    1 - exp(-damping * progress) * cos(frequency * .pi * progress)
+}
+
 /// Built-in easing choices shown by the graph editor.
 enum KeyframeCurvePreset: String, CaseIterable, Identifiable, Codable, Sendable {
     case linear
@@ -172,6 +201,7 @@ enum KeyframeCurvePreset: String, CaseIterable, Identifiable, Codable, Sendable 
     case slow
     case overshoot
     case anticipate
+    case spring
 
     var id: String { rawValue }
 
@@ -186,6 +216,7 @@ enum KeyframeCurvePreset: String, CaseIterable, Identifiable, Codable, Sendable 
         case .slow: "Slow"
         case .overshoot: "Overshoot"
         case .anticipate: "Anticipate"
+        case .spring: "Spring"
         }
     }
 
@@ -193,6 +224,8 @@ enum KeyframeCurvePreset: String, CaseIterable, Identifiable, Codable, Sendable 
         switch self {
         case .linear:
             .linear
+        case .spring:
+            .spring(start: 0, end: 1, damping: 6, frequency: 3)
         case .hold:
             .hold
         case .easeIn:
@@ -451,6 +484,9 @@ extension KeyframeInterpolation {
             return (.linear, .linear)
         case .hold:
             return (.hold, .hold)
+        case .spring(let start, let end, let damping, let frequency):
+            let middle = start + (end - start) * progress
+            return (.spring(start: start, end: middle, damping: damping, frequency: frequency), .spring(start: middle, end: end, damping: damping, frequency: frequency))
         case .cubicBezier(let control1, let control2):
             let parameter = solveBezierParameter(
                 x: progress,

@@ -6,7 +6,7 @@ import UIKit
 
 extension EffectModuleDescriptor {
     var hasAnimatedPreview: Bool {
-        [.shake, .cameraWiggle, .zoom, .motionBlur, .waveWarp, .ripple,
+        [.flash, .shake, .cameraWiggle, .zoom, .motionBlur, .waveWarp, .ripple,
          .displacementMap, .lightSweep, .analogGlitch, .fineGrain, .lightLeak, .echoTrails].contains(id)
     }
 }

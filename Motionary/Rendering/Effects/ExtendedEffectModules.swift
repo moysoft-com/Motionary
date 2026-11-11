@@ -146,7 +146,8 @@ struct EchoTrailsEffectRenderer: EffectRenderModule {
                 if !context.depthSourceEffects.effects.isEmpty {
                     let depthContext = EffectRenderContext(compositionTime: context.compositionTime - Double(index) * spacing,
                         clipTime: time, frameIndex: context.frameIndex, itemID: context.itemID,
-                        renderScale: context.renderScale, quality: context.quality, temporalSource: source)
+                        renderScale: context.renderScale, quality: context.quality, temporalSource: source,
+                        depthAnalyses: context.depthAnalyses)
                     historical = try EffectRenderRegistry.shared.render(context.depthSourceEffects, to: historical,
                         context: depthContext, resources: resources, failurePolicy: .failOnUnavailableEffects)
                     historical = EffectColorAdjustments.apply(source.adjustments, to: historical, at: time)

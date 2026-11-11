@@ -654,9 +654,22 @@ enum RenderPlanCompiler {
 }
 
 extension RenderClipDescriptor {
+    func hasPreparedDepth(for effect: EffectInstance) -> Bool {
+        guard let analysis = depthAnalyses[effect.id] else { return false }
+        return analysis.track == nil || depthEffects.effects.contains {
+            $0.id == effect.id && DepthBakeStore.stability(of: $0) == DepthBakeStore.stability(of: effect)
+        }
+    }
+
     func resolvingLiveOverride(from snapshot: LivePreviewRenderSnapshot?) -> RenderClipDescriptor {
         guard let override = snapshot?.override(for: clipID) else { return self }
-        let visuals = override.visuals
+        // Hold the complete installed visual state until a newly added
+        // depth effect or stability variant has a matching descriptor.
+        let visuals = override.visuals.flatMap { visuals in
+            visuals.effectStack.effects.allSatisfy { effect in
+                !effect.isEnabled || effect.moduleID != .depthMap || hasPreparedDepth(for: effect)
+            } ? visuals : nil
+        }
         var transform = override.transform ?? visuals?.transform ?? self.transform
         let hasTransientRasterScaleOverride = self.hasTransientRasterScaleOverride
             || transform.scale != self.transform.scale
@@ -668,19 +681,6 @@ extension RenderClipDescriptor {
         }
         if override.isHidden {
             transform.opacity = AnimatableProperty(baseValue: 0)
-        }
-        var resolvedEffects = visuals?.effectStack ?? effectStack
-        if visuals != nil, temporalSource != nil {
-            // New depth analysis becomes usable with the prepared descriptor.
-            // Live style edits can still use the installed track immediately.
-            resolvedEffects.effects = resolvedEffects.effects.compactMap { effect in
-                guard effect.moduleID == .depthMap, effect.isEnabled else { return effect }
-                guard let prepared = effectStack.effects.first(where: { $0.id == effect.id && $0.isEnabled }) else {
-                    return nil
-                }
-                return DepthBakeStore.stability(of: prepared) == DepthBakeStore.stability(of: effect)
-                    ? effect : prepared
-            }
         }
         var result = RenderClipDescriptor(
             trackID: trackID,
@@ -695,18 +695,19 @@ extension RenderClipDescriptor {
             backgroundMaskSourceTransform: backgroundMaskSourceTransform,
             transform: transform,
             adjustments: visuals?.adjustments ?? adjustments,
-            effectStack: resolvedEffects,
+            effectStack: visuals?.effectStack ?? effectStack,
             mask: resolvedMask,
             backgroundRemoval: resolvedBackgroundRemoval,
             blendMode: visuals?.blendMode ?? blendMode,
             blendIntensity: visuals?.blendIntensity ?? blendIntensity,
-            shape: override.shape ?? shape,
-            text: override.text ?? text,
+            shape: visuals == nil ? shape : override.shape ?? shape,
+            text: visuals == nil ? text : override.text ?? text,
             role: role,
             hasTransientRasterScaleOverride: hasTransientRasterScaleOverride,
             renderOrder: renderOrder,
             temporalSource: temporalSource
         )
+        result.depthAnalyses = depthAnalyses
         result.layerID = layerID
         result.adjustmentTargets = adjustmentTargets
         return result
@@ -759,6 +760,8 @@ struct EffectRenderContext: Sendable {
     let renderScale: CGFloat
     let quality: RenderQualityProfile
     var temporalSource: EffectTemporalSource? = nil
+    var depthAnalyses: [UUID: DepthBakeStore.Analysis] = [:]
+    var usesUnmaskedStillDepth = false
     var temporalPrefix = EffectStack()
     var depthSourceEffects = EffectStack()
     var temporalSourceExtent: CGRect? = nil

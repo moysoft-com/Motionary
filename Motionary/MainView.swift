@@ -230,9 +230,14 @@ struct ProjectTabController<Home: View, Settings: View>: UIViewControllerReprese
         let appearance = UITabBarAppearance()
         appearance.configureWithDefaultBackground()
         let accent = UIColor(MotionaryTheme.accent)
-        appearance.stackedLayoutAppearance.selected.iconColor = accent
-        appearance.inlineLayoutAppearance.selected.iconColor = accent
-        appearance.compactInlineLayoutAppearance.selected.iconColor = accent
+        for itemAppearance in [
+            appearance.stackedLayoutAppearance,
+            appearance.inlineLayoutAppearance,
+            appearance.compactInlineLayoutAppearance,
+        ] {
+            itemAppearance.selected.iconColor = accent
+            itemAppearance.selected.titleTextAttributes = [.foregroundColor: accent]
+        }
         controller.tabBar.standardAppearance = appearance
         controller.tabBar.scrollEdgeAppearance = appearance
         controller.tabBar.tintColor = accent

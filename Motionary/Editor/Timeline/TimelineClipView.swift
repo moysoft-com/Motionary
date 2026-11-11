@@ -24,7 +24,8 @@ struct TimelineItemBlock: View {
     let isSelected: Bool
     let isDragSourceHidden: Bool
     let isDragGhost: Bool
-    let currentTime: Double
+    var cachedMediaClip: TimelineClip? = nil
+    var playbackState: PlaybackState? = nil
     let keyframeTolerance: Double
     let pixelsPerSecond: CGFloat
     let height: CGFloat
@@ -53,7 +54,7 @@ struct TimelineItemBlock: View {
 
     var body: some View {
         let previewItem = displayedItem
-        let mediaClip = (trimBaseline ?? previewItem).legacyClip()
+        let mediaClip = trimBaseline?.legacyClip() ?? cachedMediaClip ?? previewItem.legacyClip()
         let mediaSampleWidth = trimBaseline.map {
             CGFloat(timelineDisplayDuration(for: $0)) * pixelsPerSecond
         }
@@ -128,15 +129,15 @@ struct TimelineItemBlock: View {
                     .zIndex(2)
                 }
 
-                if let context = workspaceContext {
-                    TimelineContextKeyframes(
-                        item: previewItem, currentTime: currentTime,
-                        tolerance: keyframeTolerance, width: displayWidth,
-                        activeSection: context.activeSection, activeEffectID: context.activeEffectID,
-                        graphSegment: context.graphSegment, height: height
-                    )
-                    .allowsHitTesting(false)
-                    .zIndex(2)
+                if let context = workspaceContext, let playbackState {
+                    if !displayedKeyframeTimes(for: previewItem).isEmpty || context.graphSegment?.clipID == item.id {
+                        TimelinePlayheadKeyframes(
+                            playbackState: playbackState, item: previewItem, context: context,
+                            tolerance: keyframeTolerance, width: displayWidth, height: height
+                        )
+                        .allowsHitTesting(false)
+                        .zIndex(2)
+                    }
                 } else {
                     TimelineKeyframeMarkers(
                         times: displayedKeyframeTimes(for: previewItem),
@@ -705,5 +706,23 @@ struct TrimHandle: View {
             }
             .contentShape(Rectangle())
             .accessibilityLabel(edge == .leading ? "Trim start" : "Trim end")
+    }
+}
+
+/// Transport updates affect only the keyframe highlight in the workspace.
+private struct TimelinePlayheadKeyframes: View {
+    @ObservedObject var playbackState: PlaybackState
+    let item: TimelineItem
+    let context: TimelineWorkspaceContext
+    let tolerance: Double
+    let width: CGFloat
+    let height: CGFloat
+
+    var body: some View {
+        TimelineContextKeyframes(
+            item: item, currentTime: playbackState.currentTime, tolerance: tolerance, width: width,
+            activeSection: context.activeSection, activeEffectID: context.activeEffectID,
+            graphSegment: context.graphSegment, height: height
+        )
     }
 }

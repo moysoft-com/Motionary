@@ -184,3 +184,61 @@ struct CleanSharpenEffectRenderer: EffectRenderModule {
         return EffectRenderResult(image: sharpened.cropped(to: image.extent))
     }
 }
+
+
+struct InvertEffectRenderer: EffectRenderModule {
+    let moduleID: EffectModuleID = .invert
+    func render(_ image: CIImage, effect: EffectInstance, context: EffectRenderContext,
+                resources: MetalFrameResources) throws -> EffectRenderResult {
+        EffectRenderResult(image: CoreImageEffectSupport.filter("CIColorInvert", input: image).cropped(to: image.extent))
+    }
+}
+
+struct HorizontalMirrorEffectRenderer: EffectRenderModule {
+    let moduleID: EffectModuleID = .horizontalMirror
+    func render(_ image: CIImage, effect: EffectInstance, context: EffectRenderContext,
+                resources: MetalFrameResources) throws -> EffectRenderResult {
+        let transform = CGAffineTransform(a: -1, b: 0, c: 0, d: 1,
+                                          tx: image.extent.minX + image.extent.maxX, ty: 0)
+        return EffectRenderResult(image: image.transformed(by: transform).cropped(to: image.extent))
+    }
+}
+
+/// Each time slot has a deterministic duration and strength, independent of render order.
+enum FlashSampling {
+    static func intensity(time: Double, frequency: Double, duration: Double, seed: UInt64) -> Double {
+        guard time.isFinite, frequency.isFinite, duration.isFinite, frequency > 0 else { return 0 }
+        let position = min(max(time, 0) * frequency, 1e12)
+        let index = UInt64(position.rounded(.down))
+        func random(_ salt: UInt64) -> Double {
+            var value = seed &+ index &* 0x9e3779b97f4a7c15 &+ salt
+            value = (value ^ (value >> 30)) &* 0xbf58476d1ce4e5b9
+            value = (value ^ (value >> 27)) &* 0x94d049bb133111eb
+            value ^= value >> 31
+            return Double(value >> 11) / Double(UInt64(1) << 53)
+        }
+        let width = min(duration * frequency * (0.7 + 0.6 * random(1)), 0.9)
+        guard position - floor(position) < width else { return 0 }
+        return 0.65 + 0.35 * random(2)
+    }
+}
+
+struct FlashEffectRenderer: EffectRenderModule {
+    let moduleID: EffectModuleID = .flash
+    func render(_ image: CIImage, effect: EffectInstance, context: EffectRenderContext,
+                resources: MetalFrameResources) throws -> EffectRenderResult {
+        let frequency = scalar(.frequency, in: effect, at: context.clipTime)
+        let duration = scalar("duration", in: effect, at: context.clipTime)
+        let amount = scalar(.amount, in: effect, at: context.clipTime)
+        let strength = amount * FlashSampling.intensity(time: context.clipTime, frequency: frequency,
+                                                        duration: duration, seed: effect.seed)
+        guard strength > 0, case .color(let color)? = EffectRegistry.shared.resolvedValue(
+            for: "flashColor", in: effect, at: context.clipTime) else { return EffectRenderResult(image: image) }
+        let overlay = CIImage(color: CIColor(red: color.red, green: color.green, blue: color.blue,
+                                              alpha: color.alpha * strength)).cropped(to: image.extent)
+        let output = CoreImageEffectSupport.filter("CISourceAtopCompositing", input: overlay) {
+            $0.setValue(image, forKey: kCIInputBackgroundImageKey)
+        }
+        return EffectRenderResult(image: output.cropped(to: image.extent))
+    }
+}

@@ -104,6 +104,21 @@ actor ProjectRepository {
         } catch {
             throw ProjectRepositoryError.saveFailed(error.localizedDescription)
         }
+
+        let depthDirectory = DepthBakeStore.projectDirectory(in: folderURL)
+        guard fileManager.fileExists(atPath: depthDirectory.path) else { return }
+        var retainedDepthEffects: Set<UUID> = []
+        let project = content.editorProject
+        let tracks = project.tracks + project.sequences.values.flatMap(\.tracks)
+        for track in tracks {
+            for item in track.items {
+                guard let effects = item.editableVisuals?.effectStack.effects else { continue }
+                for effect in effects where effect.moduleID == .depthMap {
+                    retainedDepthEffects.insert(effect.id)
+                }
+            }
+        }
+        DepthBakeStore.removeUnusedAnalyses(in: folderURL, retaining: retainedDepthEffects)
     }
 
     private func contentURL(for projectID: UUID) -> URL {

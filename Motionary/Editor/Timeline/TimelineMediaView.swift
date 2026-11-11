@@ -33,8 +33,6 @@ struct TimelineThumbnailTile: View {
         .frame(width: tileWidth, height: height)
         .clipped()
         .task(id: taskID) {
-            try? await Task.sleep(for: .milliseconds(90))
-            guard !Task.isCancelled else { return }
             if let loaded = await loadImage() {
                 guard !Task.isCancelled else { return }
                 image = loaded
@@ -90,36 +88,39 @@ private final class TimelineThumbnailGeneratorPool: @unchecked Sendable {
     static let shared = TimelineThumbnailGeneratorPool()
 
     private let lock = NSLock()
-    private var available: [URL: [AVAssetImageGenerator]] = [:]
+    private final class Bucket {
+        var generators: [AVAssetImageGenerator] = []
+    }
+
+    private let available: NSCache<NSURL, Bucket> = {
+        let cache = NSCache<NSURL, Bucket>()
+        cache.countLimit = 16
+        return cache
+    }()
     private let maximumPerURL = 2
 
     func checkout(url: URL) -> AVAssetImageGenerator {
         lock.lock()
-        var bucket = available[url] ?? []
-        let generator: AVAssetImageGenerator
-        if let reused = bucket.popLast() {
-            generator = reused
-        } else {
-            generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-        }
-        available[url] = bucket
+        let generator = available.object(forKey: url as NSURL)?.generators.popLast()
         lock.unlock()
-        return generator
+        return generator ?? AVAssetImageGenerator(asset: AVURLAsset(url: url))
     }
 
     func checkin(_ generator: AVAssetImageGenerator, url: URL) {
         lock.lock()
-        var bucket = available[url] ?? []
-        if bucket.count < maximumPerURL {
-            bucket.append(generator)
-            available[url] = bucket
+        defer { lock.unlock() }
+        let key = url as NSURL
+        let bucket = available.object(forKey: key) ?? Bucket()
+        if bucket.generators.count < maximumPerURL {
+            bucket.generators.append(generator)
+            available.setObject(bucket, forKey: key)
         }
-        lock.unlock()
     }
+
 }
 
 private actor TimelineThumbnailGenerationLimiter {
-    static let shared = TimelineThumbnailGenerationLimiter(limit: 3)
+    static let shared = TimelineThumbnailGenerationLimiter(limit: 2)
 
     private var availablePermits: Int
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -150,8 +151,13 @@ private actor TimelineThumbnailGenerationLimiter {
 actor TimelineThumbnailTileCache {
     static let shared = TimelineThumbnailTileCache()
     private let tileCache = NSCache<NSString, UIImage>()
-    private var inFlight: [String: Task<UIImage?, Never>] = [:]
-    private var activeProjectID: UUID?
+    private struct TileLoad {
+        let id: UUID
+        let task: Task<UIImage?, Never>
+        var waiters: Set<UUID>
+    }
+
+    private var inFlight: [String: TileLoad] = [:]
     private let diskRoot: URL = {
         let root = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
@@ -162,12 +168,6 @@ actor TimelineThumbnailTileCache {
         tileCache.countLimit = 240
         tileCache.totalCostLimit = 96 * 1_024 * 1_024
         try? FileManager.default.createDirectory(at: diskRoot, withIntermediateDirectories: true)
-    }
-
-    func setActiveProject(_ projectID: UUID) {
-        if activeProjectID != projectID {
-            activeProjectID = projectID
-        }
     }
 
     func tileImage(
@@ -193,7 +193,6 @@ actor TimelineThumbnailTileCache {
         let sourceTime = clip.sourceRange.start + localSourceTime
         let key = cacheKey(
             media: media,
-            tileIndex: tileIndex,
             sourceTime: sourceTime,
             tileWidth: tileWidth,
             tileHeight: tileHeight,
@@ -203,65 +202,80 @@ actor TimelineThumbnailTileCache {
         if let cached = tileCache.object(forKey: key as NSString) {
             return cached
         }
-        if let diskImage = loadDiskImage(forKey: key) {
-            tileCache.setObject(diskImage, forKey: key as NSString, cost: imageCost(diskImage))
-            return diskImage
-        }
-
-        if let task = inFlight[key] {
-            return await withTaskCancellationHandler {
-                await task.value
-            } onCancel: {
-                task.cancel()
+        guard !Task.isCancelled else { return nil }
+        let waiter = UUID()
+        let task: Task<UIImage?, Never>
+        if var load = inFlight[key] {
+            load.waiters.insert(waiter)
+            inFlight[key] = load
+            task = load.task
+        } else {
+            let id = UUID()
+            let url = diskURL(forKey: key)
+            task = Task(priority: .utility) {
+                let image = await Self.loadTile(
+                    at: url, clip: clip, media: media, sourceTime: sourceTime,
+                    targetSize: CGSize(width: tileWidth, height: tileHeight), displayScale: displayScale
+                )
+                guard inFlight[key]?.id == id else { return nil }
+                inFlight[key] = nil
+                if let image {
+                    tileCache.setObject(image, forKey: key as NSString, cost: imageCost(image))
+                }
+                return image
             }
+            inFlight[key] = TileLoad(id: id, task: task, waiters: [waiter])
         }
-
-        let task = Task<UIImage?, Never> {
-            await TimelineThumbnailGenerationLimiter.shared.acquire()
-            guard !Task.isCancelled else {
-                await TimelineThumbnailGenerationLimiter.shared.release()
-                return nil
-            }
-            let image = await TimelineThumbnailLoader.generateImage(
-                for: clip,
-                media: media,
-                sourceTime: sourceTime,
-                targetSize: CGSize(width: tileWidth, height: tileHeight),
-                displayScale: displayScale
-            )
-            await TimelineThumbnailGenerationLimiter.shared.release()
-            return image
-        }
-        inFlight[key] = task
-        let image = await withTaskCancellationHandler {
+        return await withTaskCancellationHandler {
             await task.value
         } onCancel: {
-            task.cancel()
+            Task { await self.cancelWaiter(waiter, forKey: key) }
         }
-        inFlight[key] = nil
-        if let image {
-            tileCache.setObject(image, forKey: key as NSString, cost: imageCost(image))
-            storeDiskImage(image, forKey: key)
+    }
+
+    private func cancelWaiter(_ waiter: UUID, forKey key: String) {
+        guard var load = inFlight[key], load.waiters.remove(waiter) != nil else { return }
+        if load.waiters.isEmpty {
+            load.task.cancel()
+            inFlight[key] = nil
+        } else {
+            inFlight[key] = load
         }
+    }
+
+    private nonisolated static func loadTile(
+        at url: URL, clip: TimelineClip, media: ClipMediaDescriptor,
+        sourceTime: Double, targetSize: CGSize, displayScale: CGFloat
+    ) async -> UIImage? {
+        await TimelineThumbnailGenerationLimiter.shared.acquire()
+        let image: UIImage?
+        if Task.isCancelled {
+            image = nil
+        } else if let data = try? Data(contentsOf: url),
+            let cached = UIImage(data: data, scale: max(displayScale, 1))
+        {
+            image = cached
+        } else {
+            image = await TimelineThumbnailLoader.generateImage(
+                for: clip, media: media, sourceTime: sourceTime,
+                targetSize: targetSize, displayScale: displayScale
+            )
+            if !Task.isCancelled, let data = image?.pngData() {
+                try? data.write(to: url, options: [.atomic])
+            }
+        }
+        await TimelineThumbnailGenerationLimiter.shared.release()
         return image
     }
 
-    func removeAll() {
-        inFlight.values.forEach { $0.cancel() }
-        inFlight.removeAll()
-        tileCache.removeAllObjects()
-        activeProjectID = nil
-    }
-
     func trimForMemoryPressure() {
-        inFlight.values.forEach { $0.cancel() }
+        inFlight.values.forEach { $0.task.cancel() }
         inFlight.removeAll()
         tileCache.removeAllObjects()
     }
 
     private func cacheKey(
         media: ClipMediaDescriptor,
-        tileIndex: Int,
         sourceTime: Double,
         tileWidth: CGFloat,
         tileHeight: CGFloat,
@@ -270,7 +284,7 @@ actor TimelineThumbnailTileCache {
         [
             media.mediaID.rawValue.uuidString,
             media.mediaType.rawValue,
-            "\(tileIndex)",
+            "source-v2",
             String(format: "%.3f", sourceTime),
             "\(Int(tileWidth.rounded()))",
             "\(Int(tileHeight.rounded()))",
@@ -290,16 +304,7 @@ actor TimelineThumbnailTileCache {
         return diskRoot.appendingPathComponent("\(hashed).png")
     }
 
-    private func loadDiskImage(forKey key: String) -> UIImage? {
-        let url = diskURL(forKey: key)
-        guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else { return nil }
-        return image
-    }
 
-    private func storeDiskImage(_ image: UIImage, forKey key: String) {
-        guard let data = image.pngData() else { return }
-        try? data.write(to: diskURL(forKey: key), options: [.atomic])
-    }
 }
 
 enum TimelineThumbnailLoader {

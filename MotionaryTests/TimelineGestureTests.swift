@@ -280,6 +280,45 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    @Test func labelMovesInsideViewportWhileItsTickIsVisible() throws {
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        ruler.present(TimelineRulerSample(horizontalOffset: 120, verticalOffset: 0,
+                                          pixelsPerSecond: 88, duration: 10))
+        let band = try #require(ruler.layer.sublayers?.first)
+        let label = try #require(band.sublayers?.compactMap { $0 as? CATextLayer }.first {
+            !$0.isHidden && ($0.string as? NSAttributedString)?.string == "0:03"
+        })
+        #expect(label.frame.maxX + band.position.x <= ruler.bounds.maxX)
+
+        ruler.present(TimelineRulerSample(horizontalOffset: 170, verticalOffset: 0,
+                                          pixelsPerSecond: 88, duration: 10))
+        #expect(label.frame.maxX + band.position.x < ruler.bounds.maxX)
+    }
+
+    @MainActor
+    @Test func endLabelStaysVisibleWhenItsTickFits() throws {
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        ruler.present(TimelineRulerSample(horizontalOffset: 3 * 88, verticalOffset: 0,
+                                          pixelsPerSecond: 88, duration: 3.1))
+        let band = try #require(ruler.layer.sublayers?.first)
+        let labels = try #require(band.sublayers).compactMap { $0 as? CATextLayer }
+        let label = try #require(labels.first {
+            !$0.isHidden && ($0.string as? NSAttributedString)?.string == "0:03"
+        })
+        #expect(label.frame.maxX <= band.bounds.maxX)
+        let ticks = try #require(band.sublayers?.compactMap { $0 as? CAShapeLayer }
+            .first(where: { $0.lineWidth == 1.1 })?.path)
+        var positions: [CGFloat] = []
+        ticks.applyWithBlock { element in
+            if element.pointee.type == .moveToPoint { positions.append(element.pointee.points[0].x) }
+        }
+        let expectedX = 150 + 3 * 88 - (band.position.x + 3 * 88)
+        #expect(positions.contains { abs($0 - expectedX) < 1 })
+    }
+
+    @MainActor
     @Test func rulerClipsTicksAndLabelsAtTheActualEndOfAShortProject() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)

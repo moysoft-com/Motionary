@@ -417,10 +417,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     .intersects(plan.viewport.overscanRect)
                 else { continue }
 
-                let hasObjectMotionBlur = clip.effectStack.effects.contains {
-                    $0.isEnabled && $0.moduleID == .motionBlur
-                }
+                let hasObjectMotionBlur = clip.hasObjectMotionBlur
                 image = try measured("Adjustments and Effects", id: signpostID) {
+                    guard !clip.effectStack.effects.isEmpty else {
+                        return applyAdjustments(clip.adjustments, to: image, at: localTime)
+                    }
                     let coordinates = LayerEffectCoordinates(
                         isGeneratedLayer: isGeneratedLayer,
                         outputScale: plan.renderScale,
@@ -437,30 +438,32 @@ final class MetalFrameRenderer: @unchecked Sendable {
                             renderScale: coordinates.renderScale,
                             quality: plan.quality,
                             temporalSource: clip.temporalSource,
+                            depthAnalyses: clip.depthAnalyses,
+                            usesUnmaskedStillDepth: clip.backgroundRemoval == nil,
                             frameDuration: plan.frameDuration,
                             layerMotion: EffectLayerMotion(transform: clip.transform,
                                 canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
                                     height: plan.renderSize.height / plan.renderScale),
                                 isGenerated: isGeneratedLayer)
                         )
-                    let depthEffects = clip.effectStack.effects.filter { $0.moduleID == .depthMap }
-                    let otherEffects = clip.effectStack.effects.filter { $0.moduleID != .depthMap }
-                    renderContext.depthSourceEffects = EffectStack(effects: depthEffects)
-                    let source = try effectRegistry.render(
-                        EffectStack(effects: depthEffects),
-                        to: image.transformed(by: coordinates.inputTransform),
-                        context: renderContext, resources: frameResources,
-                        failurePolicy: plan.failurePolicy
-                    ).transformed(by: coordinates.inputTransform.inverted())
+                    renderContext.depthSourceEffects = clip.depthEffects
+                    let inverse = coordinates.inputTransform.inverted()
+                    let source: CIImage
+                    if clip.depthEffects.effects.isEmpty {
+                        source = image
+                    } else {
+                        source = try effectRegistry.render(
+                            clip.depthEffects, to: image.transformed(by: coordinates.inputTransform),
+                            context: renderContext, resources: frameResources, failurePolicy: plan.failurePolicy
+                        ).transformed(by: inverse)
+                    }
                     let colorAdjusted = applyAdjustments(clip.adjustments, to: source, at: localTime)
                     let adjusted = hasObjectMotionBlur ? applyMask(clip.mask, to: colorAdjusted) : colorAdjusted
-                    let effectOutput = try effectRegistry.render(
-                        EffectStack(effects: otherEffects),
-                        to: adjusted.transformed(by: coordinates.inputTransform),
-                        context: renderContext, resources: frameResources,
-                        failurePolicy: plan.failurePolicy
-                    )
-                    return effectOutput.transformed(by: coordinates.inputTransform.inverted())
+                    guard !clip.contentEffects.effects.isEmpty else { return adjusted }
+                    return try effectRegistry.render(
+                        clip.contentEffects, to: adjusted.transformed(by: coordinates.inputTransform),
+                        context: renderContext, resources: frameResources, failurePolicy: plan.failurePolicy
+                    ).transformed(by: inverse)
                 }
                 image = measured("Mask and Transform", id: signpostID) {
                     var transformed = image
@@ -934,6 +937,9 @@ final class MetalFrameRenderer: @unchecked Sendable {
         guard let sourceBuffer = sourceFrame(clip.trackID) else {
             // Do not promote a temporary decoder miss to a successful black
             // composite: the adapter retains the last complete frame instead.
+            AppLogger.rendering.error(
+                "AVFoundation returned no source buffer for clip \(clip.clipID.uuidString, privacy: .public), track \(clip.trackID, privacy: .public), at clip time \(localTime, privacy: .public) seconds."
+            )
             throw MetalRenderingError.sourceFrameUnavailable
         }
         if clip.backgroundRemoval?.requiresForegroundMatte == true,

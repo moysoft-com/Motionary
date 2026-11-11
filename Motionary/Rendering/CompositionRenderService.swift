@@ -155,6 +155,7 @@ enum RenderLayerRole: Sendable, Equatable {
 
 /// Per-clip information consumed by the custom video compositor.
 struct RenderClipDescriptor: @unchecked Sendable {
+    var depthAnalyses: [UUID: DepthBakeStore.Analysis] = [:]
     var layerID: UUID? = nil
     var adjustmentTargets: AdjustmentLayerTargets = AdjustmentLayerTargets()
     let trackID: CMPersistentTrackID
@@ -173,6 +174,9 @@ struct RenderClipDescriptor: @unchecked Sendable {
     let transform: ClipTransform
     let adjustments: AdjustmentSettings
     let effectStack: EffectStack
+    let depthEffects: EffectStack
+    let contentEffects: EffectStack
+    let hasObjectMotionBlur: Bool
     let mask: ItemMask?
     let backgroundRemoval: BackgroundRemovalSettings?
     let blendMode: BlendMode
@@ -227,6 +231,20 @@ struct RenderClipDescriptor: @unchecked Sendable {
         self.transform = transform
         self.adjustments = adjustments
         self.effectStack = effectStack
+        var depth = EffectStack()
+        var content = EffectStack()
+        var motionBlur = false
+        for effect in effectStack.effects {
+            if effect.moduleID == .depthMap {
+                depth.effects.append(effect)
+            } else {
+                content.effects.append(effect)
+                motionBlur = motionBlur || (effect.isEnabled && effect.moduleID == .motionBlur)
+            }
+        }
+        self.depthEffects = depth
+        self.contentEffects = content
+        self.hasObjectMotionBlur = motionBlur
         self.mask = mask
         self.backgroundRemoval = backgroundRemoval
         self.blendMode = blendMode
@@ -618,6 +636,16 @@ private struct PreviewRenderGraph {
     let topology: PreviewTopology
     let rendered: RenderedComposition
     let renderDescriptors: [RenderClipDescriptor]
+    let depthClips: [UUID: RenderClipDescriptor]
+
+    init(topology: PreviewTopology, rendered: RenderedComposition, renderDescriptors: [RenderClipDescriptor]) {
+        self.topology = topology
+        self.rendered = rendered
+        self.renderDescriptors = renderDescriptors
+        depthClips = renderDescriptors.reduce(into: [:]) { result, clip in
+            if !clip.depthAnalyses.isEmpty { result[clip.clipID] = clip }
+        }
+    }
 }
 
 /// Packs cuts from the same decoded source into a few composition tracks.
@@ -847,6 +875,24 @@ private actor PreviewAudioEnvelopePreparer {
     }
 }
 
+/// Repeated cuts in one build use the same metadata snapshot. The shared
+/// asset cache still checks file identity on the first access of each build.
+private struct CompositionMediaLookup {
+    let cache: MediaAssetCache
+    private var assets: [URL: CachedMediaAsset] = [:]
+
+    init(cache: MediaAssetCache) {
+        self.cache = cache
+    }
+
+    mutating func metadata(for url: URL) async throws -> CachedMediaAsset {
+        if let asset = assets[url] { return asset }
+        let asset = try await cache.metadata(for: url)
+        assets[url] = asset
+        return asset
+    }
+}
+
 /// Converts an editor project into AVFoundation preview/export assets.
 final class CompositionRenderService {
     private let timescale: CMTimeScale = 600
@@ -854,6 +900,7 @@ final class CompositionRenderService {
     private let assetCache: MediaAssetCache
     private let previewProxyStore: PreviewProxyStore?
     private let reusesPreviewVideoTracks: Bool
+    private let depthCacheDirectory: URL?
     private let stillImageValidationCache = StillImageValidationCache()
     private let previewAudioEnvelopePreparer = PreviewAudioEnvelopePreparer()
     let livePreviewState = LivePreviewRenderState()
@@ -865,11 +912,25 @@ final class CompositionRenderService {
     init(
         assetCache: MediaAssetCache = .shared,
         previewProxyStore: PreviewProxyStore? = .shared,
-        reusesPreviewVideoTracks: Bool = true
+        reusesPreviewVideoTracks: Bool = true,
+        depthCacheDirectory: URL? = nil
     ) {
         self.assetCache = assetCache
         self.previewProxyStore = previewProxyStore
         self.reusesPreviewVideoTracks = reusesPreviewVideoTracks
+        self.depthCacheDirectory = depthCacheDirectory
+    }
+
+    private static func prepareTopology(_ project: EditorProject) async -> PreviewTopology {
+        PreviewTopology(project: project)
+    }
+
+    @MainActor
+    func canApplyLiveDepth(in stack: EffectStack, to itemID: UUID) -> Bool {
+        let descriptor = previewGraph?.depthClips[itemID]
+        return stack.effects.allSatisfy { effect in
+            !effect.isEnabled || effect.moduleID != .depthMap || descriptor?.hasPreparedDepth(for: effect) == true
+        }
     }
 
     @MainActor
@@ -910,7 +971,9 @@ final class CompositionRenderService {
                 signpostID: signpostID
             )
         }
-        let topology = PreviewTopology(project: project)
+        let topology = await Self.prepareTopology(project)
+        try Task.checkCancellation()
+        guard preparationGeneration == previewPreparationGeneration else { throw CancellationError() }
         let renderSettings = previewRenderSettings(
             for: project,
             quality: quality,
@@ -979,13 +1042,14 @@ final class CompositionRenderService {
         guard let graph = previewGraph else { return nil }
         let descriptors: [RenderClipDescriptor]
         if invalidation.contains(.previewFrame) {
-            descriptors = try await compileRenderDescriptors(
+            let compiled = try await compileRenderDescriptors(
                 project: project,
                 visualTrackIDs: graph.rendered.visualTrackIDs,
                 sourceTransforms: graph.rendered.sourceTransforms,
                 backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
                 backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
             )
+            descriptors = try await DepthBakeStore.prepare(compiled, projectDirectory: depthCacheDirectory)
         } else {
             descriptors = graph.renderDescriptors
         }
@@ -993,9 +1057,6 @@ final class CompositionRenderService {
         guard preparationGeneration == previewPreparationGeneration else {
             throw CancellationError()
         }
-        try await DepthBakeStore.prepare(descriptors)
-        try Task.checkCancellation()
-        guard preparationGeneration == previewPreparationGeneration else { throw CancellationError() }
         let videoComposition =
             invalidation.contains(.previewFrame)
             ? makeVideoComposition(
@@ -1021,7 +1082,7 @@ final class CompositionRenderService {
                     ?? kCMPersistentTrackID_Invalid,
                 duration: project.duration,
                 qualityProfile: quality.renderQualityProfile,
-                failurePolicy: .skipUnavailableEffects,
+                failurePolicy: .failOnUnavailableEffects,
                 livePreviewState: livePreviewState,
                 renderSessionID: renderSessionID
             )
@@ -1134,14 +1195,16 @@ final class CompositionRenderService {
 
     func makePosterComposition(
         for project: EditorProject,
-        renderSettings: RenderSettings
+        renderSettings: RenderSettings,
+        depthCacheDirectory: URL? = nil
     ) async throws -> RenderedComposition {
         try await makeComposition(
             for: project,
             renderSettings: renderSettings,
             backgroundRemovalPolicy: .omitUnavailable,
             qualityProfile: .balanced,
-            failurePolicy: .skipUnavailableEffects
+            failurePolicy: .skipUnavailableEffects,
+            depthCacheDirectory: depthCacheDirectory
         )
     }
 
@@ -1154,9 +1217,11 @@ final class CompositionRenderService {
         livePreviewState: LivePreviewRenderState? = nil,
         renderSessionID: UUID = UUID(),
         usesPreviewProxies: Bool = false,
-        displayPixelSize: CGSize? = nil
+        displayPixelSize: CGSize? = nil,
+        depthCacheDirectory: URL? = nil
     ) async throws -> RenderedComposition {
         let composition = AVMutableComposition()
+        var mediaLookup = CompositionMediaLookup(cache: assetCache)
         var renderClips: [RenderClipDescriptor] = []
         var audioParameters: [AVAudioMixInputParameters] = []
         var visualTrackIDs: [UUID: CMPersistentTrackID] = [:]
@@ -1181,6 +1246,7 @@ final class CompositionRenderService {
                     try await insertVisualItem(
                         source: TimelineVisualSource(mediaItem),
                         project: project,
+                        mediaLookup: &mediaLookup,
                         proxyStore: usesPreviewProxies ? previewProxyStore : nil,
                         previewVideoTracks: previewVideoTracks,
                         frameRate: renderSettings.frameRate,
@@ -1202,6 +1268,7 @@ final class CompositionRenderService {
                     try await insertVisualItem(
                         source: TimelineVisualSource(shapeItem),
                         project: project,
+                        mediaLookup: &mediaLookup,
                         proxyStore: usesPreviewProxies ? previewProxyStore : nil,
                         frameRate: renderSettings.frameRate,
                         composition: composition,
@@ -1300,7 +1367,7 @@ final class CompositionRenderService {
                 }
                 let metadata: CachedMediaAsset
                 do {
-                    metadata = try await assetCache.metadata(for: asset.url)
+                    metadata = try await mediaLookup.metadata(for: asset.url)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -1372,7 +1439,9 @@ final class CompositionRenderService {
             for: renderClips,
             videoClockTrackID: videoClockTrackID
         )
-        try await DepthBakeStore.prepare(renderClips)
+        renderClips = try await DepthBakeStore.prepare(
+            renderClips, projectDirectory: depthCacheDirectory ?? self.depthCacheDirectory
+        )
         try Task.checkCancellation()
         let videoComposition = makeVideoComposition(
             renderSettings: renderSettings,
@@ -1391,7 +1460,7 @@ final class CompositionRenderService {
                 ?? kCMPersistentTrackID_Invalid,
             duration: duration,
             qualityProfile: qualityProfile,
-            failurePolicy: failurePolicy,
+            failurePolicy: livePreviewState == nil ? failurePolicy : .failOnUnavailableEffects,
             livePreviewState: livePreviewState,
             renderSessionID: renderSessionID
         )
@@ -1549,8 +1618,11 @@ final class CompositionRenderService {
         frameRate: Int32,
         composition: AVMutableComposition
     ) async throws -> CMPersistentTrackID? {
+        // A fixed, all-intra clock can repeat without encoding thousands of
+        // invisible frames on project open, trimming or changing duration.
+        let segmentDuration = CMTime(value: 4, timescale: 1)
         let url = try await MediaConversionHelper.blankVideoClockURL(
-            duration: duration,
+            duration: segmentDuration.seconds,
             frameRate: frameRate
         )
         try Task.checkCancellation()
@@ -1562,11 +1634,18 @@ final class CompositionRenderService {
                 preferredTrackID: kCMPersistentTrackID_Invalid
             )
         else { return nil }
-        try destinationTrack.insertTimeRange(
-            CMTimeRange(start: .zero, duration: cmTime(duration)),
-            of: sourceTrack,
-            at: .zero
-        )
+        let end = cmTime(duration)
+        var cursor = CMTime.zero
+        while cursor < end {
+            try Task.checkCancellation()
+            let length = min(segmentDuration, end - cursor)
+            try destinationTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: length),
+                of: sourceTrack,
+                at: cursor
+            )
+            cursor = cursor + length
+        }
         return destinationTrack.trackID
     }
 
@@ -1638,6 +1717,7 @@ final class CompositionRenderService {
     private func insertVisualItem(
         source: TimelineVisualSource,
         project: EditorProject,
+        mediaLookup: inout CompositionMediaLookup,
         proxyStore: PreviewProxyStore? = nil,
         previewVideoTracks: PreviewVideoTrackPool? = nil,
         frameRate: Int32,
@@ -1749,7 +1829,7 @@ final class CompositionRenderService {
 
         let metadata: CachedMediaAsset
         do {
-            metadata = try await assetCache.metadata(for: mediaAsset.url)
+            metadata = try await mediaLookup.metadata(for: mediaAsset.url)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -1767,7 +1847,7 @@ final class CompositionRenderService {
         if source.mediaType == .video, let proxyStore {
             do {
                 if let proxy = try await proxyStore.availableProxy(source: metadata) {
-                    videoMetadata = try await assetCache.metadata(for: proxy.url)
+                    videoMetadata = try await mediaLookup.metadata(for: proxy.url)
                     sourcePixelTransform = proxy.sourcePixelTransform
                 }
             } catch is CancellationError {
@@ -1849,7 +1929,7 @@ final class CompositionRenderService {
 
             if artifactIsAvailable, let artifact {
                 do {
-                    let maskMetadata = try await assetCache.metadata(for: artifact.url)
+                    let maskMetadata = try await mediaLookup.metadata(for: artifact.url)
                     try Task.checkCancellation()
                     guard let maskSourceTrack = maskMetadata.videoTrack,
                         let maskCompositionTrack = composition.addMutableTrack(
@@ -1882,13 +1962,38 @@ final class CompositionRenderService {
                 }
             }
         }
+        // The compositor must agree with AVFoundation's actual source-track
+        // coverage at clip edges. Retiming and composition timescale rounding
+        // can move those edges by a fraction of a frame from the model's raw
+        // Double range, which otherwise schedules a source lookup with no
+        // decoded buffer.
+        let renderRange: CMTimeRange
+        if usesSharedTrack {
+            renderRange = CMTimeRange(
+                start: cmTime(source.timelineStart),
+                duration: cmTime(source.timelineDuration)
+            )
+        } else {
+            // A composition track includes the empty edit preceding a clip
+            // inserted after time zero. Its timeRange therefore describes the
+            // whole track, not the interval containing decoded video.
+            let populatedSegments = compositionVideoTrack.segments.filter { !$0.isEmpty }
+            if let first = populatedSegments.first, let last = populatedSegments.last {
+                renderRange = CMTimeRange(
+                    start: first.timeMapping.target.start,
+                    end: last.timeMapping.target.end
+                )
+            } else {
+                renderRange = CMTimeRange(start: cmTime(source.timelineStart), duration: .zero)
+            }
+        }
         renderClips.append(
             RenderClipDescriptor(
                 trackID: compositionVideoTrack.trackID,
                 backgroundMaskTrackID: backgroundMaskTrackID,
                 clipID: source.id,
-                timelineStart: source.timelineStart,
-                duration: source.timelineDuration,
+                timelineStart: renderRange.start.seconds,
+                duration: renderRange.duration.seconds,
                 sourceTransform: sourceTransform,
                 backgroundMaskSourceTransform: backgroundMaskSourceTransform,
                 transform: visuals.transform,
@@ -1901,9 +2006,15 @@ final class CompositionRenderService {
                 shape: source.shape,
                 text: nil,
                 renderOrder: renderOrder,
-                temporalSource: EffectTemporalSource(url: mediaAsset.url,
-                    sourceStart: source.sourceRange.start, sourceDuration: source.sourceRange.duration,
-                    speedMap: source.speedMap, backgroundMatteURL: mediaAsset.backgroundRemovalArtifact?.url)
+                temporalSource: source.mediaType == .video
+                    ? EffectTemporalSource(
+                        url: mediaAsset.url,
+                        sourceStart: source.sourceRange.start,
+                        sourceDuration: source.sourceRange.duration,
+                        speedMap: source.speedMap,
+                        backgroundMatteURL: mediaAsset.backgroundRemovalArtifact?.url
+                    )
+                    : nil
             )
         )
         renderOrder += 1

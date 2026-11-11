@@ -71,25 +71,6 @@ private func copyTransferredFile(_ sourceURL: URL, fallbackExtension: String) th
 
 /// Copies selected media into project storage and derives render metadata.
 struct MediaImportService {
-    /// Warms the disposable 960p all-intra preview proxy in the background so
-    /// opening the editor never pays a transcode on the composition-critical
-    /// path. Failures are silent on purpose: composition falls back to the
-    /// original source and rebuilds the proxy on demand.
-    static func warmPreviewProxy(for storedURL: URL) {
-        guard storedURL.isFileURL,
-            FileManager.default.fileExists(atPath: storedURL.path)
-        else { return }
-        Task(priority: .utility) {
-            do {
-                let metadata = try await MediaAssetCache.shared.metadata(for: storedURL)
-                guard !Task.isCancelled else { return }
-                _ = try await PreviewProxyStore.shared.prepare(source: metadata)
-            } catch {
-                // Disposable cache: absence only costs a later on-demand build.
-            }
-        }
-    }
-
     func importPhotosItem(_ item: PhotosPickerItem, projectID: UUID, projectStore: ProjectStore) async throws
         -> ImportedMedia
     {
@@ -103,9 +84,6 @@ struct MediaImportService {
             var source = try await makeSource(for: transferred.url, fallbackMediaType: .video)
             let storedURL = try projectStore.storeMedia(from: transferred.url, projectID: projectID)
             source.url = storedURL
-            if source.mediaType == .video {
-                Self.warmPreviewProxy(for: storedURL)
-            }
             return ImportedMedia(source: source, storedURL: storedURL)
         }
 

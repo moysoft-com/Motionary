@@ -235,4 +235,82 @@ struct DepthMapEffectTests {
         #expect(DepthModel.shared.predictionCount == preparedCount)
     }
 
+    @Test func projectDepthPersistsAcrossPreparationAndIsDeletedWithTheEffect() async throws {
+        let (url, _) = try await makeDepthVideo()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let projectID = UUID()
+        let folder = root.appendingPathComponent("project_\(projectID.uuidString)")
+        let depthDirectory = DepthBakeStore.projectDirectory(in: folder)
+        let repository = ProjectRepository(rootURL: root)
+        let media = MediaAsset(id: MediaID(), source: ClipSource(
+            url: url, mediaType: .video, originalDuration: 4.0 / 24
+        ))
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .depthMap))
+        let otherEffect = try #require(EffectRegistry.shared.makeEffect(moduleID: .depthMap))
+        var item = MediaTimelineItem(
+            name: "Depth", mediaID: media.id, mediaType: .video,
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4.0 / 24)
+        )
+        item.visuals.effectStack.effects = [effect, otherEffect]
+        var project = EditorProject(title: "Depth", mediaLibrary: [media.id: media], tracks: [
+            TimelineTrack(name: "Video", kind: .visual, items: [.media(item)])
+        ])
+        try await repository.save(ProjectContent(editorProject: project), projectID: projectID)
+
+        func descriptor(effect: EffectInstance, sourceStart: Double = 0) -> RenderClipDescriptor {
+            RenderClipDescriptor(trackID: 42, backgroundMaskTrackID: nil, clipID: item.id,
+                timelineStart: 0, duration: 10, sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+                transform: ClipTransform(), adjustments: AdjustmentSettings(), effectStack: EffectStack(effects: [effect]),
+                mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1, shape: nil, text: nil,
+                renderOrder: 0, temporalSource: EffectTemporalSource(
+                    url: url, sourceStart: sourceStart, sourceDuration: 10, speedMap: .constant(speed: 1)
+                ))
+        }
+
+        let beforePreparation = DepthModel.shared.predictionCount
+        let prepared = try await DepthBakeStore.prepare(
+            [descriptor(effect: effect), descriptor(effect: otherEffect)], projectDirectory: depthDirectory
+        )
+        #expect(DepthModel.shared.predictionCount == beforePreparation)
+        let analysis = try #require(prepared[0].depthAnalyses[effect.id])
+        let track = try #require(analysis.track)
+        _ = try DepthBakeStore.shared.image(track: track, time: 0.02)
+        let firstFrameCount = DepthModel.shared.predictionCount
+        #expect(firstFrameCount - beforePreparation <= 3)
+        #expect(FileManager.default.fileExists(atPath: track.directory.appendingPathComponent("0.png").path))
+
+        var styled = effect
+        styled.parameters["depthStyle"] = EffectParameterState(baseValue: .option("Thermal"))
+        var stabilized = styled
+        stabilized.parameters["depthStability"] = EffectParameterState(baseValue: .option("High"))
+        #expect(prepared[0].hasPreparedDepth(for: styled))
+        #expect(!prepared[0].hasPreparedDepth(for: stabilized))
+        let reopened = try await DepthBakeStore.prepare(
+            [descriptor(effect: styled), descriptor(effect: stabilized), descriptor(effect: styled, sourceStart: 1.0 / 24)],
+            projectDirectory: depthDirectory
+        )
+        let reopenedTrack = try #require(reopened[0].depthAnalyses[effect.id]?.track)
+        let stabilizedTrack = try #require(reopened[1].depthAnalyses[effect.id]?.track)
+        let trimmedTrack = try #require(reopened[2].depthAnalyses[effect.id]?.track)
+        #expect(reopenedTrack.directory == track.directory)
+        #expect(stabilizedTrack.directory != track.directory)
+        #expect(trimmedTrack.directory != track.directory)
+        #expect(stabilizedTrack.rawDirectory == track.rawDirectory)
+        #expect(trimmedTrack.rawDirectory == track.rawDirectory)
+        _ = try DepthBakeStore.shared.image(track: reopenedTrack, time: 0.02)
+        _ = try DepthBakeStore.shared.image(track: stabilizedTrack, time: 0.02)
+        #expect(DepthModel.shared.predictionCount == firstFrameCount)
+
+        item.visuals.effectStack.effects = [otherEffect]
+        project.tracks[0].items[0] = .media(item)
+        try await repository.save(ProjectContent(editorProject: project), projectID: projectID)
+        #expect(!FileManager.default.fileExists(atPath: analysis.directory.path))
+        let otherAnalysis = try #require(prepared[1].depthAnalyses[otherEffect.id])
+        #expect(FileManager.default.fileExists(atPath: otherAnalysis.directory.path))
+    }
+
 }

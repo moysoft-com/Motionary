@@ -126,7 +126,7 @@ final class TimelineRulerSurface: UIView {
 
     private func rebuildBand(_ layout: Layout) {
         let projectEndX = layout.width / 2 + CGFloat(layout.duration) * layout.pixelsPerSecond - windowOrigin
-        band.bounds = CGRect(x: 0, y: 0, width: min(layout.width * 3, projectEndX), height: 30)
+        band.bounds = CGRect(x: 0, y: 0, width: min(layout.width * 3, projectEndX + 64), height: 30)
         majorTicks.frame = band.bounds
         minorTicks.frame = band.bounds
         let color = UIColor.label.resolvedColor(with: traitCollection)
@@ -158,18 +158,21 @@ final class TimelineRulerSurface: UIView {
                 let x = pixelAligned(layout.width / 2 + CGFloat(time) * layout.pixelsPerSecond) - windowOrigin
                 let isMajor = index.isMultiple(of: majorStride)
                 let tick = isMajor ? majorTicks : minorTicks
-                if x + tick.lineWidth / 2 <= projectEndX {
+                let tickFits = x + tick.lineWidth / 2 <= projectEndX
+                if tickFits {
                     let path = isMajor ? majorPath : minorPath
                     path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
                     path.addLine(to: CGPoint(x: x, y: 29))
                 }
-                if isMajor {
+                if isMajor && tickFits {
                     let text = NSAttributedString(string: formatRulerTime(time, interval: majorInterval), attributes: attributes)
                     let size = text.size()
                     let width = ceil(size.width) + 2
                     let height = ceil(size.height)
-                    let frame = CGRect(x: x + 22 - width / 2, y: 10 - height / 2, width: width, height: height)
-                    if frame.maxX <= projectEndX {
+                    let startX = layout.width / 2 - windowOrigin
+                    let labelX = x + 22 - width / 2
+                    let frame = CGRect(x: labelX, y: 10 - height / 2, width: width, height: height)
+                    if frame.minX >= startX {
                         updateLabel(at: labelCount, text: text, frame: frame)
                         labelCount += 1
                     }

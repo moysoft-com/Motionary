@@ -9,7 +9,12 @@ extension EditorViewModel {
         guard !previewIsSuspended, !isPlaying, !playbackState.isStartingPlayback,
             !pendingPlaybackResumeAfterPreviewRebuild else { return }
         let clamped = clampedPlayableTime(time)
-        lastScrubDirection = clamped - currentTime
+        let movement = clamped - currentTime
+        if movement != 0 {
+            lastScrubDirection = movement
+            scrubPrefetchTask?.cancel()
+            scrubPrefetchTask = nil
+        }
         updateCurrentTime(clamped)
         guard isScrubbing else {
             seekPlayer(to: clamped, exact: false)
@@ -22,38 +27,30 @@ extension EditorViewModel {
         // latest position as soon as the new graph is installed.
         guard !pendingPreviewInvalidation.contains(.compositionTopology) else { return }
         let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
-        let target = floor(clampedPlayableTime(clamped) / frameDuration + 0.000_001) * frameDuration
-        let presentationTime = livePreviewPresentationTime(target)
-        if let frame = renderService.livePreviewState.cachedFrame(at: presentationTime,
+        let target = currentScrubPresentationTime()
+        if let frame = renderService.livePreviewState.cachedFrame(at: target,
                                                                   sessionID: previewRenderSessionID) {
             pendingScrubSeekTime = nil
-            livePreviewPresentation.setFrame(frame, at: presentationTime)
+            livePreviewPresentation.setFrame(frame, at: target)
             prefetchScrubNeighbors(from: target, frameDuration: frameDuration)
             return
         }
         // Only hold a nearby frame from the current edit revision. A pre-edit
         // timestamp may now refer to a different part of the source video.
         if let near = renderService.livePreviewState.cachedFrameNear(
-            at: presentationTime, sessionID: previewRenderSessionID, window: frameDuration)
+            at: target, sessionID: previewRenderSessionID, window: frameDuration)
         {
             livePreviewPresentation.setFrame(near.frame, at: near.time)
         }
-        pendingScrubSeekTime = CMTimeGetSeconds(CMTime(
-            seconds: target, preferredTimescale: 600
-        ))
+        pendingScrubSeekTime = target
         scheduleLatestScrubSeek()
     }
 
-    /// Best-effort warm of the next few composed frames in the current scrub
-    /// direction. Prefetch renders through the compositor's paused-frame path
-    /// (which caches its result) and only fires while the render queue is idle
-    /// and the device is not thermally throttled, so it can never delay the
-    /// frame the user is waiting for. Compressed-video steps at a new time are
-    /// cheap no-ops here (`renderPausedFrame` declines them); the win is for
-    /// generated/image layers whose frames can be composed without a seek.
+    /// At most one speculative GPU frame is submitted at a time. Delay it
+    /// until input settles, and try the reverse neighbor as well for turnarounds.
     private func prefetchScrubNeighbors(from target: Double, frameDuration: Double) {
         guard isScrubbing, !isScrubSeekInFlight, scrubSeekTask == nil,
-            !isRenderingPreview, !livePreviewFrameRefreshInFlight,
+            scrubPrefetchTask == nil, !isRenderingPreview, !livePreviewFrameRefreshInFlight,
             ProcessInfo.processInfo.thermalState != .serious,
             ProcessInfo.processInfo.thermalState != .critical,
             abs(lastScrubDirection) > 0.000_001
@@ -61,25 +58,29 @@ extension EditorViewModel {
         let direction: Double = lastScrubDirection > 0 ? 1 : -1
         let sessionID = previewRenderSessionID
         let generation = scrubSessionGeneration
-        scrubPrefetchTask?.cancel()
         scrubPrefetchTask = Task { [weak self] in
-            for step in [1, 2] {
-                guard !Task.isCancelled else { return }
-                guard let self,
-                    self.scrubSessionGeneration == generation,
-                    self.isScrubbing,
-                    self.previewRenderSessionID == sessionID
+            try? await Task.sleep(for: .milliseconds(25))
+            guard !Task.isCancelled, let self else { return }
+            defer { if !Task.isCancelled { self.scrubPrefetchTask = nil } }
+            for step in [direction, -direction] {
+                guard !Task.isCancelled, self.scrubSessionGeneration == generation,
+                    self.isScrubbing, !self.isScrubSeekInFlight,
+                    self.previewRenderSessionID == sessionID,
+                    self.currentScrubPresentationTime() == target
                 else { return }
-                let candidate = min(max(target + direction * Double(step) * frameDuration, 0), self.duration)
-                let candidateTime = floor(
-                    self.clampedPlayableTime(candidate) / frameDuration + 0.000_001) * frameDuration
-                guard self.renderService.livePreviewState.cachedFrame(
-                    at: self.livePreviewPresentationTime(candidateTime),
-                    sessionID: sessionID) == nil
-                else { continue }
-                _ = self.renderService.livePreviewState.renderPausedFrame(
-                    at: self.livePreviewPresentationTime(candidateTime), sessionID: sessionID,
-                    completion: { _ in })
+                let candidate = target + step * frameDuration
+                guard candidate >= 0, candidate <= self.lastPlayableTime + 0.000_001 else { continue }
+                let time = CMTime(seconds: candidate, preferredTimescale: max(self.project.renderSettings.frameRate, 1)).seconds
+                let state = self.renderService.livePreviewState
+                guard state.cachedFrame(at: time, sessionID: sessionID) == nil else { continue }
+                let rendered: Bool = await withCheckedContinuation { continuation in
+                    if !state.renderPausedFrame(at: time, sessionID: sessionID, completion: {
+                        continuation.resume(returning: $0 != nil)
+                    }) {
+                        continuation.resume(returning: false)
+                    }
+                }
+                if !rendered { return }
             }
         }
     }
@@ -167,7 +168,7 @@ extension EditorViewModel {
         // Generated/image-only intervals need no decoder movement. Reuse the
         // live Metal renderer at the requested time, at normal preview quality.
         if renderService.livePreviewState.renderPausedFrame(
-            at: livePreviewPresentationTime(target), sessionID: previewRenderSessionID,
+            at: target, sessionID: previewRenderSessionID,
             completion: { [weak self, weak player] frame in
                 Task { @MainActor in
                     guard let self, let player, self.player === player,
@@ -189,7 +190,12 @@ extension EditorViewModel {
                         self.lastIssuedScrubSeekTime = nil
                         if self.pendingScrubSeekTime == nil { self.pendingScrubSeekTime = target }
                     }
-                    if self.pendingScrubSeekTime != nil { self.scheduleLatestScrubSeek() }
+                    if self.pendingScrubSeekTime != nil {
+                        self.scheduleLatestScrubSeek()
+                    } else if frame != nil, self.currentScrubPresentationTime() == target {
+                        self.prefetchScrubNeighbors(
+                            from: target, frameDuration: 1 / Double(max(self.project.renderSettings.frameRate, 1)))
+                    }
                 }
             }
         ) { return }
@@ -200,20 +206,13 @@ extension EditorViewModel {
                 self.scrubSeekGeneration == seekGeneration,
                 self.scrubSessionGeneration == sessionGeneration
             else { return }
-            // Older AVPlayer versions can acknowledge the first decoded seek
-            // without asking the compositor for a frame. Bootstrap the
-            // gesture with a rendered image before allowing early completion.
-            let item = player.currentItem
-            let needsFirstFrame = self.livePreviewPresentation.frame == nil
-            if needsFirstFrame { item?.seekingWaitsForVideoCompositionRendering = true }
-            let frameDuration = 1 / Double(max(self.project.renderSettings.frameRate, 1))
-            let remaining = max(self.livePreviewPresentationTime(self.lastPlayableTime) - target, 0)
             let didSeek = await self.boundedSeek(
                 player: player,
                 to: target,
-                toleranceBefore: CMTime(seconds: frameDuration, preferredTimescale: 600),
-                toleranceAfter: CMTime(seconds: min(frameDuration, remaining), preferredTimescale: 600),
-                timeoutNanoseconds: 2_500_000_000
+                toleranceBefore: .zero,
+                toleranceAfter: .zero,
+                timeoutNanoseconds: 2_500_000_000,
+                frameAligned: true
             )
             os_signpost(
                 .end,
@@ -222,9 +221,6 @@ extension EditorViewModel {
                 signpostID: signpostID
             )
             guard self.scrubSeekGeneration == seekGeneration else { return }
-            if needsFirstFrame, player.currentItem === item {
-                item?.seekingWaitsForVideoCompositionRendering = false
-            }
             self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
             self.isScrubSeekInFlight = false
             if didSeek != .completed { self.lastIssuedScrubSeekTime = nil }
@@ -261,9 +257,8 @@ extension EditorViewModel {
     }
 
     func currentScrubPresentationTime() -> Double {
-        let step = 1 / Double(max(project.renderSettings.frameRate, 1))
-        let time = floor(clampedPlayableTime(currentTime) / step + 0.000_001) * step
-        return livePreviewPresentationTime(time)
+        let frameRate = Double(max(project.renderSettings.frameRate, 1))
+        return floor(clampedPlayableTime(currentTime) * frameRate + 0.000_001) / frameRate
     }
 
     private func scrubSeekMinimumInterval() -> CFTimeInterval {

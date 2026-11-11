@@ -181,9 +181,9 @@ final class EditorViewModel: ObservableObject {
 
     let projectID: UUID
     let projectStore: ProjectStore
-    let renderService = CompositionRenderService()
+    let renderService: CompositionRenderService
     let importService = MediaImportService()
-    let exportService = VideoExportService()
+    let exportService: VideoExportService
     var timeObserver: Any?
     var previewItemStatusObservation: NSKeyValueObservation?
     var previewItemNotificationObservers: [NSObjectProtocol] = []
@@ -200,7 +200,8 @@ final class EditorViewModel: ObservableObject {
     /// view. Preview rendering sizes itself to this surface (never above the
     /// 960 budget) so older devices with small surfaces skip fill rate that
     /// would only be upscaled away. Nil preserves the 960-only behavior.
-    var previewDisplayPixelSize: CGSize?
+    private(set) var previewDisplayPixelSize: CGSize?
+    private var lastRequestedPreviewDimension: Double?
     var scrubSeekTask: Task<Void, Never>?
     var scrubPrefetchTask: Task<Void, Never>?
     var lastScrubDirection: Double = 0
@@ -363,6 +364,9 @@ final class EditorViewModel: ObservableObject {
     init(projectID: UUID, projectStore: ProjectStore, initialContent: ProjectContent) {
         self.projectID = projectID
         self.projectStore = projectStore
+        let depthDirectory = DepthBakeStore.projectDirectory(in: projectStore.projectFolderURL(for: projectID))
+        self.renderService = CompositionRenderService(previewProxyStore: nil, depthCacheDirectory: depthDirectory)
+        self.exportService = VideoExportService(depthCacheDirectory: depthDirectory)
         self.project = initialContent.editorProject
         self.selectionState.trackID =
             initialContent.editorProject.tracks.first(where: { $0.kind == .visual })?.id
@@ -434,20 +438,27 @@ final class EditorViewModel: ObservableObject {
         }
         let previousSize = previewDisplayPixelSize
         guard previousSize != sanitized else { return }
-        let oldEffective = previewEffectiveRenderDimension()
+        let previousDimension = lastRequestedPreviewDimension ?? previewEffectiveRenderDimension()
         previewDisplayPixelSize = sanitized
-        guard previewQuality.maximumDimension != nil, sanitized != nil else { return }
-        // Materiality is judged on the effective render dimension, not the
-        // raw rectangle, so stable windows do not rebuild on subpixel layout.
-        if abs(previewEffectiveRenderDimension() - oldEffective) >= 16 {
-            schedulePreviewRebuild(seekTo: currentTime, invalidation: [.previewFrame])
+        guard previewQuality.maximumDimension != nil else { return }
+        let dimension = previewEffectiveRenderDimension()
+        // Compare against the last requested render size so a series of small
+        // layout updates can still cross the threshold.
+        if abs(dimension - previousDimension) >= 16 {
+            lastRequestedPreviewDimension = dimension
+            if player != nil || isRenderingPreview {
+                schedulePreviewRebuild(seekTo: currentTime, invalidation: [.previewFrame])
+            }
+        } else if lastRequestedPreviewDimension == nil {
+            lastRequestedPreviewDimension = previousDimension
         }
     }
 
     private func previewEffectiveRenderDimension() -> Double {
         guard let maximum = previewQuality.maximumDimension else { return .infinity }
-        guard let size = previewDisplayPixelSize else { return maximum }
-        return min(maximum, max(Double(size.width), Double(size.height)))
+        let canvas = Double(max(project.renderSettings.width, project.renderSettings.height))
+        guard let size = previewDisplayPixelSize else { return min(canvas, maximum) }
+        return min(canvas, maximum, max(Double(size.width), Double(size.height)))
     }
 
     func indexedTimelineItem(id: UUID) -> TimelineItem? {

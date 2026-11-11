@@ -784,6 +784,20 @@ extension EffectRegistry {
     }
 
     private static let motionModules: [EffectModuleDescriptor] = [
+        module(.invert, "Invert", .essentials, "circle.lefthalf.filled",
+            "Invert image colors.", mix: 1, previewMix: 1,
+            renderer: { InvertEffectRenderer() }, parameters: []),
+        module(.horizontalMirror, "Mirror", .distortion, "arrow.left.and.right",
+            "Flip the image horizontally.", mix: 1, previewMix: 1,
+            renderer: { HorizontalMirrorEffectRenderer() }, parameters: []),
+        module(.flash, "Flash", .essentials, "bolt.fill",
+            "Irregular flashes of an adjustable color.", mix: 1, previewMix: 1,
+            renderer: { FlashEffectRenderer() }, parameters: [
+                scalar(.frequency, "Speed (Hz)", "speedometer", 3, 3, range: 0.1...15, step: 0.1, unit: .unitless),
+                scalar(.amount, "Intensity", "circle.lefthalf.filled", 1, 1),
+                scalar("duration", "Duration (s)", "clock", 0.08, 0.08, range: 0.01...1, step: 0.01, unit: .unitless),
+                colorParameter("flashColor", "Flash Color", .black)
+            ]),
         module(.shake, "Shake", .essentials, "waveform.path",
             "Fast camera impacts with adjustable axes, rotation and decay.", mix: 1, previewMix: 1,
             renderer: { CameraMotionEffectRenderer(moduleID: .shake) }, parameters: [
@@ -822,7 +836,7 @@ extension EffectRegistry {
                 scalar("offsetY", "Offset Y", "arrow.up.and.down", 0, 0, range: -1...1),
                 edges()
             ]),
-        module(.mirror, "Mirror", .distortion, "arrow.left.and.right.righttriangle.left.righttriangle.right",
+        module(.mirror, "Angular Reflection", .distortion, "arrow.left.and.right.righttriangle.left.righttriangle.right",
             "Reflect one side across a movable vertical, horizontal or angled axis.", mix: 1, previewMix: 1,
             renderer: { CameraMotionEffectRenderer(moduleID: .mirror) }, parameters: [
                 option("axis", "Axis", ["Vertical", "Horizontal", "Custom"], defaultValue: "Vertical"),

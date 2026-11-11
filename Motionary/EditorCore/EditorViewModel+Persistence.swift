@@ -523,6 +523,12 @@ extension EditorViewModel {
             let item = indexedTimelineItem(id: itemID),
             let visuals = item.editableVisuals
         {
+            guard renderService.canApplyLiveDepth(in: visuals.effectStack, to: itemID) else {
+                if rebuildTask == nil {
+                    schedulePreviewRebuild(seekTo: currentTime, delay: false, invalidation: invalidation)
+                }
+                return
+            }
             // A rebuild started before this mutation only contains the older
             // descriptor state. Cancel its generation so its completion
             // cannot clear or present over the newer live override.
@@ -846,6 +852,19 @@ extension EditorViewModel {
         livePreviewFrameRefreshInFlight = true
         lastLivePreviewFrameRefresh = CFAbsoluteTimeGetCurrent()
         let target = clampedPlayableTime(currentTime)
+        // The exact composed frame may already be on hand under the current
+        // live revision (e.g. rendered by a just-finished scrub step). Present
+        // it directly instead of forcing a same-time re-seek below.
+        if let fresh = renderService.livePreviewState.cachedFrame(
+            at: livePreviewPresentationTime(target), sessionID: renderSessionID)
+        {
+            livePreviewFrameRefreshInFlight = false
+            livePreviewPresentation.setFrame(fresh, at: livePreviewPresentationTime(target))
+            if pendingLivePreviewFrameRefresh {
+                scheduleLivePreviewFrameRefresh()
+            }
+            return
+        }
         if renderService.livePreviewState.renderPausedFrame(
             at: livePreviewPresentationTime(target), sessionID: renderSessionID,
             completion: { [weak self, weak player] frame in
@@ -884,19 +903,6 @@ extension EditorViewModel {
                 }
             }
         ) { return }
-        // The exact composed frame may already be on hand under the current
-        // live revision (e.g. rendered by a just-finished scrub step). Present
-        // it directly instead of forcing a same-time re-seek below.
-        if let fresh = renderService.livePreviewState.cachedFrame(
-            at: livePreviewPresentationTime(target), sessionID: renderSessionID)
-        {
-            livePreviewFrameRefreshInFlight = false
-            livePreviewPresentation.setFrame(fresh, at: livePreviewPresentationTime(target))
-            if pendingLivePreviewFrameRefresh {
-                scheduleLivePreviewFrameRefresh()
-            }
-            return
-        }
         // Bootstrap a source-frame snapshot when AVPlayer has cached this time
         // or last rendered ahead during playback. Replacing the immutable
         // composition with a mutable copy forces AVPlayer to request the frame
@@ -987,6 +993,8 @@ extension EditorViewModel {
             return
         }
         autosaveTask?.cancel()
+        projectPosterTask?.cancel()
+        projectPosterTask = nil
         let snapshot = project
         let projectID = projectID
         projectSession.saveState = .saving
@@ -1113,23 +1121,21 @@ extension EditorViewModel {
     }
 
     func scheduleProjectPosterRender(for snapshot: EditorProject) {
-        guard let signature = snapshot.projectPosterSignatureData,
-            signature != lastProjectPosterSignature
-        else { return }
-        lastProjectPosterSignature = signature
         projectPosterTask?.cancel()
-        projectPosterTask = Task { [projectStore, projectID] in
+        projectPosterTask = Task(priority: .utility) { [weak self, projectStore, projectID] in
             do {
                 try await Task.sleep(for: .milliseconds(900))
-                guard !Task.isCancelled else { return }
+                let signature = await Task.detached(priority: .utility) { snapshot.projectPosterSignatureData }.value
+                guard !Task.isCancelled, let self, let signature,
+                    signature != self.lastProjectPosterSignature
+                else { return }
                 try await ProjectPosterService.shared.renderPoster(
                     for: snapshot,
                     outputURL: projectStore.posterURL(for: projectID)
                 )
                 guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    projectStore.notePosterChanged()
-                }
+                self.lastProjectPosterSignature = signature
+                projectStore.notePosterChanged()
             } catch is CancellationError {
                 return
             } catch ProjectPosterError.noVisualContent {

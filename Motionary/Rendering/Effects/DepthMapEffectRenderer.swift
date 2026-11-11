@@ -50,7 +50,16 @@ struct DepthMapEffectRenderer: EffectRenderModule {
             throw MetalRenderingError.invalidRenderTarget
         }
         let map: CIImage
-        if let source = context.temporalSource {
+        if let analysis = context.depthAnalyses[effect.id] {
+            if let track = analysis.track {
+                map = try DepthBakeStore.shared.image(track: track, time: context.clipTime)
+            } else {
+                map = try DepthBakeStore.shared.still(
+                    image, effectID: effect.id, directory: analysis.directory,
+                    sourceFile: context.usesUnmaskedStillDepth ? analysis.stillFile : nil
+                )
+            }
+        } else if let source = context.temporalSource {
             map = try DepthBakeStore.shared.image(source: source, effect: effect, time: context.clipTime)
         } else {
             map = try DepthBakeStore.shared.still(image, effectID: effect.id)

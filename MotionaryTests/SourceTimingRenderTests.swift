@@ -99,6 +99,33 @@ struct SourceTimingRenderTests {
         }
     }
 
+    @MainActor
+    @Test func encodedExportHandlesVideoStartingAfterGap() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = TimelineClip(
+            name: "Delayed video",
+            source: ClipSource(
+                url: url, mediaType: .video,
+                originalDuration: 4, naturalSize: CGSizeValue(width: 160, height: 96)),
+            timelineStart: 1, sourceRange: TimeRangeValue(start: 0.5, duration: 2))
+        let project = EditorProject(
+            title: "Video after gap", renderSettings: RenderSettings(width: 160, height: 96),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        let exported = try await VideoExportService().export(
+            project: project, settings: .recommended(for: project), progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: exported) }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: exported))
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let gap = pixel(try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image)
+        let actual = pixel(try await generator.image(at: CMTime(seconds: 1.5, preferredTimescale: 600)).image)
+        let expected = try await nativeSourcePixel(url: url, at: CMTime(seconds: 1, preferredTimescale: 600))
+        #expect(gap.prefix(3).allSatisfy { $0 < 10 }, "Gap should show the project background: \(gap)")
+        #expect(zip(actual, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 },
+                "Delayed video: \(actual), source \(expected)")
+    }
+
     @Test func rec709EncodingAndBufferTagsRoundTripColor() throws {
         let colorSpace = try #require(VideoColorSpace.rec709)
         let bounds = CGRect(x: 0, y: 0, width: 16, height: 16)

@@ -79,6 +79,9 @@ extension EffectModuleID {
     static let cameraWiggle = EffectModuleID(prefix + "camera-wiggle")
     static let zoom = EffectModuleID(prefix + "zoom")
     static let mirror = EffectModuleID(prefix + "mirror")
+    static let horizontalMirror = EffectModuleID(prefix + "horizontalMirror")
+    static let invert = EffectModuleID(prefix + "invert")
+    static let flash = EffectModuleID(prefix + "flash")
     static let reverseTime = EffectModuleID(prefix + "reverse-time")
     static let motionBlur = EffectModuleID(prefix + "motion-blur")
 

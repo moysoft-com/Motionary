@@ -178,6 +178,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                             at: CMTimeGetSeconds(request.compositionTime), sessionID: instruction.renderSessionID),
                         CVPixelBufferGetWidth(cached) == Int(instruction.renderSize.width),
                         CVPixelBufferGetHeight(cached) == Int(instruction.renderSize.height) {
+                        self.recordFramePresentation(instruction: instruction, time: request.compositionTime)
                         request.finish(withComposedVideoFrame: cached)
                         return
                     }
@@ -191,7 +192,20 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         try renderer.render(
                             plan: RenderPlanCompiler.compile(instruction),
                             compositionTime: request.compositionTime,
-                            sourceFrame: { request.sourceFrame(byTrackID: $0) },
+                            sourceFrame: { trackID in
+                                // AVFoundation can briefly expose an export
+                                // request before every required source buffer
+                                // is ready. Keep the request alive for a short
+                                // bounded window before treating it as a gap.
+                                for delay in [0.002, 0.004, 0.008, 0.016] {
+                                    if let frame = request.sourceFrame(byTrackID: trackID) {
+                                        return frame
+                                    }
+                                    guard self.isCurrent(generation) else { return nil }
+                                    Thread.sleep(forTimeInterval: delay)
+                                }
+                                return request.sourceFrame(byTrackID: trackID)
+                            },
                             destination: destination,
                             isCancelled: { !self.isCurrent(generation) }
                         )
@@ -269,7 +283,11 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                                 $0.trackID == kCMPersistentTrackID_Invalid
                                             })
                                     else { return false }
-                                    let targetTime = CMTime(seconds: time, preferredTimescale: 600)
+                                    let frameRate = CMTimeScale((1 / instruction.frameDuration).rounded())
+                                    let frame = time * Double(frameRate)
+                                    let targetTime = abs(frame.rounded() - frame) < 0.000_001
+                                        ? CMTime(seconds: time, preferredTimescale: frameRate)
+                                        : CMTime(seconds: time, preferredTimescale: 600_000)
                                     let cachedGeneration = self.currentGeneration()
                                     let liveFinisher = RequestFinisher()
                                     liveFinisher.setTimeoutAction { completion(nil) }
@@ -377,6 +395,10 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                        frame: CVPixelBuffer, revision: UInt64) {
         instruction.livePreviewState?.cacheFrame(frame, at: CMTimeGetSeconds(time),
             sessionID: instruction.renderSessionID, revision: revision)
+        recordFramePresentation(instruction: instruction, time: time)
+    }
+
+    private func recordFramePresentation(instruction: MotionaryVideoCompositionInstruction, time: CMTime) {
         let shouldNotify: Bool
         stateLock.lock()
         consecutiveRenderFailures = 0

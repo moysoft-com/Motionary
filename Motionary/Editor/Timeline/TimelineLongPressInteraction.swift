@@ -9,6 +9,7 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
     var accessibilityIdentifier: String = ""
     var accessibilityLabel: String = "Timeline item"
     let onTap: () -> Void
+    var tapMenu: (() -> UIMenu)? = nil
     var onDoubleTap: (() -> Void)? = nil
     let onLongPressBegan: () -> Void
     let onLongPressChanged: (TimelineLongPressDragValue) -> Void
@@ -20,9 +21,14 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let view = TimelineAccessibleInteractionView()
-        view.onActivate = { [weak coordinator = context.coordinator] in
-            coordinator?.parent.onTap()
-            return coordinator != nil
+        view.onActivate = { [weak coordinator = context.coordinator, weak view] in
+            guard let coordinator, let view else { return false }
+            if coordinator.parent.tapMenu != nil {
+                coordinator.presentTapMenu(from: view)
+            } else {
+                coordinator.parent.onTap()
+            }
+            return true
         }
         view.backgroundColor = .clear
         view.isUserInteractionEnabled = true
@@ -30,6 +36,12 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
         view.accessibilityIdentifier = accessibilityIdentifier
         view.accessibilityLabel = accessibilityLabel
         view.accessibilityTraits = .button
+
+        if tapMenu != nil {
+            let editMenu = UIEditMenuInteraction(delegate: context.coordinator)
+            context.coordinator.editMenuInteraction = editMenu
+            view.addInteraction(editMenu)
+        }
 
         let tap = TimelineTapGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
@@ -76,10 +88,11 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
         coordinator.cancelActiveDrag()
     }
 
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate {
         var parent: TimelineLongPressInteractionTarget
         private var startLocation: CGPoint = .zero
         private var isActive = false
+        weak var editMenuInteraction: UIEditMenuInteraction?
 
         init(parent: TimelineLongPressInteractionTarget) {
             self.parent = parent
@@ -87,7 +100,32 @@ struct TimelineLongPressInteractionTarget: UIViewRepresentable {
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended, !hasActiveScroll(in: recognizer.view) else { return }
-            parent.onTap()
+            if parent.tapMenu != nil, let view = recognizer.view {
+                presentTapMenu(from: view)
+            } else {
+                parent.onTap()
+            }
+        }
+
+        func presentTapMenu(from view: UIView) {
+            guard parent.tapMenu != nil, let editMenuInteraction else {
+                parent.onTap()
+                return
+            }
+            editMenuInteraction.presentEditMenu(
+                with: UIEditMenuConfiguration(
+                    identifier: parent.accessibilityIdentifier as NSString,
+                    sourcePoint: CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+                )
+            )
+        }
+
+        func editMenuInteraction(
+            _ interaction: UIEditMenuInteraction,
+            menuFor configuration: UIEditMenuConfiguration,
+            suggestedActions: [UIMenuElement]
+        ) -> UIMenu? {
+            parent.tapMenu?()
         }
 
         @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
