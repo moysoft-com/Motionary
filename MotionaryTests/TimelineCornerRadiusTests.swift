@@ -35,11 +35,11 @@ struct TimelineCornerRadiusTests {
             TimelineTrackBackgroundRadius.calculate(items: items, range: 0...10, pixelsPerSecond: 10,
                                                     itemRadius: 3, inset: 4, height: 44)
         }
-        #expect(radius([item(start: 4, duration: 1)]) == 14)
+        #expect(radius([item(start: 4, duration: 1)]) == 12)
         #expect(radius([item(start: 0.2, duration: 1)]) == 9)
         #expect(radius([item(start: 9.5, duration: 0.5)]) == 7)
         #expect(radius([item(start: 0.2, duration: 1), item(start: 9.5, duration: 0.5)]) == 7)
-        #expect(radius([item(start: 20, duration: 1)]) == 14)
+        #expect(radius([item(start: 20, duration: 1)]) == 12)
     }
 
     @Test func shortestItemSetsRadiusAcrossZoomLevelsAndOutsideViewport() throws {

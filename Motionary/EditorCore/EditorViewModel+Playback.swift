@@ -3,7 +3,50 @@
 import AVFoundation
 
 extension EditorViewModel {
+    func suspendPreview() {
+        guard !previewIsSuspended else { return }
+        previewIsSuspended = true
+        if isPlaying, !isPreviewSeekInFlight, let player {
+            let seconds = CMTimeGetSeconds(player.currentTime())
+            if seconds.isFinite { updateCurrentTime(clampedPlayableTime(seconds)) }
+        }
+        pendingPlaybackResumeAfterPreviewRebuild = false
+        previewGeneration &+= 1
+        previewRecoveryGeneration &+= 1
+        playbackCommandGeneration &+= 1
+        scrubSessionGeneration &+= 1
+        rebuildTask?.cancel()
+        rebuildTask = nil
+        previewRecoveryTask?.cancel()
+        previewRecoveryTask = nil
+        scrubPrefetchTask?.cancel()
+        scrubPrefetchTask = nil
+        cancelInteractivePreviewRebuild()
+        replacePreviewPlayer(with: nil)
+        renderService.livePreviewState.setInteractiveQualityOverride(false)
+        isPlaying = false
+        isScrubbing = false
+        scrubIsFinishing = false
+        wasPlayingBeforeScrub = false
+        previewState.status = .cancelled
+        previewProgress = 0
+        depthPreparationProgress = nil
+    }
+
+    func resumePreview() {
+        guard previewIsSuspended else { return }
+        previewIsSuspended = false
+        if previewRecoveryCircuitIsOpen { errorMessage = nil }
+        resetPreviewRecoveryCircuit()
+        previewQuality = .balanced
+        rotatePreviewRenderSession()
+        let invalidation = deferredPreviewInvalidation.union([.previewFrame, .compositionTopology, .audioMix])
+        deferredPreviewInvalidation = []
+        schedulePreviewRebuild(seekTo: currentTime, delay: false, invalidation: invalidation)
+    }
+
     func start() {
+        previewIsSuspended = false
         installEffectRenderDiagnosticsHandler()
         EditorAudioSession.configurePlayback()
         TimelineCacheLifecycle.installMemoryWarningHandler()
@@ -25,6 +68,8 @@ extension EditorViewModel {
     }
 
     func stop() {
+        workspaceScrollOwners.removeAll()
+        workspacePersistencePending = false
         playbackState.isStartingPlayback = false
         scratchAudio.shutdown()
         removeEffectRenderDiagnosticsHandler()
@@ -36,6 +81,8 @@ extension EditorViewModel {
         interactivePreviewThrottleTask = nil
         livePreviewFrameRefreshTask?.cancel()
         livePreviewFrameRefreshTask = nil
+        livePreviewSeekTask?.cancel()
+        livePreviewSeekTask = nil
         liveAudioPreviewTask?.cancel()
         liveAudioPreviewTask = nil
         pendingLiveAudioPreviewItemID = nil
@@ -57,6 +104,8 @@ extension EditorViewModel {
         stopPlaybackWatchdog()
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
+        scrubPrefetchTask?.cancel()
+        scrubPrefetchTask = nil
         importTask?.cancel()
         importTask = nil
         exportTask?.cancel()
@@ -90,7 +139,58 @@ extension EditorViewModel {
         isPlaying = false
     }
 
+    func handleDepthPreparationProgress(_ notification: Notification) {
+        guard let id = notification.userInfo?["id"] as? UUID else { return }
+        let progress = notification.userInfo?["progress"] as? Double
+        if cancelledDepthPreparationID == id {
+            if progress == nil { cancelledDepthPreparationID = nil }
+            return
+        }
+        if let progress {
+            depthPreparationID = id
+            depthPreparationEffectID = notification.userInfo?["effectID"] as? UUID
+            depthPreparationIndeterminate = notification.userInfo?["indeterminate"] as? Bool ?? false
+            depthPreparationProgress = progress
+        } else if depthPreparationID == id {
+            depthPreparationID = nil
+            depthPreparationEffectID = nil
+            depthPreparationProgress = nil
+            depthPreparationIndeterminate = false
+        }
+    }
+
     func cancelLongRunningTask() {
+        if let effectID = depthPreparationEffectID, depthPreparationProgress != nil {
+            cancelledDepthPreparationID = depthPreparationID
+            depthPreparationID = nil
+            depthPreparationEffectID = nil
+            depthPreparationProgress = nil
+            rebuildTask?.cancel()
+            rebuildTask = nil
+            exportTask?.cancel()
+            exportTask = nil
+            isExporting = false
+            analysisTask?.cancel()
+            analysisTask = nil
+            analysisState = nil
+            isRenderingPreview = false
+            pendingPlaybackResumeAfterPreviewRebuild = false
+            if let before = project.tracks.lazy.flatMap(\.items).first(where: {
+                $0.visualEditingClip()?.effectStack.effects.contains(where: { $0.id == effectID }) == true
+            }), var clip = before.visualEditingClip() {
+                clip.effectStack.effects.removeAll { $0.id == effectID }
+                let after = before.mergingVisualEditingClip(clip)
+                if activeKeyframeTarget?.effectID == effectID {
+                    activeKeyframeTarget = clip.availableKeyframeTargets.first
+                    selectedKeyframeID = nil
+                }
+                perform(ReplaceClipCommand(before: before, after: after,
+                    invalidation: [.previewFrame, .userInterface, .persistence, .timelineLayout]))
+            } else {
+                schedulePreviewRebuild(seekTo: currentTime, delay: false)
+            }
+            return
+        }
         if analysisState != nil {
             analysisTask?.cancel()
             analysisTask = nil
@@ -110,16 +210,18 @@ extension EditorViewModel {
             isImporting = false
             return
         }
-        if isRenderingPreview {
+        if isRenderingPreview || rebuildTask != nil {
             rebuildTask?.cancel()
             rebuildTask = nil
             isRenderingPreview = false
+            depthPreparationProgress = nil
             previewProgress = 0
             pendingPlaybackResumeAfterPreviewRebuild = false
         }
     }
 
     func togglePlayback() {
+        guard !previewIsSuspended else { return }
         scratchAudio.end()
         invalidateLivePreviewPresentation()
         if previewRecoveryCircuitIsOpen {
@@ -189,8 +291,7 @@ extension EditorViewModel {
             return
         }
 
-        let endTolerance = max(keyframeTimeTolerance, 0.05)
-        let restartingAtEnd = duration > 0 && currentTime >= max(duration - endTolerance, 0)
+        let restartingAtEnd = duration > 0 && currentTime >= lastPlayableTime
         if takingOverScrub || restartingAtEnd {
             if restartingAtEnd { updateCurrentTime(0) }
             let target = currentTime
@@ -220,6 +321,7 @@ extension EditorViewModel {
     }
 
     private func pausePlaybackForUserCommand(_ player: AVPlayer) {
+        let wasSeeking = isPreviewSeekInFlight
         previewSeekGeneration &+= 1
         isPreviewSeekInFlight = false
         playbackState.isStartingPlayback = false
@@ -230,6 +332,12 @@ extension EditorViewModel {
         stopPlaybackWatchdog()
         player.pause()
         player.currentItem?.cancelPendingSeeks()
+        // Capture the paused clock before the timeline hands control back to
+        // its model. Its periodic sample can be a frame or two behind.
+        if !wasSeeking, player.currentItem != nil {
+            let seconds = CMTimeGetSeconds(player.currentTime())
+            if seconds.isFinite { updateCurrentTime(clampedPlayableTime(seconds)) }
+        }
         isPlaying = false
         isScrubbing = false
         wasPlayingBeforeScrub = false
@@ -301,10 +409,8 @@ extension EditorViewModel {
                         )
                         return false
                     }
-                    if seconds >= self.lastPlayableTime - 0.05 {
-                        return true
-                    }
                     if player.currentItem?.videoComposition != nil,
+                        seconds < self.lastPlayableTime,
                         CFAbsoluteTimeGetCurrent() - max(self.lastPreviewRenderedFrameAt, startedAt) > 3.5,
                         seconds > (self.lastPreviewRenderedTimelineTime ?? seconds - 1) + 0.3
                     {
@@ -314,11 +420,15 @@ extension EditorViewModel {
                     if let lastObservedTime,
                         seconds > lastObservedTime + 0.015
                     {
-                        self.updateCurrentTime(self.clampedTimelineTime(seconds))
+                        self.updateCurrentTime(self.clampedPlayableTime(seconds))
                         lastProgressAt = ContinuousClock.now
                     } else if lastObservedTime == nil {
                         lastProgressAt = ContinuousClock.now
                     } else if lastProgressAt.duration(to: ContinuousClock.now) > .milliseconds(1400) {
+                        if seconds >= self.lastPlayableTime, let item = player.currentItem {
+                            self.finishPreviewPlayback(for: item)
+                            return false
+                        }
                         self.schedulePreviewRecovery(
                             reason: .playbackStalled,
                             resumePlayback: true
@@ -341,17 +451,6 @@ extension EditorViewModel {
     }
 
     func toggleGraphPlayback() {
-        guard let segment = graphSegment,
-            let item = indexedTimelineItem(id: segment.clipID)
-        else {
-            togglePlayback()
-            return
-        }
-        let start = item.timelineStart + segment.startTime
-        let end = item.timelineStart + segment.endTime
-        if !isPlaying, currentTime >= end - keyframeTimeTolerance {
-            seek(to: start)
-        }
         togglePlayback()
     }
 
@@ -435,26 +534,51 @@ extension EditorViewModel {
         scratchAudio.end()
         invalidateLivePreviewPresentation()
         playbackCommandGeneration &+= 1
+        // Keep the authored end position available for appending clips and
+        // editing boundary keyframes. Only decoder requests are frame-clamped.
         let clamped = clampedTimelineTime(time)
+        if isScrubbing {
+            scrubSessionGeneration &+= 1
+            scrubSeekGeneration &+= 1
+            scrubSeekTask?.cancel()
+            scrubSeekTask = nil
+            pendingScrubSeekTime = nil
+            isScrubSeekInFlight = false
+            lastIssuedScrubSeekTime = nil
+            isScrubbing = false
+            scrubIsFinishing = false
+            wasPlayingBeforeScrub = false
+            player?.currentItem?.seekingWaitsForVideoCompositionRendering = true
+            setPreviewQualityForInteraction(false)
+            flushDeferredPreviewRebuild(seekTo: clamped)
+        }
         updateCurrentTime(clamped)
+        if previewRecoveryCircuitIsOpen {
+            schedulePreviewRebuild(seekTo: clamped, delay: false)
+            return
+        }
         seekPlayer(to: clamped, exact: exact)
         if isPlaying { startPlaybackWatchdog() }
     }
 
     func seekPlayer(to time: Double, exact: Bool) {
         let clamped = clampedPlayableTime(time)
-        let tolerance = exact ? CMTime.zero : CMTime(seconds: 0.035, preferredTimescale: 600)
+        let tolerance = exact ? 0 : 0.035
+        let toleranceAfter = min(tolerance, lastPlayableTime - clamped)
         guard let player else { return }
+        let generation = playbackCommandGeneration
         Task { [weak self, weak player] in
-            guard let self, let player else { return }
+            guard let self, let player, self.player === player,
+                generation == self.playbackCommandGeneration else { return }
             let didSeek = await self.boundedSeek(
                 player: player,
                 to: clamped,
-                toleranceBefore: tolerance,
-                toleranceAfter: tolerance,
+                toleranceBefore: CMTime(seconds: tolerance, preferredTimescale: 600),
+                toleranceAfter: CMTime(seconds: toleranceAfter, preferredTimescale: 600),
                 timeoutNanoseconds: 5_000_000_000
             )
-            guard didSeek == .timedOut, self.player === player else { return }
+            guard didSeek == .timedOut, self.player === player,
+                generation == self.playbackCommandGeneration else { return }
             self.schedulePreviewRecovery(
                 reason: .seekTimeout,
                 resumePlayback: self.isPlaying || self.pendingPlaybackResumeAfterPreviewRebuild
@@ -463,6 +587,7 @@ extension EditorViewModel {
     }
 
     func beginScrub() {
+        guard !previewIsSuspended else { return }
         guard !isScrubbing || scrubIsFinishing else { return }
         if scrubIsFinishing { player?.currentItem?.cancelPendingSeeks() }
         scrubIsFinishing = false
@@ -477,8 +602,11 @@ extension EditorViewModel {
         isPlaying = false
         isScrubbing = true
         player?.currentItem?.seekingWaitsForVideoCompositionRendering = false
-        livePreviewPresentation.setInteracting(true)
-        if rebuildTask != nil {
+        if pendingPreviewInvalidation.contains(.compositionTopology) {
+            // Source timing edits cannot wait until the gesture ends. Install
+            // the new graph and then continue from the latest scrub position.
+            schedulePreviewRebuild(seekTo: currentTime, delay: false, invalidation: [])
+        } else if rebuildTask != nil {
             deferredPreviewInvalidation.formUnion([
                 .previewFrame,
                 .compositionTopology,
@@ -492,6 +620,8 @@ extension EditorViewModel {
         }
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
+        scrubPrefetchTask?.cancel()
+        scrubPrefetchTask = nil
         pendingScrubSeekTime = nil
         isScrubSeekInFlight = false
         lastIssuedScrubSeekTime = nil
@@ -507,10 +637,11 @@ extension EditorViewModel {
         guard isScrubbing else { return }
         scratchAudio.end()
         scrubIsFinishing = true
-        livePreviewPresentation.setInteracting(false)
-        let clamped = clampedTimelineTime(time)
+        let clamped = clampedPlayableTime(time)
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
+        scrubPrefetchTask?.cancel()
+        scrubPrefetchTask = nil
         pendingScrubSeekTime = nil
         isScrubSeekInFlight = false
         lastIssuedScrubSeekTime = nil
@@ -526,6 +657,13 @@ extension EditorViewModel {
         previewQuality = .balanced
         renderService.livePreviewState.setInteractiveQualityOverride(false)
 
+        if pendingPreviewInvalidation.contains(.compositionTopology) {
+            if rebuildTask == nil {
+                schedulePreviewRebuild(seekTo: clamped, delay: false, invalidation: [])
+            }
+            return
+        }
+
         guard let player else {
             finishScrub(at: clamped, generation: generation)
             return
@@ -535,26 +673,36 @@ extension EditorViewModel {
                 self.player === player,
                 self.scrubSessionGeneration == generation
             else { return }
-            let didSeek = await self.boundedSeek(
+            let target = self.livePreviewPresentationTime(clamped)
+            var didSeek = await self.boundedSeek(
                 player: player,
-                to: self.livePreviewPresentationTime(self.clampedPlayableTime(clamped)),
+                to: target,
                 toleranceBefore: .zero,
                 toleranceAfter: .zero,
                 timeoutNanoseconds: 5_000_000_000
             )
-            guard self.scrubSessionGeneration == generation else { return }
-            guard didSeek != .superseded else { return }
-            self.finishScrub(at: clamped, generation: generation)
-            if didSeek == .timedOut, self.player === player {
+            if didSeek == .interrupted, self.scrubSessionGeneration == generation {
+                // An AVFoundation request can be cancelled as a scrub seek
+                // hands off to the exact frame. Keep the displayed sample.
+                didSeek = await self.boundedSeek(
+                    player: player, to: target,
+                    toleranceBefore: .zero, toleranceAfter: .zero,
+                    timeoutNanoseconds: 5_000_000_000
+                )
+            }
+            guard self.scrubSessionGeneration == generation, didSeek != .superseded else { return }
+            if didSeek == .completed {
+                self.finishScrub(at: clamped, generation: generation)
+            } else {
                 self.schedulePreviewRecovery(
-                    reason: .seekTimeout,
+                    reason: didSeek == .timedOut ? .seekTimeout : .compositorFailure,
                     resumePlayback: false
                 )
             }
         }
     }
 
-    private func finishScrub(at time: Double, generation: Int) {
+    func finishScrub(at time: Double, generation: Int) {
         guard generation == scrubSessionGeneration, isScrubbing else { return }
         updateCurrentTime(time)
         isScrubbing = false

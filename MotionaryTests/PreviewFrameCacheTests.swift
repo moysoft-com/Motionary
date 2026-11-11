@@ -49,6 +49,26 @@ struct PreviewFrameCacheTests {
         #expect(cache.frame(at: 0.3, sessionID: session, revision: 0) === frame)
     }
 
+    @Test func nearbyFramesServeScrubFallbacksButNeverExactRequests() throws {
+        let frame = try buffer()
+        let cache = PreviewFrameCache(byteLimit: 1_024 * 1_024, countLimit: 8)
+        let session = UUID()
+        cache.store(frame, at: 0.5, sessionID: session, revision: 1)
+        let window = 1 / 30.0
+        let near = cache.frameNear(at: 0.5 + window, sessionID: session, window: window, revision: 1)
+        #expect(near?.frame === frame)
+        #expect(abs((near?.time ?? -1) - 0.5) < 0.0001)
+        #expect(cache.frameNear(at: 0.5 + 3 * window, sessionID: session, window: window, revision: 1) == nil)
+        #expect(cache.frameNear(at: 0.5, sessionID: UUID(), window: window, revision: 1) == nil)
+        #expect(cache.frame(at: 0.5 + window, sessionID: session, revision: 1) == nil)
+        // Editing can remap source content at this time; never resurrect it.
+        let nearOldRevision = cache.frameNear(at: 0.5 + window, sessionID: session, window: window, revision: 2)
+        #expect(nearOldRevision == nil)
+        cache.store(try buffer(), at: 0.5 + 2 * window, sessionID: session, revision: 1)
+        let tied = cache.frameNear(at: 0.5 + window, sessionID: session, window: window, revision: 1)
+        #expect(tied?.frame === frame)
+    }
+
     @Test func visualEditsAndGraphRebuildsRejectStaleGPUCompletions() throws {
         let state = LivePreviewRenderState()
         let session = UUID(), clip = UUID()

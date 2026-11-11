@@ -10,6 +10,7 @@
 		8CA5E5813004020800A91E5F /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA5E5803004020800A91E5F /* FirebaseAuth */; };
 		8CD7881D3003FA4A00E1D88F /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */; };
 		8CF00101300A000100F00101 /* FirebaseAppCheck in Frameworks */ = {isa = PBXBuildFile; productRef = 8CF00100300A000100F00101 /* FirebaseAppCheck */; };
+		8CF00201300A000100F00101 /* Shimmer in Frameworks */ = {isa = PBXBuildFile; productRef = 8CF00200300A000100F00101 /* Shimmer */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -73,6 +74,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8CF00201300A000100F00101 /* Shimmer in Frameworks */,
 				8CF00101300A000100F00101 /* FirebaseAppCheck in Frameworks */,
 				8CD7881D3003FA4A00E1D88F /* FirebaseFirestore in Frameworks */,
 				8CA5E5813004020800A91E5F /* FirebaseAuth in Frameworks */,
@@ -144,6 +146,7 @@
 			);
 			name = Motionary;
 			packageProductDependencies = (
+				8CF00200300A000100F00101 /* Shimmer */,
 				8CF00100300A000100F00101 /* FirebaseAppCheck */,
 				8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */,
 				8CA5E5803004020800A91E5F /* FirebaseAuth */,
@@ -231,6 +234,7 @@
 			mainGroup = 8C70C7B22D7225A60070BD08;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				8CF00202300A000100F00101 /* XCRemoteSwiftPackageReference "SwiftUI-Shimmer" */,
 				8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -616,6 +620,14 @@
 				minimumVersion = 12.16.0;
 			};
 		};
+		8CF00202300A000100F00101 /* XCRemoteSwiftPackageReference "SwiftUI-Shimmer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/markiv/SwiftUI-Shimmer.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.5.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -633,6 +645,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 8CD7881B3003FA4A00E1D88F /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseAppCheck;
+		};
+		8CF00200300A000100F00101 /* Shimmer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CF00202300A000100F00101 /* XCRemoteSwiftPackageReference "SwiftUI-Shimmer" */;
+			productName = Shimmer;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

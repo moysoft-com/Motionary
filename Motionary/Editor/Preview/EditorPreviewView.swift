@@ -7,6 +7,7 @@ import UIKit
 struct CorePreviewSection: View {
     @ObservedObject var viewModel: EditorViewModel
     @Binding var selectedMediaItems: [PhotosPickerItem]
+    @Environment(\.displayScale) private var displayScale
     @State private var posterImage: UIImage?
 
     init(viewModel: EditorViewModel, selectedMediaItems: Binding<[PhotosPickerItem]>) {
@@ -68,6 +69,13 @@ struct CorePreviewSection: View {
                         .allowsHitTesting(false)
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
+                .onChange(of: canvasRect) { _, rect in
+                    viewModel.setPreviewDisplayPixelSize(
+                        CGSize(
+                            width: rect.width * max(displayScale, 1),
+                            height: rect.height * max(displayScale, 1)
+                        ))
+                }
             }
         }
         .task(id: viewModel.projectID) {

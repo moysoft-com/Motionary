@@ -68,21 +68,22 @@ extension EditorViewModel {
         )
     }
 
+    @discardableResult
     func updateSelectedClip(
         rebuild: Bool = true,
         recordHistory: Bool = true,
         persistChanges: Bool = true,
         touchUpdatedAt: Bool = true,
         refreshTimeline: Bool = true,
+        affectsPreviewGeometry: Bool = true,
         _ update: (inout TimelineClip) -> Void
-    ) {
-        guard let selectedClipID else { return }
-        guard let location = project.clipLocation(id: selectedClipID) else { return }
-        let beforeItem = project.tracks[location.track].items[location.clip]
-        guard var updatedClip = beforeItem.visualEditingClip() else { return }
+    ) -> Bool {
+        guard let selectedClipID else { return false }
+        guard let beforeItem = indexedTimelineItem(id: selectedClipID) else { return false }
+        guard var updatedClip = beforeItem.visualEditingClip() else { return false }
         let beforeClip = updatedClip
         update(&updatedClip)
-        guard updatedClip != beforeClip else { return }
+        guard updatedClip != beforeClip else { return false }
         let afterItem = beforeItem.mergingVisualEditingClip(updatedClip)
         var invalidation: EditorInvalidation = [.userInterface, .persistence]
         if rebuild {
@@ -92,18 +93,18 @@ extension EditorViewModel {
             invalidation.insert(.timelineLayout)
         }
         perform(
-            AnyEditorCommand(
-                ReplaceClipCommand(
-                    before: beforeItem,
-                    after: afterItem,
-                    invalidation: invalidation
-                )
+            ReplaceClipCommand(
+                before: beforeItem,
+                after: afterItem,
+                invalidation: invalidation
             ),
             recordHistory: recordHistory,
             persistChanges: persistChanges,
             touchUpdatedAt: touchUpdatedAt,
-            refreshTimeline: refreshTimeline
+            refreshTimeline: refreshTimeline,
+            affectsPreviewGeometry: affectsPreviewGeometry
         )
+        return true
     }
 
     func setSelectedTransform(
@@ -251,10 +252,21 @@ extension EditorViewModel {
         project.renumberTracks()
         project.synchronizeMediaLibrary()
         guard project != snapshot else {
-            livePreviewPresentation.frame = nil
-            clearPendingLiveVisualOverrides()
             pendingTimelineInvalidationScope = nil
             refreshSelectedTimelineRange()
+            if !pendingLiveVisualOverrideItemIDs.isEmpty,
+                !pendingPreviewInvalidation.intersection([.previewFrame, .compositionTopology]).isEmpty {
+                // An earlier commit may have been cancelled by this gesture.
+                // Keep its live image until the current project is installed
+                // in the canonical preview, even if this gesture ended where
+                // it began (for example while scrubbing against a boundary).
+                if rebuild {
+                    schedulePreviewRebuild(seekTo: currentTime, delay: false, invalidation: [.previewFrame])
+                }
+            } else {
+                livePreviewPresentation.frame = nil
+                clearPendingLiveVisualOverrides()
+            }
             return
         }
         publishProjectChange()

@@ -15,11 +15,7 @@ struct MotionaryEffectUniforms {
     float4 parameters3;
 };
 
-struct MotionaryYUVUniforms {
-    uint2 size;
-    uint fullRange;
-    uint matrix;
-};
+;
 
 constexpr sampler linearSampler(
     coord::normalized,
@@ -51,48 +47,6 @@ static float3 saturation(float3 color, float amount) {
 
 static float3 screen(float3 base, float3 overlay) {
     return 1.0f - (1.0f - base) * (1.0f - overlay);
-}
-
-kernel void motionaryYUVToRGBA(
-    texture2d<float, access::sample> lumaTexture [[texture(0)]],
-    texture2d<float, access::sample> chromaTexture [[texture(1)]],
-    texture2d<half, access::write> outputTexture [[texture(2)]],
-    constant MotionaryYUVUniforms &uniforms [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (any(gid >= uniforms.size)) { return; }
-    float2 uv = (float2(gid) + 0.5f) / float2(uniforms.size);
-    float y = lumaTexture.sample(linearSampler, uv).r;
-    float2 chroma = chromaTexture.sample(linearSampler, uv).rg;
-    if (uniforms.fullRange == 0u) {
-        y = clamp((y - 16.0f / 255.0f) * (255.0f / 219.0f), 0.0f, 1.0f);
-        chroma = (chroma - 0.5f) * (255.0f / 224.0f);
-    } else {
-        chroma -= 0.5f;
-    }
-    float3 rgb;
-    if (uniforms.matrix == 0u) { // Rec.601
-        rgb = float3(
-            y + 1.4020f * chroma.y,
-            y - 0.344136f * chroma.x - 0.714136f * chroma.y,
-            y + 1.7720f * chroma.x
-        );
-    } else if (uniforms.matrix == 2u) { // Rec.2020 non-constant luminance
-        rgb = float3(
-            y + 1.4746f * chroma.y,
-            y - 0.164553f * chroma.x - 0.571353f * chroma.y,
-            y + 1.8814f * chroma.x
-        );
-    } else { // Rec.709
-        rgb = float3(
-            y + 1.5748f * chroma.y,
-            y - 0.1873f * chroma.x - 0.4681f * chroma.y,
-            y + 1.8556f * chroma.x
-        );
-    }
-    // The conversion matrix produces gamma-encoded Rec.709. Core Image performs
-    // the explicit conversion into the engine's linear working space afterwards.
-    outputTexture.write(half4(half3(clamp(rgb, 0.0f, 1.0f)), half(1.0f)), gid);
 }
 
 kernel void motionaryShapeKernel(
@@ -337,6 +291,35 @@ kernel void motionaryEffectKernel(
             color = unpremultiplied(sampled); alpha = sampled.a;
             break;
         }
+        case 33u: { // Radial ripple, measured in fractions of the shorter side.
+            float2 metric = size / min(size.x, size.y);
+            float2 delta = (uv - uniforms.parameters2.xy) * metric;
+            float distance = length(delta);
+            float2 direction = distance > 0.00001f ? delta / distance : float2(0.0f);
+            float wavelength = max(p1, 0.02f);
+            float phase = distance * 6.2831853f / wavelength - uniforms.time * p2 * 6.2831853f;
+            // A water surface loses energy as the wave travels. Soften the
+            // origin too, where a radial direction is otherwise undefined.
+            float originFade = smoothstep(0.0f, wavelength * 0.7f, distance);
+            float falloff = 1.0f / sqrt(1.0f + distance * 3.0f);
+            // Amount controls the actual displacement across its full range.
+            float amplitude = max(p0, 0.0f);
+            float slope = sin(phase) * amplitude / wavelength * originFade * falloff;
+            // Treat the ripple as a raised surface: its slope drives both
+            // refraction and the normal used for directional lighting.
+            float3 normal = normalize(float3(-direction * slope * 3.5f, 1.0f));
+            float2 warped = uv + direction * (slope * wavelength) / metric;
+            float4 sampled = sampleEffectInput(inputTexture, warped, edgeMode, uniforms.sourceBounds);
+            color = unpremultiplied(sampled); alpha = sampled.a;
+            float3 light = normalize(float3(-0.5f, 0.65f, 0.8f));
+            float diffuse = dot(normal, light) - light.z;
+            float3 halfVector = normalize(light + float3(0.0f, 0.0f, 1.0f));
+            float specular = max(pow(max(dot(normal, halfVector), 0.0f), 32.0f)
+                - pow(halfVector.z, 32.0f), 0.0f);
+            float reflection = clamp(uniforms.parameters.w, 0.0f, 1.0f) / 0.7f;
+            color = max(color * (1.0f + diffuse * 0.65f * reflection) + specular * 0.22f * reflection, float3(0.0f));
+            break;
+        }
         case 13u: { // Twirl with a smooth, bounded influence radius.
             float2 metric = size / min(size.x, size.y);
             float2 delta = (uv - uniforms.parameters2.xy) * metric;
@@ -566,12 +549,21 @@ kernel void motionaryGlowCompositeKernel(
     texture2d<float, access::read> sourceTexture [[texture(0)]],
     texture2d<float, access::read> glowTexture [[texture(1)]],
     texture2d<half, access::write> outputTexture [[texture(2)]],
+    texture2d<float, access::read> wideGlowTexture [[texture(3)]],
     constant MotionaryEffectUniforms &uniforms [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (any(gid >= uniforms.size)) { return; }
     float4 source = sourceTexture.read(gid);
     float4 glow = glowTexture.read(gid);
+    if (uniforms.effectKind == 34u) {
+        float4 wide = wideGlowTexture.read(gid);
+        float intensity = max(uniforms.parameters.w, 0.0f) * 1.8f;
+        float3 light = (glow.rgb * 0.65f + wide.rgb * 0.85f) * intensity;
+        float alpha = source.a + (1.0f - source.a) * clamp((glow.a * 0.65f + wide.a * 0.85f) * intensity, 0.0f, 1.0f);
+        outputTexture.write(half4(half3(source.rgb + light), half(alpha)), gid);
+        return;
+    }
     float3 base = unpremultiplied(source);
     float3 halo = unpremultiplied(glow) * glow.a;
     float strength = 0.72f;

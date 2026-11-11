@@ -25,6 +25,22 @@ struct EffectDomainTests {
         #expect(!amount.accepts(.scalar(2)))
     }
 
+    @Test func effectParametersKeepBoundaryValuesDespiteInterpolationRounding() throws {
+        let registry = EffectRegistry.shared
+        var ripple = try #require(registry.makeEffect(moduleID: .ripple))
+        let upper = 0.3
+        let roundedAbove = 0.035 + (upper - 0.035) * 1.0
+        #expect(roundedAbove > upper)
+        ripple.parameters[EffectParameterID.amount.rawValue] = EffectParameterState(baseValue: .scalar(roundedAbove))
+        #expect(registry.resolvedValue(for: .amount, in: ripple, at: 0) == .scalar(upper))
+        ripple.parameters[EffectParameterID.amount.rawValue] = EffectParameterState(baseValue: .scalar(-Double.ulpOfOne))
+        #expect(registry.resolvedValue(for: .amount, in: ripple, at: 0) == .scalar(0))
+        ripple.parameters[EffectParameterID.amount.rawValue] = EffectParameterState(baseValue: .scalar(upper + 0.01))
+        #expect(registry.resolvedValue(for: .amount, in: ripple, at: 0) == .scalar(0.035))
+        #expect(EffectValue.scalar(0.035).interpolated(to: .scalar(upper), progress: 1) == .scalar(upper))
+        #expect(EffectValue.scalar(0.035).interpolated(to: .scalar(upper), progress: 0) == .scalar(0.035))
+    }
+
     @Test func cyclicAnglesWrapOnlyAfterKeyframeInterpolation() throws {
         let renderer = OpticalBlurEffectRenderer(moduleID: .directionalBlur)
         var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .directionalBlur))
@@ -41,10 +57,11 @@ struct EffectDomainTests {
         #expect(renderer.cyclicDegrees(.angle, in: effect, at: 0) == -5)
     }
 
-    @Test func builtInRegistryContainsFortyThreeValidModules() throws {
+    @Test func builtInRegistryContainsFortySixValidModules() throws {
         let registry = EffectRegistry.shared
 
-        #expect(registry.modules.count == 43)
+        #expect(registry.modules.count == 46)
+        #expect(registry.descriptor(for: .depthMap) != nil)
         #expect(Set(registry.modules.map(\.id)).count == registry.modules.count)
         for module in registry.modules {
             #expect(module.currentVersion == 1)
@@ -67,6 +84,23 @@ struct EffectDomainTests {
                     )
             )
         }
+    }
+
+    @Test func effectMixControlIsSelectiveAndPreservesExistingEdits() throws {
+        let registry = EffectRegistry.shared
+        var ripple = try #require(registry.makeEffect(moduleID: .ripple))
+        #expect(!ripple.parameterTargets.contains(.effectMix(ripple.id)))
+        let grade = try #require(registry.makeEffect(moduleID: .sepia))
+        #expect(grade.parameterTargets.contains(.effectMix(grade.id)))
+        ripple.mix = AnimatableProperty(baseValue: 0.5)
+        #expect(ripple.parameterTargets.contains(.effectMix(ripple.id)))
+        ripple.mix = AnimatableProperty(baseValue: 1, keyframes: [Keyframe(time: 1, value: 0.5)])
+        #expect(ripple.parameterTargets.contains(.effectMix(ripple.id)))
+        ripple.parameters.removeValue(forKey: EffectParameterID.reflection.rawValue)
+        #expect(registry.resolvedValue(for: .reflection, in: ripple, at: 0) == .scalar(0.7))
+        #expect(ripple.property(for: .reflection, component: .scalar)?.baseValue == 0.7)
+        ripple.setProperty(AnimatableProperty(baseValue: 0.3), for: .reflection, component: .scalar)
+        #expect(registry.resolvedValue(for: .reflection, in: ripple, at: 0) == .scalar(0.3))
     }
 
     @Test func schemaTenStackMigratesAllBuiltInsAndMaterializesDefaults() throws {

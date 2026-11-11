@@ -3,14 +3,22 @@ import Foundation
 import Metal
 
 enum MetalLayerCompositor {
+    /// Blends `foreground` over `background`. When the previous blend in the
+    /// stack already produced the background as a linear FP16 texture at this
+    /// extent, `backgroundTexture` threads it through so consecutive artistic
+    /// blends do not pay a second full-frame rasterization of the accumulated
+    /// background per layer. The returned texture is the one to thread into
+    /// the next call; the normal-blend path returns `nil` because it stays in
+    /// the lazy CI graph until the frame's final render.
     static func blend(
         foreground: CIImage,
         background: CIImage,
         in extent: CGRect,
         mode: BlendMode,
         intensity: Double,
-        resources: MetalFrameResources
-    ) throws -> CIImage {
+        resources: MetalFrameResources,
+        backgroundTexture: MTLTexture? = nil
+    ) throws -> (image: CIImage, texture: MTLTexture?) {
         let extent = pixelAligned(extent)
         let clampedIntensity = min(max(intensity, 0), 1)
 
@@ -20,13 +28,26 @@ enum MetalLayerCompositor {
         // common layer path. A zero-intensity artistic blend also resolves to
         // the same source-over result.
         if mode == .normal || clampedIntensity <= 0.000_001 {
-            return foreground
-                .composited(over: background)
-                .cropped(to: extent)
+            return (
+                foreground
+                    .composited(over: background)
+                    .cropped(to: extent),
+                nil
+            )
         }
 
         let foregroundTexture = try rasterize(foreground, in: extent, resources: resources)
-        let backgroundTexture = try rasterize(background, in: extent, resources: resources)
+        let backgroundWidth = max(Int(extent.width.rounded(.up)), 1)
+        let backgroundHeight = max(Int(extent.height.rounded(.up)), 1)
+        let reusedBackground = backgroundTexture.flatMap { texture -> MTLTexture? in
+            guard texture.width == backgroundWidth,
+                texture.height == backgroundHeight,
+                texture.pixelFormat == .rgba16Float
+            else { return nil }
+            return texture
+        }
+        let resolvedBackgroundTexture = try reusedBackground
+            ?? rasterize(background, in: extent, resources: resources)
         let outputTexture = try resources.makeScratchTexture(
             width: foregroundTexture.width,
             height: foregroundTexture.height
@@ -38,7 +59,7 @@ enum MetalLayerCompositor {
         encoder.label = "\(mode.rawValue) layer blend"
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(foregroundTexture, index: 0)
-        encoder.setTexture(backgroundTexture, index: 1)
+        encoder.setTexture(resolvedBackgroundTexture, index: 1)
         encoder.setTexture(outputTexture, index: 2)
         let uniforms = try resources.writeUniforms(MotionaryEffectUniforms(
             size: SIMD2(UInt32(outputTexture.width), UInt32(outputTexture.height)),
@@ -58,15 +79,18 @@ enum MetalLayerCompositor {
         )
         encoder.endEncoding()
         resources.releaseScratchTexture(foregroundTexture)
-        resources.releaseScratchTexture(backgroundTexture)
+        resources.releaseScratchTexture(resolvedBackgroundTexture)
 
         guard let image = CIImage(
             mtlTexture: outputTexture,
             options: [.colorSpace: resources.owner.workingColorSpace]
         ) else { throw MetalRenderingError.invalidRenderTarget }
-        return image
-            .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
-            .cropped(to: extent)
+        return (
+            image
+                .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
+                .cropped(to: extent),
+            outputTexture
+        )
     }
 
     private static func rasterize(

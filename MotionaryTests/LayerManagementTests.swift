@@ -7,6 +7,27 @@ import Testing
 
 @MainActor
 struct LayerManagementTests {
+    @Test func adjustmentTimelineFiltersEffectMarkersAndVisibleRange() {
+        let first = EffectInstance(
+            moduleID: .noir,
+            mix: AnimatableProperty(baseValue: 1, keyframes: [
+                Keyframe(time: 0.5, value: 0.5), Keyframe(time: 3, value: 1)
+            ])
+        )
+        let second = EffectInstance(
+            moduleID: .noir,
+            mix: AnimatableProperty(baseValue: 1, keyframes: [Keyframe(time: 1.5, value: 0.5)])
+        )
+        let item = TimelineItem.adjustment(AdjustmentTimelineItem(
+            timelineStart: 4, duration: 2,
+            visuals: TimelineItemVisuals(effectStack: EffectStack(effects: [first, second]))
+        ))
+
+        #expect(item.keyframeTimes(in: .effects, effectID: first.id) == [0.5])
+        #expect(item.keyframeTimes(in: .effects, effectID: second.id) == [1.5])
+        #expect(item.keyframeTimes(in: .effects) == [0.5, 1.5])
+    }
+
     @Test func adjustmentWorkspaceExposesEarlierGroupsAsAtomicInputs() {
         func shape(_ name: String) -> TimelineTrack {
             TimelineTrack(name: name, kind: .shape, items: [.shape(ShapeTimelineItem(
@@ -642,6 +663,11 @@ struct LayerManagementTests {
             }
         )
         #expect(keyframe.value == 0.35)
+        let timelineItem = TimelineItem.adjustment(edited)
+        #expect(timelineItem.keyframeTimes(in: .effects, effectID: effectID) == [1])
+        #expect(timelineItem.keyframeTimes(in: .effects, effectID: UUID()).isEmpty)
+        #expect(!timelineItem.keyframeTargets(in: .effects).isEmpty)
+        #expect(timelineItem.allKeyframeTimes.contains(1))
         #expect(edited.visuals.blendMode == .multiply)
         #expect(edited.visuals.blendIntensity == 0.75)
         #expect(edited.visuals.mask?.shape == .ellipse)

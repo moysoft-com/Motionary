@@ -110,12 +110,11 @@ struct CoreTimelineLayout: View {
     @Binding var activeClipSnapKey: String?
     @State private var pullToAddDistance: CGFloat = 0
     @State private var pullToAddBounceTrigger = false
-    @State private var displayTime: Double = 0
-    @State private var horizontalScrollOffset: CGFloat = 0
     @State private var clipDragScrollOffset: CGSize = .zero
     @State private var activeTrimPreview: TimelineItem?
     @StateObject private var viewportState = TimelineViewportState()
-    @StateObject private var scrollPresentationState = TimelineScrollPresentationState()
+    // Keep the reference stable. The ruler and overlays observe its per-frame values.
+    @State private var scrollPresentationState = TimelineScrollPresentationState()
     let size: CGSize
     let trackHeight: CGFloat
     let rowSpacing: CGFloat
@@ -144,23 +143,7 @@ struct CoreTimelineLayout: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .motionaryGlass(cornerRadius: 20)
         .accessibilityIdentifier("editor-timeline")
-        .background {
-            TimelineDisplayLink(
-                player: viewModel.player,
-                isPlaying: playbackState.isPlaying
-            ) { time in
-                let resolvedTime = min(max(time, 0), max(viewModel.lastPlayableTime, 0))
-                displayTime = resolvedTime
-            }
-            .allowsHitTesting(false)
-        }
-        .onAppear {
-            displayTime = viewModel.currentTime
-        }
-        .onChange(of: viewModel.playbackState.currentTime) { _, time in
-            guard !playbackState.isPlaying else { return }
-            displayTime = time
-        }
+
     }
 
     private var showsOnlySelectedTrack: Bool { workspaceContext?.showsOnlySelectedTrack == true }
@@ -168,15 +151,7 @@ struct CoreTimelineLayout: View {
 
     private var centerPadding: CGFloat { size.width / 2 }
     private var duration: Double { max(viewModel.duration, 0.1) }
-    private var visibleTime: Double {
-        playbackState.isPlaying ? displayTime : playbackState.currentTime
-    }
-    private var scrollVisibleTime: Double {
-        min(
-            max(Double(horizontalScrollOffset / max(pixelsPerSecond, 1)), 0),
-            max(viewModel.lastPlayableTime, 0)
-        )
-    }
+    private var visibleTime: Double { playbackState.currentTime }
     private var displayDuration: Double {
         let dragEnd = activeClipDrag.map { $0.resolvedPlacement.start + $0.itemSnapshot.placementDuration } ?? 0
         return max(viewModel.duration, dragEnd, activeTrimPreview?.timelineEnd ?? 0)
@@ -191,7 +166,6 @@ struct CoreTimelineLayout: View {
     private var timelineScroll: some View {
         TimelineScrollContainer(
             pixelsPerSecond: $pixelsPerSecond,
-            horizontalScrollOffset: $horizontalScrollOffset,
             currentTime: visibleTime,
             duration: viewModel.duration,
             maximumTimelineTime: viewModel.lastPlayableTime,
@@ -207,7 +181,10 @@ struct CoreTimelineLayout: View {
             allowsVerticalScrolling: !showsOnlySelectedTrack,
             playbackState: playbackState,
             scrubFrameRate: Int(viewModel.project.renderSettings.frameRate),
-            playerProvider: { [weak viewModel] in viewModel?.player },
+            playerProvider: { [weak viewModel] in
+                guard let viewModel, !viewModel.isPreviewSeekInFlight else { return nil }
+                return viewModel.player
+            },
             viewportState: viewportState,
             scrollPresentationState: scrollPresentationState,
             virtualizationConfiguration: TimelineVirtualizationConfiguration(
@@ -277,7 +254,7 @@ struct CoreTimelineLayout: View {
         TimelineRulerOverlay(
             scrollState: scrollPresentationState,
             duration: snapshot.duration,
-            currentTime: scrollVisibleTime,
+            currentTime: playbackState.currentTime,
             maximumTimelineTime: viewModel.lastPlayableTime,
             pixelsPerSecond: pixelsPerSecond,
             width: size.width
@@ -342,7 +319,11 @@ private struct TimelineRulerOverlay: View {
     let width: CGFloat
 
     var body: some View {
-        let clampedTime = min(max(currentTime, 0), max(maximumTimelineTime, 0))
+        // Ruler and clips follow the same UIKit scroll sample. A separate
+        // display clock or deferred root binding can lag by a UI transaction.
+        let time = scrollState.hasResolvedHorizontalOffset
+            ? Double(scrollState.horizontalOffset / max(pixelsPerSecond, 1)) : currentTime
+        let clampedTime = min(max(time, 0), max(maximumTimelineTime, 0))
         let progress = min(max(scrollState.verticalOffset / 60, 0), 1)
         let easedProgress = progress * progress * (3 - 2 * progress)
 
@@ -356,78 +337,6 @@ private struct TimelineRulerOverlay: View {
         .clipped()
         .allowsHitTesting(false)
         .transaction { $0.animation = nil }
-    }
-}
-
-struct TimelineDisplayLink: UIViewRepresentable {
-    let player: AVPlayer?
-    let isPlaying: Bool
-    let onFrame: (Double) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .zero)
-        view.isUserInteractionEnabled = false
-        context.coordinator.start()
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.parent = self
-        context.coordinator.screenMaximumFrameRate =
-            uiView.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
-        context.coordinator.updateFrameRate()
-    }
-
-    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
-        coordinator.stop()
-    }
-
-    final class Coordinator {
-        var parent: TimelineDisplayLink
-        private var displayLink: CADisplayLink?
-        var screenMaximumFrameRate = 60
-
-        init(parent: TimelineDisplayLink) {
-            self.parent = parent
-        }
-
-        func start() {
-            guard displayLink == nil else { return }
-            let link = CADisplayLink(target: self, selector: #selector(handleFrame))
-            configure(link)
-            link.add(to: .main, forMode: .common)
-            displayLink = link
-        }
-
-        func updateFrameRate() {
-            guard let displayLink else { return }
-            configure(displayLink)
-        }
-
-        func stop() {
-            displayLink?.invalidate()
-            displayLink = nil
-        }
-
-        @objc private func handleFrame() {
-            guard parent.isPlaying, let player = parent.player else { return }
-            let time = CMTimeGetSeconds(player.currentTime())
-            guard time.isFinite else { return }
-            parent.onFrame(time)
-        }
-
-        private func configure(_ link: CADisplayLink) {
-            let native = max(screenMaximumFrameRate, 1)
-            link.preferredFrameRateRange = CAFrameRateRange(
-                minimum: Float(native),
-                maximum: Float(native),
-                preferred: Float(native)
-            )
-        }
     }
 }
 

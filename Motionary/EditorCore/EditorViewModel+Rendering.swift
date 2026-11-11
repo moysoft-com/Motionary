@@ -20,16 +20,39 @@ enum PreviewSeekResult: Sendable {
 private final class BoundedSeekContinuation: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<PreviewSeekResult, Never>?
+    private var result: PreviewSeekResult?
+    private var timeout: Task<Void, Never>?
 
-    init(_ continuation: CheckedContinuation<PreviewSeekResult, Never>) {
+    func install(_ continuation: CheckedContinuation<PreviewSeekResult, Never>) -> Bool {
+        lock.lock()
+        if let result {
+            lock.unlock()
+            continuation.resume(returning: result)
+            return false
+        }
         self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func setTimeout(_ task: Task<Void, Never>) {
+        lock.lock()
+        let completed = result != nil
+        if !completed { timeout = task }
+        lock.unlock()
+        if completed { task.cancel() }
     }
 
     func resume(_ value: PreviewSeekResult) {
         lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
         let continuation = continuation
         self.continuation = nil
+        let timeout = timeout
+        self.timeout = nil
         lock.unlock()
+        timeout?.cancel()
         continuation?.resume(returning: value)
     }
 }
@@ -198,12 +221,11 @@ extension EditorViewModel {
         commandGeneration: Int? = nil
     ) async {
         let requestedCommandGeneration = commandGeneration ?? playbackCommandGeneration
-        let shouldResume = isPlaying || pendingPlaybackResumeAfterPreviewRebuild
         let requestedPreviewQuality = previewQuality
         let showBuildingUI =
             invalidation.contains(.compositionTopology) || player == nil
         let marksPreviewAsBuilding =
-            showBuildingUI || (!shouldResume && invalidation.contains(.previewFrame))
+            showBuildingUI || invalidation.contains(.previewFrame)
         if marksPreviewAsBuilding {
             previewProgress = 0.04
             isRenderingPreview = true
@@ -212,6 +234,7 @@ extension EditorViewModel {
         defer {
             if generation == previewGeneration, marksPreviewAsBuilding {
                 isRenderingPreview = false
+                depthPreparationProgress = nil
             }
         }
         do {
@@ -220,7 +243,8 @@ extension EditorViewModel {
                 for: project,
                 quality: previewQuality,
                 invalidation: invalidation,
-                renderSessionID: UUID()
+                renderSessionID: UUID(),
+                displayPixelSize: previewDisplayPixelSize
             )
             guard !Task.isCancelled, generation == previewGeneration else { return }
             // A user may seek while the preview graph is being prepared. The
@@ -309,6 +333,13 @@ extension EditorViewModel {
                     pendingLivePreviewFrameRefresh = true
                     scheduleLivePreviewFrameRefresh()
                 }
+                if isScrubbing, requiresPlayerSynchronization {
+                    if scrubIsFinishing {
+                        endScrub(at: currentTime)
+                    } else {
+                        updateScrub(to: currentTime)
+                    }
+                }
                 refinePreviewQualityAfterFastFrameIfNeeded(
                     requestedQuality: requestedPreviewQuality,
                     seekTime: currentTime,
@@ -338,6 +369,7 @@ extension EditorViewModel {
                     seekTime: seekTime,
                     generation: generation
                 )
+                if isScrubbing, scrubIsFinishing { endScrub(at: currentTime) }
             }
         } catch is CancellationError {
             if generation == previewGeneration {
@@ -352,6 +384,9 @@ extension EditorViewModel {
                 previewState.status = .failed(message)
                 previewProgress = 0
                 errorMessage = message
+                if scrubIsFinishing {
+                    finishScrub(at: currentTime, generation: scrubSessionGeneration)
+                }
             }
         }
     }
@@ -382,10 +417,17 @@ extension EditorViewModel {
     }
 
     func replacePreviewPlayer(with item: AVPlayerItem?) {
+        scrubSeekTask?.cancel()
+        scrubSeekTask = nil
+        scrubSeekGeneration &+= 1
+        isScrubSeekInFlight = false
+        pendingScrubSeekTime = nil
+        lastIssuedScrubSeekTime = nil
+        livePreviewSeekTask?.cancel()
+        livePreviewSeekTask = nil
         playbackState.isStartingPlayback = false
         scratchAudio.shutdown()
         livePreviewPresentation.frame = nil
-        livePreviewPresentation.setInteracting(false)
         renderService.livePreviewState.clearPausedFrameRenderer()
         renderService.livePreviewState.invalidateComposedFrames()
         previewSeekGeneration &+= 1
@@ -472,12 +514,23 @@ extension EditorViewModel {
                 guard let self,
                     let item,
                     self.player?.currentItem === item,
-                    self.playerItemGeneration == generation
+                    self.playerItemGeneration == generation,
+                    self.isPlaying, !self.isPreviewSeekInFlight
                 else { return }
                 self.schedulePreviewRecovery(
                     reason: .playbackStalled,
                     resumePlayback: self.isPlaying || self.pendingPlaybackResumeAfterPreviewRebuild
                 )
+            }
+        }
+        let ended = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self, weak item] _ in
+            Task { @MainActor in
+                guard let self, let item, self.playerItemGeneration == generation else { return }
+                self.finishPreviewPlayback(for: item)
             }
         }
         let compositorFailure = NotificationCenter.default.addObserver(
@@ -517,23 +570,18 @@ extension EditorViewModel {
                 self.lastPreviewRenderedFrameAt = CFAbsoluteTimeGetCurrent()
                 if let time = notification.userInfo?["compositionTime"] as? Double, time.isFinite {
                     self.lastPreviewRenderedTimelineTime = max(self.lastPreviewRenderedTimelineTime ?? time, time)
-                    // A completed seek is useful even when the gesture has
-                    // already moved ahead. Rejecting it by distance starves
-                    // presentation during fast scrubbing.
+                    // Look the frame up under the current edit revision. A
+                    // GPU completion can reach Main after the graph changes.
                     if self.isScrubbing,
-                        let frame = notification.userInfo?["frame"] {
-                        let currentFrame = self.cachedFrameAtCurrentScrubTime()
-                        self.livePreviewPresentation.setFrame(
-                            currentFrame ?? (frame as! CVPixelBuffer),
-                            at: currentFrame == nil
-                                ? time
-                                : self.currentScrubPresentationTime()
-                        )
+                        let frame = self.renderService.livePreviewState.cachedFrame(
+                            at: time, sessionID: self.previewRenderSessionID)
+                    {
+                        self.presentScrubFrame(frame, at: time)
                     }
                 }
             }
         }
-        previewItemNotificationObservers = [failed, stalled, compositorFailure, renderedFrame]
+        previewItemNotificationObservers = [failed, stalled, ended, compositorFailure, renderedFrame]
     }
 
     func confirmPreviewItemFailure(
@@ -594,26 +642,27 @@ extension EditorViewModel {
         reason: PreviewRecoveryReason,
         resumePlayback: Bool
     ) {
-        guard duration > 0 else { return }
-        guard !previewRecoveryCircuitIsOpen else { return }
-        guard registerPreviewRecoveryAttempt(reason: reason) else {
+        guard duration > 0, !previewIsSuspended, !previewRecoveryCircuitIsOpen,
+            previewRecoveryTask == nil else { return }
+        guard previewRecoveryAttemptCount < 3, registerPreviewRecoveryAttempt() else {
             openPreviewRecoveryCircuit(reason: reason)
             return
         }
         previewRecoveryGeneration &+= 1
         previewRecoveryAttemptCount &+= 1
         let generation = previewRecoveryGeneration
-        let targetTime = clampedTimelineTime(currentTime)
-        let shouldResume = resumePlayback
-        previewRecoveryTask?.cancel()
+        let commandGeneration = playbackCommandGeneration
         previewRecoveryTask = Task { [weak self] in
             await MainActor.run {
                 guard let self,
-                    self.previewRecoveryGeneration == generation
+                    !Task.isCancelled, self.previewRecoveryGeneration == generation
                 else { return }
+                self.previewRecoveryTask = nil
+                let shouldResume = self.playbackCommandGeneration == commandGeneration
+                    ? resumePlayback : self.isPlaying || self.pendingPlaybackResumeAfterPreviewRebuild
                 self.performHardPreviewRecovery(
                     reason: reason,
-                    seekTo: targetTime,
+                    seekTo: self.clampedTimelineTime(self.currentTime),
                     resumePlayback: shouldResume,
                     generation: generation
                 )
@@ -621,7 +670,7 @@ extension EditorViewModel {
         }
     }
 
-    private func registerPreviewRecoveryAttempt(reason: PreviewRecoveryReason) -> Bool {
+    private func registerPreviewRecoveryAttempt() -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         if previewRecoveryLoopWindowStartedAt == 0
             || now - previewRecoveryLoopWindowStartedAt > 3
@@ -630,16 +679,13 @@ extension EditorViewModel {
             previewRecoveryLoopCount = 0
         }
         previewRecoveryLoopCount += 1
-        if previewRecoveryLoopCount <= 3 {
-            return true
-        }
-        AppLogger.rendering.error(
-            "Preview recovery circuit opened after repeated \(reason.rawValue, privacy: .public) failures"
-        )
-        return false
+        return previewRecoveryLoopCount <= 3
     }
 
     private func openPreviewRecoveryCircuit(reason: PreviewRecoveryReason) {
+        AppLogger.rendering.error(
+            "Preview recovery circuit opened after repeated \(reason.rawValue, privacy: .public) failures"
+        )
         previewRecoveryCircuitIsOpen = true
         previewRecoveryGeneration &+= 1
         playbackCommandGeneration &+= 1
@@ -658,6 +704,7 @@ extension EditorViewModel {
         pendingPlaybackResumeAfterPreviewRebuild = false
         isPlaying = false
         isScrubbing = false
+        scrubIsFinishing = false
         wasPlayingBeforeScrub = false
         replacePreviewPlayer(with: nil)
         renderService.livePreviewState.removeAll()
@@ -684,6 +731,7 @@ extension EditorViewModel {
         pendingPlaybackResumeAfterPreviewRebuild = resumePlayback
         isPlaying = false
         isScrubbing = false
+        scrubIsFinishing = false
         wasPlayingBeforeScrub = false
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
@@ -724,11 +772,6 @@ extension EditorViewModel {
     func seekPlayerAndWait(to time: Double) async -> PreviewSeekResult {
         guard let player else { return .superseded }
         let clamped = clampedPlayableTime(time)
-        // Some compressed sources expose their first decoded sample at the
-        // first frame boundary rather than exactly t=0. Requesting zero with a
-        // custom compositor can therefore produce a valid but black frame.
-        // Keep the editor playhead at zero while presenting the first actual
-        // video sample.
         let presentationTime = livePreviewPresentationTime(clamped)
         player.currentItem?.cancelPendingSeeks()
         let succeeded = await boundedSeek(
@@ -754,18 +797,38 @@ extension EditorViewModel {
         isPreviewSeekInFlight = true
         lastPreviewRenderedTimelineTime = nil
         let item = player.currentItem
-        let result: PreviewSeekResult = await withCheckedContinuation { continuation in
-            let boundedContinuation = BoundedSeekContinuation(continuation)
-            player.seek(
-                to: CMTime(seconds: time, preferredTimescale: 600),
-                toleranceBefore: toleranceBefore,
-                toleranceAfter: toleranceAfter
-            ) { finished in
-                boundedContinuation.resume(finished ? .completed : .interrupted)
+        let boundedContinuation = BoundedSeekContinuation()
+        let result: PreviewSeekResult = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard boundedContinuation.install(continuation) else { return }
+                guard !Task.isCancelled else {
+                    boundedContinuation.resume(.superseded)
+                    return
+                }
+                player.seek(
+                    to: CMTime(seconds: time, preferredTimescale: 600),
+                    toleranceBefore: toleranceBefore,
+                    toleranceAfter: toleranceAfter
+                ) { finished in
+                    boundedContinuation.resume(finished ? .completed : .interrupted)
+                }
+                boundedContinuation.setTimeout(Task {
+                    do { try await Task.sleep(nanoseconds: timeoutNanoseconds) }
+                    catch { return }
+                    boundedContinuation.resume(.timedOut)
+                })
             }
-            Task {
-                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
-                boundedContinuation.resume(.timedOut)
+        } onCancel: { [weak self, weak player] in
+            // Cancellation must wake the waiter immediately, even if
+            // AVFoundation never calls back. Do not leave a five-second seek
+            // alive after its gesture or composition generation was replaced.
+            boundedContinuation.resume(.superseded)
+            Task { @MainActor in
+                guard let self, let player,
+                    self.previewSeekGeneration == generation,
+                    self.player === player, player.currentItem === item
+                else { return }
+                item?.cancelPendingSeeks()
             }
         }
         guard generation == previewSeekGeneration else { return .superseded }
@@ -774,6 +837,7 @@ extension EditorViewModel {
             player.currentItem === item,
             !Task.isCancelled
         else { return .superseded }
+        if result == .timedOut { item?.cancelPendingSeeks() }
         return result
     }
 

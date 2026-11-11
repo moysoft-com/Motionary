@@ -41,7 +41,9 @@ struct BackgroundBrushEditor: View {
                         ContentUnavailableView("Cannot open media", systemImage: "photo.badge.exclamationmark",
                             description: Text(error))
                     } else {
-                        ProgressView("Loading source…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                        ProgressView("Loading source…")
+                            .motionaryLoadingShimmer()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
                 .frame(maxHeight: .infinity)

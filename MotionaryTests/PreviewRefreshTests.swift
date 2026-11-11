@@ -124,6 +124,29 @@ struct PreviewRefreshTests {
     }
 
     @MainActor
+    @Test func boundaryGestureKeepsLiveFrameUntilCanonicalPreviewIsRebuilt() throws {
+        let (model, _) = makeModel()
+        defer { model.stop() }
+        let item = try #require(model.project.tracks.first?.items.first)
+        let visuals = try #require(item.editableVisuals)
+        let frame = try makeFrame()
+        model.livePreviewPresentation.frame = frame
+        model.beginInteractiveEdit()
+        model.renderService.livePreviewState.setVisuals(visuals, for: item.id)
+        model.pendingLiveVisualOverrideItemIDs.insert(item.id)
+        model.pendingPreviewInvalidation.insert(.previewFrame)
+
+        // A second drag at an endpoint does not change the project, but it
+        // can interrupt the preceding edit's still-pending preview rebuild.
+        model.finishInteractiveEdit(rebuild: true, delayRebuild: false)
+
+        #expect(model.livePreviewPresentation.frame === frame)
+        #expect(model.renderService.livePreviewState.override(for: item.id)?.visuals != nil)
+        #expect(model.pendingLiveVisualOverrideItemIDs.contains(item.id))
+        #expect(model.rebuildTask != nil)
+    }
+
+    @MainActor
     private func waitUntil(_ predicate: () -> Bool) async throws {
         for _ in 0..<200 {
             if predicate() { return }

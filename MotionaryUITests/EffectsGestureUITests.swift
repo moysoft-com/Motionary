@@ -9,6 +9,78 @@ final class EffectsGestureUITests: XCTestCase {
     func testCompactPullAndNavigation() { exercise(side: false) }
     func testSidePullAndNavigation() { exercise(side: true) }
 
+    func testAdjustmentEffectGraphReturnsToDetail() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--adjustment-editor-tests", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let adjustment = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH 'timeline-item-' AND label == 'Adjustment'"
+        )).firstMatch
+        XCTAssertTrue(adjustment.waitForExistence(timeout: 30))
+        adjustment.tap()
+        app.buttons["Edit"].tap()
+        app.buttons["Noir"].firstMatch.tap()
+        for _ in 0..<2 {
+            app.buttons["Graph"].tap()
+            let preset = app.buttons["Ease In"]
+            XCTAssertTrue(preset.waitForExistence(timeout: 5))
+            preset.tap()
+            app.buttons["Close graphs"].tap()
+            let back = app.buttons["Back to effects"]
+            let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: back)
+            wait(for: [visible], timeout: 5)
+        }
+        let detail = XCTAttachment(screenshot: app.screenshot())
+        detail.name = "Effect detail after graph"
+        detail.lifetime = .keepAlways
+        add(detail)
+        app.buttons["Edit"].tap()
+        XCTAssertTrue(app.buttons["Add effect"].waitForExistence(timeout: 5))
+        for _ in 0..<3 {
+            app.buttons["Noir"].firstMatch.tap()
+            let back = app.buttons["Back to effects"]
+            let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: back)
+            wait(for: [visible], timeout: 5)
+            app.buttons["Edit"].tap()
+            let add = app.buttons["Add effect"]
+            let overview = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: add)
+            wait(for: [overview], timeout: 5)
+        }
+        let overview = XCTAttachment(screenshot: app.screenshot())
+        overview.name = "Effect overview without markers"
+        overview.lifetime = .keepAlways
+        add(overview)
+    }
+
+    func testVerticalScrollInterruptsEffectScrubberMomentum() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--effects-gesture-tests", "--scrubber-momentum-test",
+                               "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        let effect = app.buttons["Camera Wiggle"].firstMatch
+        XCTAssertTrue(effect.waitForExistence(timeout: 20))
+        effect.tap()
+        let back = app.buttons["Back to effects"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        let scrubber = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH 'motionary-property-scrubber-' AND label == 'Strength'"
+        )).firstMatch
+        XCTAssertTrue(scrubber.waitForExistence(timeout: 5))
+        let start = scrubber.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.5))
+        let end = scrubber.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .fast, thenHoldForDuration: 0)
+        let workspace = app.descendants(matching: .any)["effects-test-workspace"].firstMatch
+        let scrollStart = workspace.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+        let scrollEnd = workspace.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+        scrollStart.press(forDuration: 0.05, thenDragTo: scrollEnd, withVelocity: .fast, thenHoldForDuration: 0)
+        let valueAfterScroll = scrubber.value as? String
+        XCTAssertNotNil(valueAfterScroll, "The scrubber must expose its current value")
+        Thread.sleep(forTimeInterval: 1.2)
+        XCTAssertEqual(scrubber.value as? String, valueAfterScroll,
+                       "The value must stop moving after the workspace starts scrolling")
+        XCTAssertTrue(back.exists)
+    }
+
     func testAnimatedLibraryPreviewPlaysWithoutSelectingTheEffect() {
         let app = XCUIApplication()
         app.launchArguments = ["--effects-gesture-tests", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]

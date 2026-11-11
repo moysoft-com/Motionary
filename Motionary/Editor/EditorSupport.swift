@@ -35,18 +35,23 @@ struct EditorBusyOverlay: View {
                         VStack(spacing: 12) {
                             if exportState.isExporting {
                                 ProgressView(value: exportState.progress)
+                                    .motionaryProgressShimmer(exportState.progress)
                             } else if let analysisState = viewModel.analysisState {
                                 ProgressView(value: analysisState.progress)
-                            } else if viewModel.isInitialPreviewLoadBlocking {
-                                ProgressView(value: previewState.progress)
+                                    .motionaryProgressShimmer(analysisState.progress)
+                            } else if let progress = viewModel.depthPreparationProgress, !viewModel.depthPreparationIndeterminate {
+                                ProgressView(value: progress)
+                                    .motionaryProgressShimmer(progress)
                             } else {
                                 ProgressView()
+                                    .motionaryLoadingShimmer()
                             }
                             Text(title)
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(MotionaryTheme.textPrimary)
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.82)
+                                .motionaryLoadingShimmer()
                             Text("Tap outside to stop")
                                 .font(.caption)
                                 .foregroundStyle(MotionaryTheme.textSecondary)
@@ -62,6 +67,10 @@ struct EditorBusyOverlay: View {
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: DepthBakeStore.preparationProgress)
+            .receive(on: DispatchQueue.main)) { notification in
+            viewModel.handleDepthPreparationProgress(notification)
+        }
         .task(id: busyKey) {
             showsOverlay = false
             guard viewModel.shouldPresentBusyOverlay else { return }
@@ -72,6 +81,7 @@ struct EditorBusyOverlay: View {
     }
 
     private var busyKey: String {
+        if viewModel.depthPreparationProgress != nil { return "depth" }
         if exportState.isExporting { return "export" }
         if viewModel.isImporting { return "import" }
         if let kind = viewModel.analysisState?.kind { return kind.rawValue }
@@ -118,7 +128,7 @@ struct EditorCancelTaskPopover: View {
         }
         .padding(14)
         .frame(width: 244)
-        .motionaryGlass(cornerRadius: 16)
+        .motionaryGlass(cornerRadius: 18)
         .shadow(color: .black.opacity(0.24), radius: 18, y: 8)
     }
 }
@@ -171,48 +181,42 @@ func aspectFitRect(in size: CGSize, aspectRatio: CGFloat) -> CGRect {
     )
 }
 
+@MainActor
 func timelineDragHaptic() {
     EditorHaptics.dragStart()
 }
 
+@MainActor
 enum EditorHaptics {
-    static func tap() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.55)
-    }
+    // Generator teardown touches UIKit's shared feedback preferences. Keep
+    // generators alive instead of allocating/deallocating one per scrub tick.
+    private static let light = UIImpactFeedbackGenerator(style: .light)
+    private static let medium = UIImpactFeedbackGenerator(style: .medium)
+    private static let rigid = UIImpactFeedbackGenerator(style: .rigid)
+    private static let soft = UIImpactFeedbackGenerator(style: .soft)
+    private static let selectionGenerator = UISelectionFeedbackGenerator()
+    private static let notification = UINotificationFeedbackGenerator()
+    private static var lastSelectionTime: CFTimeInterval = -.infinity
+
+    static func tap() { light.impactOccurred(intensity: 0.55) }
 
     static func selection() {
-        UISelectionFeedbackGenerator().selectionChanged()
+        let now = CACurrentMediaTime()
+        guard now - lastSelectionTime >= 1.0 / 30.0 else { return }
+        lastSelectionTime = now
+        selectionGenerator.selectionChanged()
     }
 
-    static func dragStart() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.85)
-    }
-
-    static func trimStart() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred(intensity: 0.75)
-    }
-
+    static func dragStart() { medium.impactOccurred(intensity: 0.85) }
+    static func trimStart() { light.impactOccurred(intensity: 0.75) }
     static func scrubStart() {
-        UISelectionFeedbackGenerator().selectionChanged()
+        lastSelectionTime = CACurrentMediaTime()
+        selectionGenerator.prepare()
+        selectionGenerator.selectionChanged()
     }
-
-    static func snap() {
-        UIImpactFeedbackGenerator(style: .rigid).impactOccurred(intensity: 0.9)
-    }
-
-    static func layerReady() {
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.82)
-    }
-
-    static func editCommit() {
-        UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.65)
-    }
-
-    static func deletePrompt() {
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-    }
-
-    static func deleteCommit() {
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-    }
+    static func snap() { rigid.impactOccurred(intensity: 0.9) }
+    static func layerReady() { medium.impactOccurred(intensity: 0.82) }
+    static func editCommit() { soft.impactOccurred(intensity: 0.65) }
+    static func deletePrompt() { notification.notificationOccurred(.warning) }
+    static func deleteCommit() { notification.notificationOccurred(.success) }
 }

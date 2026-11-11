@@ -67,44 +67,46 @@ struct MotionBlurEffectRenderer: EffectRenderModule {
         let protected = resources.activeScratchTextureIDs()
         let transparent = CIImage(color: .clear).cropped(to: bounds)
         var accumulated: CIImage?
-        for (index, transform) in transforms.enumerated() {
-            let source: CIImage
-            let offset = exposure * (Double(index) + 0.5) / Double(count)
-            if context.motionScene != nil || hasEffectMotion, let input = context.effectInput {
-                let base = try context.motionScene?.sample(offset, components) ?? input
-                let sampleTime = max(context.clipTime - offset, 0)
-                var sampled = base
-                // Keep non-motion effects at the current time, while evaluating camera
-                // transforms at each shutter sample in their original stack order.
-                for prefixEffect in context.temporalPrefix.effects {
-                    let time = motionEffects.contains(prefixEffect.moduleID) ? sampleTime : context.clipTime
-                    sampled = try EffectRenderRegistry.shared.render(EffectStack(effects: [prefixEffect]), to: sampled,
-                        context: EffectRenderContext(compositionTime: context.compositionTime - (context.clipTime - time),
-                            clipTime: time, frameIndex: context.frameIndex, itemID: context.itemID,
-                            renderScale: context.renderScale, quality: context.quality,
-                            frameDuration: context.frameDuration),
-                        resources: resources, failurePolicy: .failOnUnavailableEffects)
-                }
-                source = sampled
-            } else { source = image }
-            let sample = source.transformed(by: transform.concatenating(downscale))
-                .composited(over: transparent).cropped(to: bounds)
-            let blended: CIImage
-            if let previous = accumulated {
-                blended = previous.applyingFilter("CIDissolveTransition", parameters: [
-                    kCIInputTargetImageKey: sample, kCIInputTimeKey: 1 / Double(index + 1)
-                ]).cropped(to: bounds)
-            } else { blended = sample }
-            let texture = surfaces[index % 2]
-            resources.owner.ciContext.render(blended.transformed(by: CGAffineTransform(
-                translationX: -bounds.minX, y: -bounds.minY)), to: texture,
-                commandBuffer: resources.commandBuffer, bounds: CGRect(origin: .zero, size: bounds.size),
-                colorSpace: resources.owner.workingColorSpace)
-            guard let materialized = CIImage(mtlTexture: texture, options: [.colorSpace: resources.owner.workingColorSpace])
-            else { throw MetalRenderingError.invalidRenderTarget }
-            accumulated = materialized.transformed(by: CGAffineTransform(
-                translationX: bounds.minX, y: bounds.minY)).cropped(to: bounds)
-            resources.releaseScratchTextures(excluding: protected)
+        try resources.reusingDisplacementMaps {
+            for (index, transform) in transforms.enumerated() {
+                let source: CIImage
+                let offset = exposure * (Double(index) + 0.5) / Double(count)
+                if context.motionScene != nil || hasEffectMotion, let input = context.effectInput {
+                    let base = try context.motionScene?.sample(offset, components) ?? input
+                    let sampleTime = max(context.clipTime - offset, 0)
+                    var sampled = base
+                    // Keep non-motion effects at the current time, while evaluating camera
+                    // transforms at each shutter sample in their original stack order.
+                    for prefixEffect in context.temporalPrefix.effects {
+                        let time = motionEffects.contains(prefixEffect.moduleID) ? sampleTime : context.clipTime
+                        sampled = try EffectRenderRegistry.shared.render(EffectStack(effects: [prefixEffect]), to: sampled,
+                            context: EffectRenderContext(compositionTime: context.compositionTime - (context.clipTime - time),
+                                clipTime: time, frameIndex: context.frameIndex, itemID: context.itemID,
+                                renderScale: context.renderScale, quality: context.quality,
+                                frameDuration: context.frameDuration),
+                            resources: resources, failurePolicy: .failOnUnavailableEffects)
+                    }
+                    source = sampled
+                } else { source = image }
+                let sample = source.transformed(by: transform.concatenating(downscale))
+                    .composited(over: transparent).cropped(to: bounds)
+                let blended: CIImage
+                if let previous = accumulated {
+                    blended = previous.applyingFilter("CIDissolveTransition", parameters: [
+                        kCIInputTargetImageKey: sample, kCIInputTimeKey: 1 / Double(index + 1)
+                    ]).cropped(to: bounds)
+                } else { blended = sample }
+                let texture = surfaces[index % 2]
+                resources.owner.ciContext.render(blended.transformed(by: CGAffineTransform(
+                    translationX: -bounds.minX, y: -bounds.minY)), to: texture,
+                    commandBuffer: resources.commandBuffer, bounds: CGRect(origin: .zero, size: bounds.size),
+                    colorSpace: resources.owner.workingColorSpace)
+                guard let materialized = CIImage(mtlTexture: texture, options: [.colorSpace: resources.owner.workingColorSpace])
+                else { throw MetalRenderingError.invalidRenderTarget }
+                accumulated = materialized.transformed(by: CGAffineTransform(
+                    translationX: bounds.minX, y: bounds.minY)).cropped(to: bounds)
+                resources.releaseScratchTextures(excluding: protected)
+            }
         }
         return EffectRenderResult(image: (accumulated ?? image)
             .transformed(by: CGAffineTransform(scaleX: 1 / scale, y: 1 / scale)).cropped(to: outputBounds))

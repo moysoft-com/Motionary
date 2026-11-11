@@ -32,6 +32,7 @@ struct EffectModuleID: RawRepresentable, Codable, Hashable, Sendable, Identifiab
 }
 
 extension EffectModuleID {
+    static let depthMap = EffectModuleID(prefix + "depth-map")
     private static let prefix = "com.moysoft.motionary.effect."
 
     static let sepia = EffectModuleID(prefix + "sepia")
@@ -51,6 +52,8 @@ extension EffectModuleID {
     static let matteContrast = EffectModuleID(prefix + "matte-contrast")
     static let cleanSharpen = EffectModuleID(prefix + "clean-sharpen")
     static let fineGrain = EffectModuleID(prefix + "fine-grain")
+    static let deepGlow = EffectModuleID(prefix + "deep-glow")
+    static let ripple = EffectModuleID(prefix + "ripple")
     static let softGlow = EffectModuleID(prefix + "soft-glow")
     static let anamorphicFlare = EffectModuleID(prefix + "anamorphic-flare")
     static let lightLeak = EffectModuleID(prefix + "light-leak")
@@ -128,6 +131,7 @@ extension EffectParameterID {
     static let scanlines: EffectParameterID = "scanlines"
     static let exposure: EffectParameterID = "exposure"
     static let amount: EffectParameterID = "amount"
+    static let reflection: EffectParameterID = "reflection"
     static let wavelength: EffectParameterID = "wavelength"
     static let speed: EffectParameterID = "speed"
     static let center: EffectParameterID = "center"
@@ -339,6 +343,8 @@ enum EffectValue: Codable, Equatable, Sendable {
 
     func interpolated(to other: EffectValue, progress: Double) -> EffectValue {
         let amount = min(max(progress, 0), 1)
+        if amount <= 0 { return self }
+        if amount >= 1 { return other }
         switch (self, other) {
         case (.scalar(let left), .scalar(let right)):
             return .scalar(left + (right - left) * amount)
@@ -533,8 +539,19 @@ struct EffectParameterState: Codable, Equatable, Sendable {
 
         var leftFrames = keyframes.filter { $0.time < splitTime }
         var rightFrames = keyframes.filter { $0.time > splitTime }
+        var rightInterpolation: KeyframeInterpolation = .linear
+        if let leftIndex = keyframes.lastIndex(where: { $0.time < splitTime }),
+            leftIndex + 1 < keyframes.count
+        {
+            let left = keyframes[leftIndex]
+            let right = keyframes[leftIndex + 1]
+            let span = max(right.time - left.time, KeyframeMergeSupport.minimumInterpolationSpan)
+            let parts = left.interpolation.split(at: min(max((splitTime - left.time) / span, 0), 1))
+            if let localIndex = leftFrames.indices.last { leftFrames[localIndex].interpolation = parts.left }
+            rightInterpolation = parts.right
+        }
         leftFrames.append(Keyframe(time: splitTime, value: splitValue))
-        rightFrames.insert(Keyframe(time: 0, value: splitValue), at: 0)
+        rightFrames.insert(Keyframe(time: 0, value: splitValue, interpolation: rightInterpolation), at: 0)
         for index in rightFrames.indices.dropFirst() {
             rightFrames[index].time = max(rightFrames[index].time - splitTime, 0)
         }
@@ -548,6 +565,7 @@ struct EffectParameterState: Codable, Equatable, Sendable {
         guard !keyframes.isEmpty else { return self }
         let offset = min(delta, oldDuration)
         guard offset != 0 else { return self }
+        if offset > 0 { return split(at: offset).right }
         let edgeValue = value(at: max(offset, 0))
         let frames = keyframes.compactMap { frame -> Keyframe<EffectValue>? in
             guard frame.time >= offset else { return nil }
@@ -562,8 +580,7 @@ struct EffectParameterState: Codable, Equatable, Sendable {
         guard !keyframes.isEmpty else { return self }
         let duration = max(newDuration, 0)
         guard duration < oldDuration else { return self }
-        let frames = keyframes.filter { $0.time <= duration }
-        return EffectParameterState(baseValue: frames.isEmpty ? value(at: duration) : baseValue, keyframes: frames)
+        return split(at: duration).left
     }
 
 }
@@ -689,7 +706,13 @@ struct EffectInstance: Identifiable, Codable, Equatable, Sendable {
         for parameterID: EffectParameterID,
         component: EffectValueComponent
     ) -> AnimatableProperty<Double>? {
-        parameters[parameterID.rawValue]?.property(for: component)
+        if let state = parameters[parameterID.rawValue] {
+            return state.property(for: component)
+        }
+        guard let descriptor = EffectRegistry.shared.descriptor(for: moduleID)?.descriptor(for: parameterID) else {
+            return nil
+        }
+        return EffectParameterState(baseValue: descriptor.defaultValue).property(for: component)
     }
 
     mutating func setScalarProperty(
@@ -704,7 +727,8 @@ struct EffectInstance: Identifiable, Codable, Equatable, Sendable {
         for parameterID: EffectParameterID,
         component: EffectValueComponent
     ) {
-        guard var state = parameters[parameterID.rawValue] else { return }
+        guard var state = parameters[parameterID.rawValue] ?? EffectRegistry.shared.descriptor(for: moduleID)?
+            .descriptor(for: parameterID).map({ EffectParameterState(baseValue: $0.defaultValue) }) else { return }
         state.setProperty(property, for: component)
         parameters[parameterID.rawValue] = state
     }

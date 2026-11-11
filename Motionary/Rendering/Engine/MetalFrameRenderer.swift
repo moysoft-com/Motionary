@@ -47,6 +47,7 @@ struct AdjustmentScenePlacement {
     func transforms(at time: Double, referenceTime: Double? = nil,
                     components: String = "All") -> [CGAffineTransform] {
         var result = Array(repeating: CGAffineTransform.identity, count: clips.count)
+        guard clips.contains(where: \.isAdjustmentLayer) else { return result }
         let bounds = CGRect(origin: .zero, size: canvasSize)
         struct Input {
             var ids: Set<UUID>
@@ -89,19 +90,16 @@ struct AdjustmentScenePlacement {
             flush()
             inputs = rebuilt
         }
-        let adjustmentIndices = clips.indices.reversed().filter { scopes[$0] != nil }
-        for index in clips.indices {
-            var placement = CGAffineTransform.identity
-            for laterIndex in adjustmentIndices where laterIndex > index {
-                guard scopes[laterIndex]?.contains(index) == true else { continue }
-                let adjustment = clips[laterIndex]
-                let localTime = max(time - adjustment.timelineStart, 0)
-                let transform = EffectLayerMotion(transform: adjustment.transform, canvasSize: canvasSize, isGenerated: true)
-                    .placement(at: localTime, bounds: bounds,
-                        referenceTime: referenceTime.map { max($0 - adjustment.timelineStart, 0) }, components: components)
-                placement = transform.concatenating(placement)
+        for adjustmentIndex in clips.indices.reversed() {
+            guard let leaves = scopes[adjustmentIndex], !leaves.isEmpty else { continue }
+            let adjustment = clips[adjustmentIndex]
+            let localTime = max(time - adjustment.timelineStart, 0)
+            let transform = EffectLayerMotion(transform: adjustment.transform, canvasSize: canvasSize, isGenerated: true)
+                .placement(at: localTime, bounds: bounds,
+                    referenceTime: referenceTime.map { max($0 - adjustment.timelineStart, 0) }, components: components)
+            for index in leaves {
+                result[index] = transform.concatenating(result[index])
             }
-            result[index] = placement
         }
         return result
     }
@@ -112,7 +110,7 @@ struct AdjustmentScenePlacement {
 private struct FrameCompositeNode {
     let layerIDs: Set<UUID>
     let image: CIImage
-    let motionScene: EffectMotionScene
+    var motionScene: EffectMotionScene? = nil
     var blendMode: BlendMode = .normal
     var blendIntensity: Double = 1
     var isCanvasBackground = false
@@ -268,33 +266,52 @@ final class MetalFrameRenderer: @unchecked Sendable {
             let active = activeClips(in: plan, at: safeTime)
             let initialBackground = output
             let transparentCanvas = transparentImage(croppedTo: canvasRect)
-            var nodes = [FrameCompositeNode(layerIDs: [], image: initialBackground,
-                motionScene: EffectMotionScene { _, _ in initialBackground }, isCanvasBackground: true)]
+            var nodes = [FrameCompositeNode(layerIDs: [], image: initialBackground, isCanvasBackground: true)]
             func composite(_ inputs: [FrameCompositeNode]) throws -> CIImage {
                 var image = transparentCanvas
+                // Thread the accumulated background texture through consecutive
+                // artistic blends so each layer rasterizes its foreground once
+                // instead of paying a full-frame background copy per layer.
+                var backgroundTexture: MTLTexture?
                 for input in inputs {
-                    image = try MetalLayerCompositor.blend(foreground: input.image, background: image,
+                    let blended = try MetalLayerCompositor.blend(foreground: input.image, background: image,
                         in: canvasRect, mode: input.blendMode, intensity: input.blendIntensity,
-                        resources: frameResources)
+                        resources: frameResources, backgroundTexture: backgroundTexture)
+                    image = blended.image
+                    backgroundTexture = blended.texture
                 }
                 // Cropping alone intersects extents; a transparent canvas is
                 // required to expand small inputs into the adjustment domain.
                 return image.composited(over: transparentCanvas).cropped(to: canvasRect)
             }
             func scene(_ inputs: [FrameCompositeNode]) -> EffectMotionScene {
-                EffectMotionScene(hasAnimatedTransforms: inputs.contains { $0.motionScene.hasAnimatedTransforms }) { offset, components in
+                EffectMotionScene(hasAnimatedTransforms: inputs.contains { $0.motionScene?.hasAnimatedTransforms == true }) { offset, components in
                     var image = transparentCanvas
+                    var backgroundTexture: MTLTexture?
                     for input in inputs {
-                        image = try MetalLayerCompositor.blend(
-                            foreground: input.motionScene.sample(offset, components), background: image,
+                        let blended = try MetalLayerCompositor.blend(
+                            foreground: input.motionScene?.sample(offset, components) ?? input.image, background: image,
                             in: canvasRect, mode: input.blendMode, intensity: input.blendIntensity,
-                            resources: frameResources)
+                            resources: frameResources, backgroundTexture: backgroundTexture)
+                        image = blended.image
+                        backgroundTexture = blended.texture
                     }
                     return image.composited(over: transparentCanvas).cropped(to: canvasRect)
                 }
             }
             let scenePlacement = AdjustmentScenePlacement(clips: active, canvasSize: plan.renderSize)
             let sceneTransforms = scenePlacement.transforms(at: safeTime)
+            // Every leaf in a shutter sample uses the same scene placement.
+            // Keep only the last sample, local to this command buffer's encoding.
+            var lastSceneSample: (time: Double, components: String, transforms: [CGAffineTransform])?
+            func sampledSceneTransform(at time: Double, components: String, clipIndex: Int) -> CGAffineTransform {
+                if let sample = lastSceneSample, sample.time == time, sample.components == components {
+                    return sample.transforms[clipIndex]
+                }
+                let transforms = scenePlacement.transforms(at: time, referenceTime: safeTime, components: components)
+                lastSceneSample = (time, components, transforms)
+                return transforms[clipIndex]
+            }
             let needsMotionScene = active.contains { clip in
                 clip.isAdjustmentLayer && clip.effectStack.effects.contains {
                     $0.isEnabled && $0.moduleID == .motionBlur
@@ -326,16 +343,18 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     func flush() throws {
                         guard !run.isEmpty else { return }
                         let input = try composite(run)
-                        let inputScene = scene(run)
+                        let inputScene = needsMotionScene ? scene(run) : nil
                         let processed = try measured("Adjustment Group", id: signpostID) {
                             try applyAdjustmentLayer(clip, to: input, canvasRect: canvasRect,
                                 at: localTime, compositionTime: safeTime, frameIndex: frameIndex,
-                                plan: plan, resources: frameResources, motionScene: needsMotionScene ? inputScene : nil)
+                                plan: plan, resources: frameResources, motionScene: inputScene)
                         }
-                        let processedScene = EffectMotionScene(hasAnimatedTransforms: inputScene.hasAnimatedTransforms) { offset, components in
-                            try self.applyAdjustmentLayer(clip, to: inputScene.sample(offset, components),
-                                canvasRect: canvasRect, at: localTime, compositionTime: safeTime,
-                                frameIndex: frameIndex, plan: plan, resources: frameResources)
+                        let processedScene = inputScene.map { inputScene in
+                            EffectMotionScene(hasAnimatedTransforms: inputScene.hasAnimatedTransforms) { offset, components in
+                                try self.applyAdjustmentLayer(clip, to: inputScene.sample(offset, components),
+                                    canvasRect: canvasRect, at: localTime, compositionTime: safeTime,
+                                    frameIndex: frameIndex, plan: plan, resources: frameResources)
+                            }
                         }
                         rebuilt.append(FrameCompositeNode(layerIDs: members, image: processed, motionScene: processedScene))
                         run.removeAll(keepingCapacity: true)
@@ -350,8 +369,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 }
                 // Preserve the structural group anchor even when a source is
                 // transparent, culled, or temporarily unavailable.
-                nodes.append(FrameCompositeNode(layerIDs: Set(clip.layerID.map { [$0] } ?? []),
-                    image: transparentCanvas, motionScene: EffectMotionScene { _, _ in transparentCanvas }))
+                let layerIDs = Set(clip.layerID.map { [$0] } ?? [])
+                nodes.append(FrameCompositeNode(layerIDs: layerIDs, image: transparentCanvas))
                 let nodeIndex = nodes.count - 1
                 if clip.transform.opacity.value(at: localTime) <= 0.000_001 { continue }
                 let isGeneratedLayer = clip.shape != nil || clip.text != nil
@@ -402,8 +421,6 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     $0.isEnabled && $0.moduleID == .motionBlur
                 }
                 image = try measured("Adjustments and Effects", id: signpostID) {
-                    let colorAdjusted = applyAdjustments(clip.adjustments, to: image, at: localTime)
-                    let adjusted = hasObjectMotionBlur ? applyMask(clip.mask, to: colorAdjusted) : colorAdjusted
                     let coordinates = LayerEffectCoordinates(
                         isGeneratedLayer: isGeneratedLayer,
                         outputScale: plan.renderScale,
@@ -412,10 +429,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                         canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
                             height: plan.renderSize.height / plan.renderScale)
                     )
-                    let effectOutput = try effectRegistry.render(
-                        clip.effectStack,
-                        to: adjusted.transformed(by: coordinates.inputTransform),
-                        context: EffectRenderContext(
+                    var renderContext = EffectRenderContext(
                             compositionTime: safeTime,
                             clipTime: localTime,
                             frameIndex: frameIndex,
@@ -428,8 +442,22 @@ final class MetalFrameRenderer: @unchecked Sendable {
                                 canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
                                     height: plan.renderSize.height / plan.renderScale),
                                 isGenerated: isGeneratedLayer)
-                        ),
-                        resources: frameResources,
+                        )
+                    let depthEffects = clip.effectStack.effects.filter { $0.moduleID == .depthMap }
+                    let otherEffects = clip.effectStack.effects.filter { $0.moduleID != .depthMap }
+                    renderContext.depthSourceEffects = EffectStack(effects: depthEffects)
+                    let source = try effectRegistry.render(
+                        EffectStack(effects: depthEffects),
+                        to: image.transformed(by: coordinates.inputTransform),
+                        context: renderContext, resources: frameResources,
+                        failurePolicy: plan.failurePolicy
+                    ).transformed(by: coordinates.inputTransform.inverted())
+                    let colorAdjusted = applyAdjustments(clip.adjustments, to: source, at: localTime)
+                    let adjusted = hasObjectMotionBlur ? applyMask(clip.mask, to: colorAdjusted) : colorAdjusted
+                    let effectOutput = try effectRegistry.render(
+                        EffectStack(effects: otherEffects),
+                        to: adjusted.transformed(by: coordinates.inputTransform),
+                        context: renderContext, resources: frameResources,
                         failurePolicy: plan.failurePolicy
                     )
                     return effectOutput.transformed(by: coordinates.inputTransform.inverted())
@@ -455,28 +483,31 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     opacity *= sourceResult.textAnimationSample?.opacity ?? 1
                     return applyOpacity(opacity, to: transformed)
                 }
-                let frozenImage = image
-                let motion = EffectLayerMotion(transform: clip.transform,
-                    canvasSize: plan.renderSize, isGenerated: isGeneratedLayer)
-                let currentPlacement = motion.placement(at: localTime, bounds: placementExtent)
-                    .concatenating(sceneTransform)
-                let hasAnimatedTransforms = !clip.transform.positionX.keyframes.isEmpty
-                    || !clip.transform.positionY.keyframes.isEmpty || !clip.transform.rotationDegrees.keyframes.isEmpty
-                    || !clip.transform.scale.keyframes.isEmpty
-                    || active.dropFirst(clipIndex + 1).contains { adjustment in
-                        adjustment.isAdjustmentLayer && (!adjustment.transform.positionX.keyframes.isEmpty
-                            || !adjustment.transform.positionY.keyframes.isEmpty
-                            || !adjustment.transform.rotationDegrees.keyframes.isEmpty
-                            || !adjustment.transform.scale.keyframes.isEmpty)
+                var layerScene: EffectMotionScene?
+                if needsMotionScene {
+                    let frozenImage = image
+                    let motion = EffectLayerMotion(transform: clip.transform,
+                        canvasSize: plan.renderSize, isGenerated: isGeneratedLayer)
+                    let inversePlacement = motion.placement(at: localTime, bounds: placementExtent)
+                        .concatenating(sceneTransform).inverted()
+                    let hasAnimatedTransforms = !clip.transform.positionX.keyframes.isEmpty
+                        || !clip.transform.positionY.keyframes.isEmpty || !clip.transform.rotationDegrees.keyframes.isEmpty
+                        || !clip.transform.scale.keyframes.isEmpty
+                        || active.dropFirst(clipIndex + 1).contains { adjustment in
+                            adjustment.isAdjustmentLayer && (!adjustment.transform.positionX.keyframes.isEmpty
+                                || !adjustment.transform.positionY.keyframes.isEmpty
+                                || !adjustment.transform.rotationDegrees.keyframes.isEmpty
+                                || !adjustment.transform.scale.keyframes.isEmpty)
+                        }
+                    layerScene = EffectMotionScene(hasAnimatedTransforms: hasAnimatedTransforms) { offset, components in
+                        let sampledTransform = sampledSceneTransform(at: max(safeTime - offset, 0),
+                            components: components, clipIndex: clipIndex)
+                        let sampledPlacement = motion.placement(at: max(localTime - offset, 0), bounds: placementExtent,
+                            referenceTime: localTime, components: components).concatenating(sampledTransform)
+                        return frozenImage.transformed(by: inversePlacement.concatenating(sampledPlacement))
                     }
-                let layerScene = EffectMotionScene(hasAnimatedTransforms: hasAnimatedTransforms) { offset, components in
-                    let sampledTransform = scenePlacement.transforms(at: max(safeTime - offset, 0),
-                        referenceTime: safeTime, components: components)[clipIndex]
-                    let sampledPlacement = motion.placement(at: max(localTime - offset, 0), bounds: placementExtent,
-                        referenceTime: localTime, components: components).concatenating(sampledTransform)
-                    return frozenImage.transformed(by: currentPlacement.inverted().concatenating(sampledPlacement))
                 }
-                nodes[nodeIndex] = FrameCompositeNode(layerIDs: Set(clip.layerID.map { [$0] } ?? []), image: image,
+                nodes[nodeIndex] = FrameCompositeNode(layerIDs: layerIDs, image: image,
                     motionScene: layerScene, blendMode: clip.blendMode, blendIntensity: clip.blendIntensity)
             }
             output = try composite(nodes)
@@ -983,7 +1014,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 mode: clip.blendMode,
                 intensity: clip.blendIntensity,
                 resources: frameResources
-            )
+            ).image
         }
         let effectMask = adjustmentLayerMask(
             clip,
@@ -1923,6 +1954,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
     }
 
     private func attachRec709Metadata(to pixelBuffer: CVPixelBuffer) {
+        CVBufferSetAttachment(pixelBuffer, kCVImageBufferCGColorSpaceKey,
+            resources.outputColorSpace, .shouldPropagate)
         CVBufferSetAttachment(
             pixelBuffer,
             kCVImageBufferColorPrimariesKey,

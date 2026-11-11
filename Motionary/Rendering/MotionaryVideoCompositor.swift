@@ -27,8 +27,20 @@ struct RenderContextCachePolicy: Equatable {
 final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     // Retain one GPU output surface. Copying every successful frame into Data
     // forced a CPU readback and full-frame allocation during playback/scrubbing.
-    private struct LastGoodFrame {
+    struct LastGoodFrame {
         let pixelBuffer: CVPixelBuffer
+        let sessionID: UUID
+        let revision: UInt64
+        let time: CMTime
+
+        func frame(sessionID: UUID, revision: UInt64, time: CMTime, size: CGSize) -> CVPixelBuffer? {
+            guard self.sessionID == sessionID, self.revision == revision,
+                time.isNumeric, CMTimeCompare(self.time, time) == 0,
+                CVPixelBufferGetWidth(pixelBuffer) == Int(size.width),
+                CVPixelBufferGetHeight(pixelBuffer) == Int(size.height)
+            else { return nil }
+            return pixelBuffer
+        }
     }
 
     final class RequestFinisher: @unchecked Sendable {
@@ -187,7 +199,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         return
                     }
                     let finisher = RequestFinisher()
-                    let timeoutMilliseconds = self.frameTimeoutMilliseconds(for: instruction)
+                    let timeoutMilliseconds = instruction.previewFrameTimeoutMilliseconds
                     finisher.setTimeoutAction { [weak self] in
                         guard let self, self.isCurrent(generation) else {
                             request.finishCancelledRequest()
@@ -200,11 +212,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         self.recordFrameFailure(MetalRenderingError.cancelled, instruction: instruction)
                         // The GPU may still own destination. Never write CPU
                         // fallback pixels into it or hand it to AVPlayer early.
-                        guard let fallback = request.renderContext.newPixelBuffer() else {
-                            request.finish(with: MetalRenderingError.invalidRenderTarget)
-                            return
-                        }
-                        if self.copyLastCompleteFrame(into: fallback) {
+                        if let fallback = self.lastCompleteFrame(for: instruction, at: request.compositionTime) {
                             request.finish(withComposedVideoFrame: fallback)
                         } else {
                             request.finishCancelledRequest()
@@ -298,13 +306,14 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                 }
                                 self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime,
                                     frame: destination, revision: plan.livePreviewSnapshot?.revision ?? 0)
-                                self.storeLastGoodFrame(from: destination)
+                                self.storeLastGoodFrame(from: destination, instruction: instruction, time: request.compositionTime,
+                                    revision: plan.livePreviewSnapshot?.revision ?? 0)
                                 request.finish(withComposedVideoFrame: destination)
                             }
                         case .failure(MetalRenderingError.sourceFrameUnavailable):
                             finisher.finish {
-                                if self.copyLastCompleteFrame(into: destination) {
-                                    request.finish(withComposedVideoFrame: destination)
+                                if let fallback = self.lastCompleteFrame(for: instruction, at: request.compositionTime) {
+                                    request.finish(withComposedVideoFrame: fallback)
                                 } else {
                                     request.finishCancelledRequest()
                                 }
@@ -317,8 +326,8 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                             finisher.finish {
                                 self.recordFrameFailure(error, instruction: instruction)
                                 self.logger.error("Frame rendering failed: \(error.localizedDescription, privacy: .public)")
-                                if self.copyLastCompleteFrame(into: destination) {
-                                    request.finish(withComposedVideoFrame: destination)
+                                if let fallback = self.lastCompleteFrame(for: instruction, at: request.compositionTime) {
+                                    request.finish(withComposedVideoFrame: fallback)
                                 } else {
                                     request.finishCancelledRequest()
                                 }
@@ -328,9 +337,8 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 } catch MetalRenderingError.sourceFrameUnavailable {
                     if instruction.qualityProfile == .export {
                         request.finish(with: MetalRenderingError.sourceFrameUnavailable)
-                    } else if let destination = request.renderContext.newPixelBuffer(),
-                        self.copyLastCompleteFrame(into: destination) {
-                        request.finish(withComposedVideoFrame: destination)
+                    } else if let fallback = self.lastCompleteFrame(for: instruction, at: request.compositionTime) {
+                        request.finish(withComposedVideoFrame: fallback)
                     } else {
                         request.finishCancelledRequest()
                     }
@@ -343,9 +351,8 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         request.finish(with: error)
                         return
                     }
-                    if let destination = request.renderContext.newPixelBuffer(),
-                        self.copyLastCompleteFrame(into: destination) {
-                        request.finish(withComposedVideoFrame: destination)
+                    if let fallback = self.lastCompleteFrame(for: instruction, at: request.compositionTime) {
+                        request.finish(withComposedVideoFrame: fallback)
                     } else {
                         request.finishCancelledRequest()
                     }
@@ -385,8 +392,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                 name: .motionaryVideoCompositorRenderedFrame,
                 object: self,
                 userInfo: ["renderSessionID": instruction.renderSessionID,
-                           "compositionTime": CMTimeGetSeconds(time),
-                           "frame": frame]
+                           "compositionTime": CMTimeGetSeconds(time)]
             )
         }
     }
@@ -408,26 +414,6 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         }
     }
 
-    private func frameTimeoutMilliseconds(
-        for instruction: MotionaryVideoCompositionInstruction
-    ) -> Int {
-        let activeLayerCost = instruction.clips.reduce(0) { total, clip in
-            total
-                + 1
-                + clip.effectStack.effects.filter(\.isEnabled).count * 2
-                + (clip.text == nil ? 0 : 2)
-                + (clip.isAdjustmentLayer ? 2 : 0)
-        }
-        switch instruction.qualityProfile {
-        case .interactive:
-            return activeLayerCost > 8 ? 1_800 : 1_200
-        case .balanced:
-            return activeLayerCost > 8 ? 4_000 : 2_500
-        case .export:
-            return 5_000
-        }
-    }
-
     private func logFrameTimeoutIfNeeded(
         instruction: MotionaryVideoCompositionInstruction,
         timeoutMilliseconds: Int
@@ -444,53 +430,29 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
         stateLock.unlock()
         guard shouldLog else { return }
         logger.error(
-            "Frame rendering timed out after \(timeoutMilliseconds, privacy: .public)ms; finishing fallback frame. clips=\(instruction.clips.count, privacy: .public) failures=\(failureCount, privacy: .public)"
+            "Frame rendering timed out after \(timeoutMilliseconds, privacy: .public)ms; retaining the last valid presentation. clips=\(instruction.clips.count, privacy: .public) failures=\(failureCount, privacy: .public)"
         )
     }
 
-    private func storeLastGoodFrame(from pixelBuffer: CVPixelBuffer) {
-        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
-            return
-        }
+    private func storeLastGoodFrame(from pixelBuffer: CVPixelBuffer,
+                                    instruction: MotionaryVideoCompositionInstruction, time: CMTime, revision: UInt64) {
+        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else { return }
         fallbackLock.lock()
-        lastGoodFrame = LastGoodFrame(pixelBuffer: pixelBuffer)
+        lastGoodFrame = LastGoodFrame(pixelBuffer: pixelBuffer, sessionID: instruction.renderSessionID,
+                                      revision: revision, time: time)
         fallbackLock.unlock()
     }
 
-    @discardableResult
-    private func copyLastCompleteFrame(into pixelBuffer: CVPixelBuffer) -> Bool {
-        guard CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA else {
-            return false
-        }
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else { return false }
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-
+    private func lastCompleteFrame(for instruction: MotionaryVideoCompositionInstruction, at time: CMTime) -> CVPixelBuffer? {
         fallbackLock.lock()
-        let cachedFrame = lastGoodFrame
+        let cached = lastGoodFrame
         fallbackLock.unlock()
-
-        if let sourceBuffer = cachedFrame?.pixelBuffer,
-            CVPixelBufferGetWidth(sourceBuffer) == width,
-            CVPixelBufferGetHeight(sourceBuffer) == height
-        {
-            CVPixelBufferLockBaseAddress(sourceBuffer, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(sourceBuffer, .readOnly) }
-            if let source = CVPixelBufferGetBaseAddress(sourceBuffer) {
-                let sourceStride = CVPixelBufferGetBytesPerRow(sourceBuffer)
-                for row in 0..<height {
-                    memcpy(baseAddress.advanced(by: row * bytesPerRow),
-                           source.advanced(by: row * sourceStride), width * 4)
-                }
-                return true
-            }
-        }
-        // A loading/error path must never invent a black/background frame.
-        // With no valid fallback, cancelling retains the player's old image.
-        return false
+        // Never acknowledge an exact seek with a frame from another time or
+        // edit. Cancellation lets AVPlayer retain its displayed image while
+        // decoding/recovery continues, without labelling old pixels as new.
+        return cached?.frame(sessionID: instruction.renderSessionID,
+            revision: instruction.livePreviewState?.snapshot().revision ?? 0,
+            time: time, size: instruction.renderSize)
     }
 
     private func currentGeneration() -> UInt {

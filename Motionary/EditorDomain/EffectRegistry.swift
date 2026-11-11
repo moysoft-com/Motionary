@@ -134,6 +134,10 @@ struct EffectModuleDescriptor: Identifiable, Equatable, Sendable {
     let rendererFactory: EffectRendererFactory
     var renderConfiguration: EffectRenderConfiguration = .init()
 
+    var showsMixControl: Bool {
+        category == .colorGrade || [.vignette, .cinematicBloom, .filmHalation, .softGlow, .anamorphicFlare].contains(id)
+    }
+
     func descriptor(for parameterID: EffectParameterID) -> EffectParameterDescriptor? {
         parameters.first { $0.id == parameterID }
     }
@@ -337,10 +341,34 @@ struct EffectRegistry: Sendable {
         guard let descriptor = descriptor(for: effect.moduleID)?.descriptor(for: parameterID) else {
             return effect.value(for: parameterID, at: time)
         }
-        guard let value = effect.value(for: parameterID, at: time), descriptor.accepts(value) else {
+        guard let value = effect.value(for: parameterID, at: time) else {
             return descriptor.defaultValue
         }
-        return value
+        if descriptor.accepts(value) { return value }
+
+        // Interpolation can overshoot a boundary by a few floating-point ULPs.
+        // Normalize only that numerical noise; malformed values still fall back.
+        func boundaryClamped(_ value: Double, to range: ClosedRange<Double>) -> Double? {
+            guard value.isFinite else { return nil }
+            let tolerance = Double.ulpOfOne * 16 * max(1, abs(range.lowerBound), abs(range.upperBound))
+            guard value >= range.lowerBound - tolerance, value <= range.upperBound + tolerance else { return nil }
+            return min(max(value, range.lowerBound), range.upperBound)
+        }
+        switch value {
+        case .scalar(let scalar) where descriptor.valueType == .scalar && descriptor.unit != .degrees:
+            if let range = descriptor.scalarRange, let clamped = boundaryClamped(scalar, to: range) {
+                return .scalar(clamped)
+            }
+        case .color(let color) where descriptor.valueType == .color:
+            if let red = boundaryClamped(color.red, to: 0...1),
+               let green = boundaryClamped(color.green, to: 0...1),
+               let blue = boundaryClamped(color.blue, to: 0...1),
+               let alpha = boundaryClamped(color.alpha, to: 0...1) {
+                return .color(RGBAColor(red: red, green: green, blue: blue, alpha: alpha))
+            }
+        default: break
+        }
+        return descriptor.defaultValue
     }
 
     func resolvedMix(in effect: EffectInstance, at time: Double) -> Double {
@@ -354,6 +382,18 @@ struct EffectRegistry: Sendable {
 
 extension EffectRegistry {
     fileprivate static let builtInModules: [EffectModuleDescriptor] = [
+        module(
+            .depthMap, "Depth Map", .essentials, "square.3.layers.3d",
+            "Visualize estimated relative depth.", mix: 1, previewMix: 1,
+            renderer: { DepthMapEffectRenderer() }, parameters: [
+                scalar(.contrast, "Contrast", "circle.lefthalf.filled", 0.5, 0.5),
+                option("depthDirection", "Direction", ["Near is white", "Near is black"], defaultValue: "Near is white"),
+                option("depthStability", "Stabilization", ["Off", "Medium", "High"], defaultValue: "Medium"),
+                option("depthStyle", "Style", ["Grayscale", "Thermal", "Bands", "Edges"], defaultValue: "Grayscale"),
+                scalar("depthBrightness", "Brightness", "sun.max", 0, 0, range: -0.5...0.5),
+                scalar("depthBands", "Bands", "square.stack", 0.3, 0.3),
+            ]
+        ),
         module(
             .sepia,
             "Sepia",
@@ -614,6 +654,15 @@ extension EffectRegistry {
             ]
         ),
         module(
+            .deepGlow, "Deep Glow", .lens, "sun.max.fill",
+            "Rich, layered light diffusion with a wide cinematic halo.",
+            mix: 1, previewMix: 1, renderer: { DeepGlowEffectRenderer() }, parameters: [
+                scalar(.radius, "Radius", "circle.dotted", 0.55, 0.55),
+                scalar(.threshold, "Threshold", "sun.max", 0.35, 0.35),
+                scalar(.amount, "Intensity", "sparkles", 0.7, 0.7),
+            ]
+        ),
+        module(
             .anamorphicFlare,
             "Anamorphic Flare",
             .lens,
@@ -839,6 +888,15 @@ extension EffectRegistry {
                 scalar(.wavelength, "Wavelength", "arrow.left.and.right", 0.28, 0.28, range: 0.02...1),
                 scalar(.angle, "Angle", "angle", 0, 0, range: -180...180, step: 1, fractionDigits: 0, unit: .degrees),
                 scalar(.speed, "Speed", "speedometer", 0.5, 0.5, range: -3...3),
+            ]),
+        module(.ripple, "Ripple", .distortion, "water.waves", "Soft, outward-moving water waves with natural falloff.", mix: 1, previewMix: 1,
+            renderer: { SpatialEffectRenderer(moduleID: .ripple, kind: .ripple) },
+            renderConfiguration: .init(edgeMode: .unfold), parameters: [
+                scalar(.amount, "Amount", "waveform", 0.035, 0.035, range: 0...0.3),
+                scalar(.wavelength, "Wavelength", "arrow.left.and.right", 0.25, 0.25, range: 0.02...1),
+                scalar(.speed, "Speed", "speedometer", 0.32, 0.32, range: -3...3),
+                scalar(.reflection, "Light Reflection", "sun.max", 0.7, 0.7),
+                centerParameter(),
             ]),
         module(.twirl, "Twirl", .distortion, "hurricane", "Twist a region around an adjustable center.", mix: 1, previewMix: 1,
             renderer: { SpatialEffectRenderer(moduleID: .twirl, kind: .twirl) },

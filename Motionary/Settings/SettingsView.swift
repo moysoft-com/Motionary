@@ -155,6 +155,12 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    NavigationLink("Open Source Licenses") {
+                        OpenSourceLicensesView()
+                    }
+                }
+
+                Section {
                     Button(role: .destructive) {
                         isResetConfirmationPresented = true
                     } label: {

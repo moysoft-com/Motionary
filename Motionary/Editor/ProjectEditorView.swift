@@ -41,6 +41,7 @@ struct ProjectEditorView: View {
     @StateObject private var viewModel: EditorViewModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedMediaItems: [PhotosPickerItem] = []
     @State private var selectedReplacementItem: PhotosPickerItem?
     @State private var selectedAudioVideoItem: PhotosPickerItem?
@@ -100,11 +101,16 @@ struct ProjectEditorView: View {
                 .labelStyle(.titleAndIcon)
             }
         }
+        .environment(\.workspaceViewModel, viewModel)
         .task {
             viewModel.start()
         }
         .onDisappear {
             viewModel.stop()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { viewModel.suspendPreview() }
+            if phase == .active { viewModel.resumePreview() }
         }
         .onChange(of: selectedMediaItems) { _, items in
             guard !items.isEmpty else { return }
@@ -203,7 +209,10 @@ struct ProjectEditorView: View {
                 if previousPanel == .graph, panel != .graph {
                     viewModel.graphSegment = nil
                     viewModel.displayedGraphSegment = nil
-                    viewModel.activeKeyframeTarget = nil
+                    viewModel.activeKeyframeTarget = panel == .effects
+                        ? activeEffectWorkspaceID.flatMap { id in
+                            viewModel.selectedKeyframeEditingClip?.effectStack.effects.first { $0.id == id }?.parameterTargets.first
+                        } : nil
                     viewModel.selectedKeyframeID = nil
                 }
                 if previousPanel.isPropertyPanel, panel == .timeline {
@@ -351,7 +360,7 @@ struct ProjectEditorView: View {
                     controlHeight: supportsSideWorkspace ? controlHeight + 10 + wideTimelineHeight : controlHeight,
                     keepsTimelineVisible: supportsSideWorkspace,
                     animatesWorkspaceChanges: supportsSideWorkspace,
-                    workspaceID: activePanel,
+                    workspaceID: isEffectWorkspacePresented ? CoreEditorPanel.effects : activePanel,
                     preview: { editorPreview },
                     controls: {
                         VStack(spacing: 10) {
@@ -466,8 +475,26 @@ struct ProjectEditorView: View {
         )
     }
 
+    private var isEffectWorkspacePresented: Bool {
+        activePanel == .effects || (activePanel == .graph && graphReturnPanel == .effects)
+    }
+
     @ViewBuilder
     private var workspace: some View {
+        if isEffectWorkspacePresented {
+            EffectsGraphWorkspaceView(
+                viewModel: viewModel,
+                clip: propertyContextClip,
+                activeEffectID: $activeEffectWorkspaceID,
+                showsGraph: activePanel == .graph
+            )
+        } else {
+            otherWorkspace
+        }
+    }
+
+    @ViewBuilder
+    private var otherWorkspace: some View {
         switch activePanel {
         case .timeline:
             CoreTimelineView(
@@ -529,11 +556,7 @@ struct ProjectEditorView: View {
                 clip: propertyContextClip
             )
         case .effects:
-            EffectsWorkspaceView(
-                viewModel: viewModel,
-                clip: propertyContextClip,
-                activeEffectID: $activeEffectWorkspaceID
-            )
+            EmptyView()
         case .audio:
             AudioWorkspaceView(
                 viewModel: viewModel,

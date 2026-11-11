@@ -6,7 +6,7 @@ import UIKit
 
 extension EffectModuleDescriptor {
     var hasAnimatedPreview: Bool {
-        [.shake, .cameraWiggle, .zoom, .motionBlur, .waveWarp,
+        [.shake, .cameraWiggle, .zoom, .motionBlur, .waveWarp, .ripple,
          .displacementMap, .lightSweep, .analogGlitch, .fineGrain, .lightLeak, .echoTrails].contains(id)
     }
 }
@@ -55,6 +55,14 @@ enum EffectThumbnailRenderer {
 
     static func preview(for moduleID: EffectModuleID, scale: CGFloat = 2, at time: Double = 0,
                         animated: Bool = false) -> UIImage? {
+        if moduleID == .depthMap {
+            guard let image = UIImage(named: "DepthMapPreview")?.cgImage else { return nil }
+            let input = CIImage(cgImage: image)
+            let size: CGFloat = 320
+            let normalized = input.transformed(by: CGAffineTransform(
+                scaleX: size / input.extent.width, y: size / input.extent.height))
+            return previewImage(from: normalized, extent: CGRect(x: 0, y: 0, width: size, height: size), scale: scale)
+        }
         guard let descriptor = EffectRegistry.shared.descriptor(for: moduleID),
             var effect = EffectRegistry.shared.makeEffect(moduleID: moduleID,
                 id: UUID(uuidString: "28977F36-7EB7-459A-8D78-66D86927D612")!),

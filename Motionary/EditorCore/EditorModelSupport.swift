@@ -145,7 +145,7 @@ extension TimelineClip {
             )
         case .effectMix:
             return KeyframePropertyMetadata(
-                title: "Amount",
+                title: "Mix",
                 systemImage: "dial.medium",
                 group: .effects,
                 range: 0...1,
@@ -279,9 +279,10 @@ extension TimelineClip {
 
     func keyframeTimes(in section: KeyframeSection, effectID: UUID?) -> [Double] {
         if section == .effects {
-            if let effectID,
-                let effect = effectStack.effects.first(where: { $0.id == effectID })
-            {
+            if let effectID {
+                guard let effect = effectStack.effects.first(where: { $0.id == effectID }) else {
+                    return []
+                }
                 return KeyframeMergeSupport.mergedTimes([
                     effect.mix.keyframes.map(\.time),
                     effect.parameters.values.flatMap { $0.keyframes.map(\.time) },
@@ -484,7 +485,9 @@ extension EffectInstance {
         else {
             return []
         }
-        return [.effectMix(id)] + module.parameters.flatMap { descriptor -> [KeyframeTarget] in
+        let mixTargets: [KeyframeTarget] = module.showsMixControl || !mix.keyframes.isEmpty || abs(mix.baseValue - 1) > 0.000001
+            ? [.effectMix(id)] : []
+        return mixTargets + module.parameters.flatMap { descriptor -> [KeyframeTarget] in
             guard descriptor.isAnimatable else { return [] }
             return descriptor.editableComponents.map {
                 .effectParameter(id, descriptor.id, $0)

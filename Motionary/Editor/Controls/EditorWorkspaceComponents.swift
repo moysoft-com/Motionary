@@ -12,6 +12,53 @@ enum EditorWorkspaceContentStyle {
     case scrollable
 }
 
+private struct WorkspaceViewModelKey: EnvironmentKey {
+    static let defaultValue: EditorViewModel? = nil
+}
+
+private struct WorkspaceScrollRevisionKey: EnvironmentKey {
+    static let defaultValue = 0
+}
+
+extension EnvironmentValues {
+    var workspaceViewModel: EditorViewModel? {
+        get { self[WorkspaceViewModelKey.self] }
+        set { self[WorkspaceViewModelKey.self] = newValue }
+    }
+
+    var workspaceScrollRevision: Int {
+        get { self[WorkspaceScrollRevisionKey.self] }
+        set { self[WorkspaceScrollRevisionKey.self] = newValue }
+    }
+}
+
+/// Each workspace owns its scroll signal, so an unrelated panel cannot stop
+/// another panel's active scrubber.
+struct EditorWorkspaceScrollView<Content: View>: View {
+    @Environment(\.workspaceViewModel) private var viewModel
+    @State private var scrollRevision = 0
+    @State private var scrollOwner = UUID()
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            content()
+                .environment(\.workspaceScrollRevision, scrollRevision)
+        }
+        .scrollIndicators(.hidden)
+        .scrollDismissesKeyboard(.interactively)
+        .onScrollPhaseChange { _, phase in
+            if phase == .interacting {
+                viewModel?.setWorkspaceScrolling(true, owner: scrollOwner)
+                scrollRevision &+= 1
+            } else if phase == .idle {
+                viewModel?.setWorkspaceScrolling(false, owner: scrollOwner)
+            }
+        }
+        .onDisappear { viewModel?.setWorkspaceScrolling(false, owner: scrollOwner) }
+    }
+}
+
 struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
     let title: String
     let systemImage: String
@@ -63,12 +110,10 @@ struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
                         case .fixed:
                             content
                         case .scrollable:
-                            ScrollView {
+                            EditorWorkspaceScrollView {
                                 content
                                     .padding(.bottom, 6)
                             }
-                            .scrollIndicators(.hidden)
-                            .scrollDismissesKeyboard(.interactively)
                         }
                     }
                 }

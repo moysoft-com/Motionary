@@ -108,9 +108,11 @@ struct HomeView: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .tint(MotionaryTheme.accent)
+                            .motionaryLoadingShimmer()
                         Text("Importing")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(MotionaryTheme.textPrimary)
+                            .motionaryLoadingShimmer()
                     }
                     .padding(18)
                     .motionaryGlass(cornerRadius: 18)

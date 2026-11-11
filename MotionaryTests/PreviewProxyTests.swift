@@ -8,6 +8,84 @@ import Testing
 @Suite(.serialized)
 struct PreviewProxyTests {
     @MainActor
+    @Test func coldPreviewUsesOriginalWhileProxyWarms() async throws {
+        let sourceURL = try await makeLongGOPVideo()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("proxy-cold-\(UUID())")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = PreviewProxyStore(directory: directory)
+        let metadata = try await MediaAssetCache.shared.metadata(for: sourceURL)
+        let clip = TimelineClip(name: "Cold source", source: ClipSource(url: sourceURL, mediaType: .video,
+            originalDuration: metadata.duration, naturalSize: CGSizeValue(width: 1920, height: 1080)),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: metadata.duration))
+        let project = EditorProject(title: "Cold preview", renderSettings: RenderSettings(width: 960, height: 540),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        let service = CompositionRenderService(previewProxyStore: store)
+        let start = ProcessInfo.processInfo.systemUptime
+        let cold = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology]))
+        let coldMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        #expect(try sourceURLs(cold.composition).contains(sourceURL))
+        #expect(!service.previewSupportsExactScrubbing)
+        let proxyStart = ProcessInfo.processInfo.systemUptime
+        let proxy = try #require(try await store.prepare(source: metadata))
+        let remainingProxyMS = (ProcessInfo.processInfo.systemUptime - proxyStart) * 1000
+        #expect(try await store.availableProxy(source: metadata)?.url == proxy.url)
+        let warm = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology]))
+        #expect(try sourceURLs(warm.composition).contains(proxy.url))
+        // Background completion must not mutate an already installed graph.
+        #expect(try sourceURLs(cold.composition).contains(sourceURL))
+        print("RELIABILITY cold_preview_ms=\(coldMS) remaining_proxy_ms=\(remainingProxyMS)")
+    }
+
+    @Test func proxyBitrateImprovesImageFidelityAtSameResolution() async throws {
+        let sourceURL = try await makeLongGOPVideo()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("proxy-quality-\(UUID())")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let metadata = try await MediaAssetCache.shared.metadata(for: sourceURL)
+        let oldStore = PreviewProxyStore(directory: directory, bitsPerPixelFrame: 0.45)
+        let newStore = PreviewProxyStore(directory: directory, bitsPerPixelFrame: 0.9)
+        let old = try #require(try await oldStore.prepare(source: metadata))
+        let new = try #require(try await newStore.prepare(source: metadata))
+        #expect(old.encodedSize == new.encodedSize)
+        #expect(old.url != new.url)
+        let context = CIContext()
+        func sample(_ url: URL, time: Double) async throws -> [UInt8] {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+            generator.maximumSize = CGSize(width: 720, height: 404)
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            let cgImage = try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image
+            let input = CIImage(cgImage: cgImage)
+            let scaled = input.transformed(by: CGAffineTransform(scaleX: 320 / input.extent.width,
+                                                                   y: 180 / input.extent.height))
+            var pixels = [UInt8](repeating: 0, count: 320 * 180 * 4)
+            context.render(scaled, toBitmap: &pixels, rowBytes: 320 * 4,
+                           bounds: CGRect(x: 0, y: 0, width: 320, height: 180), format: .RGBA8,
+                           colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+            return pixels
+        }
+        var oldError = 0, newError = 0
+        for time in [0.5, 1.0, 2.0] {
+            let original = try await sample(sourceURL, time: time)
+            let oldPixels = try await sample(old.url, time: time)
+            let newPixels = try await sample(new.url, time: time)
+            oldError += zip(original, oldPixels).reduce(0) { $0 + abs(Int($1.0) - Int($1.1)) }
+            newError += zip(original, newPixels).reduce(0) { $0 + abs(Int($1.0) - Int($1.1)) }
+        }
+        #expect(newError < oldError, "Higher bitrate should preserve more source detail")
+        let oldSize = try #require(try old.url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        let newSize = try #require(try new.url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        print("PROXY QUALITY old_error=\(oldError) new_error=\(newError) old_bytes=\(oldSize) new_bytes=\(newSize)")
+    }
+
+    @MainActor
     @Test func longGOPSourceUsesAllIntraProxiesOnlyForPreviewAndMeasuresActualFrames() async throws {
         var stage = "source-fixture"
         do {
@@ -24,7 +102,7 @@ struct PreviewProxyTests {
             let proxy = try #require(try await store.prepare(source: metadata))
             let preparationMS = (ProcessInfo.processInfo.systemUptime - startPreparation) * 1000
             let proxyMetadata = try await MediaAssetCache.shared.metadata(for: proxy.url)
-            #expect(proxyMetadata.naturalSize == CGSize(width: 720, height: 404))
+            #expect(proxyMetadata.naturalSize == CGSize(width: 960, height: 540))
             #expect(abs(proxyMetadata.duration - metadata.duration) < 1 / 60)
             let originalSync = try await syncFrameCounts(sourceURL)
             let proxySync = try await syncFrameCounts(proxy.url)
@@ -92,12 +170,10 @@ struct PreviewProxyTests {
         }
     }
 
+    @MainActor
     private func averageQuadrants(_ prepared: PreparedPreview, at time: Double = 0.5) async throws -> [UInt8] {
-        let generator = AVAssetImageGenerator(asset: prepared.composition)
-        generator.videoComposition = prepared.videoComposition
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        let image = CIImage(cgImage: try await generator.image(at: CMTime(seconds: time, preferredTimescale: 60_000)).image)
+        let probe = PlayerFrameProbe(asset: prepared.composition, videoComposition: prepared.videoComposition)
+        let image = try await probe.image(at: CMTime(seconds: time, preferredTimescale: 60_000))
         let context = CIContext()
         var result: [UInt8] = []
         for x in [0.0, image.extent.width / 2] {

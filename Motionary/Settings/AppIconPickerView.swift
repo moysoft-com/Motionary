@@ -75,6 +75,7 @@ struct AppIconPickerView: View {
                 if isChanging {
                     ProgressView()
                         .tint(MotionaryTheme.accent)
+                        .motionaryLoadingShimmer()
                         .padding(MotionaryDesign.Spacing.xxl)
                         .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
                 }

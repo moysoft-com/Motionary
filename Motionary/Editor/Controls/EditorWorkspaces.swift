@@ -557,6 +557,29 @@ struct AdjustWorkspaceView: View {
     }
 }
 
+/// Keep the native effect pager mounted while editing its graph. Recreating
+/// it can put its scroll position and the selected effect on different pages.
+struct EffectsGraphWorkspaceView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    let clip: TimelineClip?
+    @Binding var activeEffectID: UUID?
+    let showsGraph: Bool
+
+    var body: some View {
+        ZStack {
+            EffectsWorkspaceView(
+                viewModel: viewModel, clip: clip, activeEffectID: $activeEffectID
+            )
+                .opacity(showsGraph ? 0 : 1)
+                .allowsHitTesting(!showsGraph)
+                .accessibilityHidden(showsGraph)
+            if showsGraph {
+                KeyframeWorkspaceView(viewModel: viewModel)
+            }
+        }
+    }
+}
+
 struct EffectsWorkspaceView: View {
     @Environment(\.editorUsesSideWorkspace) private var usesSideWorkspace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -624,6 +647,7 @@ struct EffectsWorkspaceView: View {
                 )
             }
         }
+        .environment(\.workspaceViewModel, viewModel)
         .contentShape(Rectangle())
         .simultaneousGesture(pullToAddEffectGesture(isEnabled: canAddEffects && effectDrag == nil))
         .onChange(of: usesSideWorkspace) { _, _ in
@@ -645,11 +669,10 @@ struct EffectsWorkspaceView: View {
                 pagerMinX = minX
             }
         }
-        .task(priority: .utility) {
-            _ = await EffectThumbnailCache.shared.libraryPreviews()
-        }
         .sheet(isPresented: $isLibraryPresented) {
-            EffectLibrarySheet { moduleID in
+            EffectLibrarySheet(depthMapAvailable: clip.map {
+                viewModel.selectedTimelineItem?.isAdjustmentLayer != true && !$0.effectStack.effects.contains(where: { $0.moduleID == .depthMap })
+            } ?? false) { moduleID in
                 if let effectID = viewModel.addEffect(moduleID: moduleID) {
                     openEffectDetail(effectID)
                 }
@@ -677,15 +700,17 @@ struct EffectsWorkspaceView: View {
         }
         .onChange(of: activeEffectID) { _, effectID in
             DispatchQueue.main.async {
+                guard activeEffectID == effectID else { return }
                 if usesSideWorkspace {
                     visibleEffectID = effectID
-                    viewModel.activeKeyframeTarget = effectID.map { .effectMix($0) }
+                    viewModel.activeKeyframeTarget = effectID.flatMap { id in clip?.effectStack.effects.first { $0.id == id }?.parameterTargets.first }
                     workspacePage = effectID == nil ? 0 : 1
                     return
                 }
                 if let effectID {
+                    suppressActiveEffectCloseAnimation = false
                     visibleEffectID = effectID
-                    viewModel.activeKeyframeTarget = .effectMix(effectID)
+                    viewModel.activeKeyframeTarget = clip?.effectStack.effects.first { $0.id == effectID }?.parameterTargets.first
                     animateWorkspacePage(to: 1)
                 } else if suppressActiveEffectCloseAnimation {
                     suppressActiveEffectCloseAnimation = false
@@ -701,11 +726,13 @@ struct EffectsWorkspaceView: View {
         }
         .onChange(of: workspacePage) { _, page in
             DispatchQueue.main.async {
-                guard !usesSideWorkspace else { return }
+                guard !usesSideWorkspace, workspacePage == page else { return }
                 if page == 0, visibleEffectID != nil {
-                    suppressActiveEffectCloseAnimation = true
-                    activeEffectID = nil
-                    viewModel.activeKeyframeTarget = nil
+                    if activeEffectID != nil {
+                        suppressActiveEffectCloseAnimation = true
+                        activeEffectID = nil
+                        viewModel.activeKeyframeTarget = nil
+                    }
                     scheduleVisibleEffectRemoval()
                 } else if page == 1, activeEffectID == nil {
                     workspacePage = 0
@@ -1016,7 +1043,7 @@ struct EffectsWorkspaceView: View {
     private func openEffectDetail(_ effectID: UUID) {
         visibleEffectID = effectID
         activeEffectID = effectID
-        viewModel.activeKeyframeTarget = .effectMix(effectID)
+        viewModel.activeKeyframeTarget = clip?.effectStack.effects.first { $0.id == effectID }?.parameterTargets.first
         animateWorkspacePage(to: 1)
     }
 
@@ -1043,6 +1070,7 @@ struct EffectsWorkspaceView: View {
         pagerTransitionToken = token
         isPagerTransitioning = true
         DispatchQueue.main.async {
+            guard pagerTransitionToken == token else { return }
             withAnimation(.snappy(duration: 0.32, extraBounce: 0)) {
                 workspacePage = page
             }
@@ -1296,7 +1324,7 @@ private struct EffectDetailWorkspaceView: View {
             }
             .frame(height: 22)
 
-            ScrollView {
+            EditorWorkspaceScrollView {
                 VStack(spacing: 12) {
                     if isAvailable {
                         ForEach(EffectRegistry.shared.descriptor(for: effect.moduleID)?.parameters.filter {
@@ -1323,7 +1351,12 @@ private struct EffectDetailWorkspaceView: View {
                                 .accessibilityIdentifier("motionary-effect-option-\(parameter.id.rawValue)")
                             }
                         }
-                        ForEach(effect.parameterTargets) { target in
+                        ForEach(effect.parameterTargets.filter { target in
+                            guard effect.moduleID == .depthMap,
+                                case .effectParameter(_, let parameterID, _) = target,
+                                parameterID.rawValue == "depthBands" else { return true }
+                            return EffectRegistry.shared.resolvedValue(for: "depthStyle", in: effect, at: 0) == .option("Bands")
+                        }) { target in
                             PropertyScrubber(
                                 viewModel: viewModel,
                                 clip: clip,
@@ -1340,14 +1373,12 @@ private struct EffectDetailWorkspaceView: View {
                 }
                 .padding(.bottom, 6)
             }
-            .scrollIndicators(.hidden)
-            .scrollDismissesKeyboard(.interactively)
         }
         .padding(MotionaryDesign.Spacing.xl)
         .opacity(isEnabled ? 1 : 0.42)
         .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
         .onAppear {
-            viewModel.activeKeyframeTarget = .effectMix(effect.id)
+            viewModel.activeKeyframeTarget = effect.parameterTargets.first
         }
     }
 }
@@ -1482,11 +1513,11 @@ private struct EffectLibrarySheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedModuleID: EffectModuleID?
+    let depthMapAvailable: Bool
     let onConfirm: (EffectModuleID) -> Void
 
     @State private var query = ""
     @State private var selectedCategory: EffectCategory?
-    @State private var previews: [EffectModuleID: EffectThumbnailPair] = [:]
 
     private let columns = [
         GridItem(.adaptive(minimum: 100), spacing: MotionaryDesign.Spacing.lg)
@@ -1517,11 +1548,7 @@ private struct EffectLibrarySheet: View {
                 }
 
                 ScrollView {
-                    if previews.isEmpty {
-                        ProgressView("Preparing effect previews…")
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, MotionaryDesign.Spacing.xxl)
-                    } else if filteredModules.isEmpty {
+                    if filteredModules.isEmpty {
                         ContentUnavailableView.search(text: query)
                             .frame(maxWidth: .infinity)
                             .padding(.top, MotionaryDesign.Spacing.xxl)
@@ -1531,7 +1558,6 @@ private struct EffectLibrarySheet: View {
                                 ForEach(filteredModules) { module in
                                     EffectLibraryTile(
                                         module: module,
-                                        preview: previews[module.id],
                                         isSelected: selectedModuleID == module.id
                                     ) {
                                         selectedModuleID = selectedModuleID == module.id ? nil : module.id
@@ -1570,16 +1596,19 @@ private struct EffectLibrarySheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .onAppear { selectedModuleID = nil }
-        .task {
-            let prepared = await EffectThumbnailCache.shared.libraryPreviews()
-            guard !Task.isCancelled else { return }
-            previews = prepared
+        .task(priority: .utility) {
+            for module in EffectRegistry.shared.modules {
+                guard !Task.isCancelled else { return }
+                _ = await EffectThumbnailCache.shared.previews(for: module.id, scale: 2)
+                await Task.yield()
+            }
         }
     }
 
     private var filteredModules: [EffectModuleDescriptor] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return EffectRegistry.shared.modules.filter { module in
+            guard module.id != .depthMap || depthMapAvailable else { return false }
             let matchesCategory = selectedCategory.map { module.category == $0 } ?? true
             let matchesQuery =
                 search.isEmpty
@@ -1656,9 +1685,10 @@ private struct EffectCategoryChip: View {
 
 private struct EffectLibraryTile: View {
     let module: EffectModuleDescriptor
-    let preview: EffectThumbnailPair?
     let isSelected: Bool
     let action: () -> Void
+    @State private var preview: EffectThumbnailPair?
+    @State private var isVisible = false
 
     var body: some View {
         Button {
@@ -1696,6 +1726,13 @@ private struct EffectLibraryTile: View {
         .accessibilityValue(isSelected ? "Selected" : "Not selected")
         .accessibilityHint(module.summary)
         .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .onScrollVisibilityChange(threshold: 0.15) { isVisible = $0 }
+        .task(priority: .utility) {
+            guard preview == nil else { return }
+            let loaded = await EffectThumbnailCache.shared.previews(for: module.id, scale: 2)
+            guard !Task.isCancelled else { return }
+            preview = loaded
+        }
     }
 }
 
@@ -1706,10 +1743,15 @@ private struct EffectPreviewTileImage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     let preview: EffectThumbnailPair?
-    private var renderedPreview: UIImage? { preview?.rendered }
-    private var originalPreview: UIImage? { preview?.original }
+    private var originalPreview: UIImage? {
+        preview?.original ?? EffectRegistry.shared.descriptor(for: moduleID).flatMap {
+            UIImage(named: $0.category.showcaseImageAssetName)
+        }
+    }
+    private var renderedPreview: UIImage? { preview?.rendered ?? originalPreview }
     @State private var loopFrames: [UIImage] = []
     @State private var isVisible = false
+    @State private var splitAtEnd = false
 
     private var animates: Bool {
         EffectRegistry.shared.descriptor(for: moduleID)?.hasAnimatedPreview == true
@@ -1729,27 +1771,27 @@ private struct EffectPreviewTileImage: View {
                     .clipped()
 
                 if isSelected, !reduceMotion, originalPreview != nil, renderedPreview != nil {
-                    TimelineView(.animation) { timeline in
-                        let progress = splitProgress(at: timeline.date)
-                        ZStack {
-                            thumbnailLayer(originalPreview)
-                                .frame(width: size.width, height: size.height)
-                                .clipped()
-                                .mask(alignment: .leading) {
-                                    Rectangle()
-                                        .frame(width: size.width * progress, height: size.height)
-                                        .frame(width: size.width, height: size.height, alignment: .leading)
-                                }
-
-                            Rectangle()
-                                .fill(.white.opacity(0.9))
-                                .frame(width: 2, height: size.height)
-                                .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 0)
-                                .position(x: size.width * progress, y: size.height * 0.5)
-                        }
-                        .frame(width: size.width, height: size.height)
+                    ZStack {
+                        thumbnailLayer(originalPreview)
+                            .frame(width: size.width, height: size.height)
+                            .clipped()
+                            .mask(alignment: .leading) {
+                                Rectangle().frame(width: size.width * (splitAtEnd ? 1 : 0))
+                                    .frame(width: size.width, height: size.height, alignment: .leading)
+                            }
+                        Rectangle()
+                            .fill(.white.opacity(0.9))
+                            .frame(width: 2, height: size.height)
+                            .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 0)
+                            .offset(x: size.width * (splitAtEnd ? 0.5 : -0.5))
                     }
                     .frame(width: size.width, height: size.height)
+                    .onAppear {
+                        splitAtEnd = false
+                        withAnimation(.easeInOut(duration: .pi / 1.35).repeatForever(autoreverses: true)) {
+                            splitAtEnd = true
+                        }
+                    }
                     .allowsHitTesting(false)
                 }
             }
@@ -1784,10 +1826,7 @@ private struct EffectPreviewTileImage: View {
         .scaledToFill()
     }
 
-    private func splitProgress(at date: Date) -> CGFloat {
-        let seconds = date.timeIntervalSinceReferenceDate
-        return CGFloat((sin(seconds * 1.35) + 1) * 0.5)
-    }
+
 }
 
 private struct EffectThumbnailPair: @unchecked Sendable {
@@ -1810,16 +1849,6 @@ private actor EffectThumbnailCache {
     private var entries: [Key: EffectThumbnailPair] = [:]
     private var animations: [EffectModuleID: EffectPreviewLoop] = [:]
     private var originals: [EffectCategory: UIImage] = [:]
-
-    func libraryPreviews() async -> [EffectModuleID: EffectThumbnailPair] {
-        var result: [EffectModuleID: EffectThumbnailPair] = [:]
-        for module in EffectRegistry.shared.modules {
-            guard !Task.isCancelled else { return [:] }
-            result[module.id] = previews(for: module.id, scale: 2)
-            await Task.yield()
-        }
-        return result
-    }
 
     func animation(for moduleID: EffectModuleID) async -> [UIImage] {
         if let cached = animations[moduleID] { return cached.frames }
@@ -1908,6 +1937,7 @@ struct PropertyWorkspaceShell<Content: View>: View {
 }
 
 private struct PropertyScrubber: View {
+    @Environment(\.workspaceScrollRevision) private var workspaceScrollRevision
     @ObservedObject var viewModel: EditorViewModel
     @ObservedObject private var playbackState: PlaybackState
     let clip: TimelineClip
@@ -1978,6 +2008,7 @@ private struct PropertyScrubber: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(metadata.title)
+            .accessibilityIdentifier("motionary-property-scrubber-\(target.id)")
             .accessibilityValue(formatted(value, metadata: metadata))
             .accessibilityHint("Swipe left to increase or right to decrease.")
             .accessibilityAdjustableAction { direction in
@@ -1993,6 +2024,21 @@ private struct PropertyScrubber: View {
 
         }
         .disabled(!isEnabled)
+        .onChange(of: workspaceScrollRevision) { _, _ in
+            stopMomentumForScroll()
+        }
+        .onDisappear {
+            momentumTask?.cancel()
+            momentumTask = nil
+            if isScrubbing { finishScrubbing() }
+        }
+    }
+
+    private func stopMomentumForScroll() {
+        guard isScrubbing, !isDragging else { return }
+        momentumTask?.cancel()
+        momentumTask = nil
+        finishScrubbing()
     }
 
     private var displayedValue: Double {
@@ -2214,6 +2260,7 @@ private struct PropertyScrubber: View {
     }
 
     private func updateHaptic(for value: Double, metadata: KeyframePropertyMetadata) {
+        guard isDragging else { return }
         let bucket: Int
         if target.isScaleTarget {
             bucket = Int((log(max(value, 0.01)) / log(1.05)).rounded())
@@ -2398,6 +2445,7 @@ struct SectionKeyframeButton: View {
 }
 
 struct EditorValueScrubber: View {
+    @Environment(\.workspaceScrollRevision) private var workspaceScrollRevision
     let title: String
     let systemImage: String
     let value: Double
@@ -2461,6 +2509,12 @@ struct EditorValueScrubber: View {
             }
         }
         .disabled(maximumPosition.map { $0 <= 0 } ?? false)
+        .onChange(of: workspaceScrollRevision) { _, _ in
+            guard isEditing, !isDragging else { return }
+            momentumTask?.cancel()
+            momentumTask = nil
+            finishScrub()
+        }
         .onDisappear {
             momentumTask?.cancel()
             if isEditing { finishScrub() }
@@ -2553,7 +2607,7 @@ struct EditorValueScrubber: View {
         onChanged(value)
         let bucket = Int(((value - effectiveRange.lowerBound) / safeStep).rounded())
         guard bucket != lastHapticBucket else { return }
-        if lastHapticBucket != nil { EditorHaptics.selection() }
+        if isDragging, lastHapticBucket != nil { EditorHaptics.selection() }
         lastHapticBucket = bucket
     }
 
@@ -2578,83 +2632,77 @@ struct EditorValueScrubber: View {
 
 struct InfiniteScrubberTrack: View {
     static let tickSpacing = MotionaryDesign.Control.scrubberTickSpacing
-
     let tickPosition: CGFloat
     let isEditing: Bool
     let maximumTickPosition: CGFloat?
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                RoundedRectangle(
-                    cornerRadius: EditorWorkspaceControlStyle.cornerRadius,
-                    style: .continuous
-                )
-                    .fill(EditorWorkspaceControlStyle.backgroundColor(isActive: isEditing))
+        ScrubberRulerSurface(tickPosition: tickPosition, isEditing: isEditing,
+                             maximumTickPosition: maximumTickPosition)
+            .frame(minWidth: 72, maxWidth: .infinity)
+            .frame(height: EditorWorkspaceControlStyle.height)
+    }
+}
 
-                Canvas { context, size in
-                    let spacing = Self.tickSpacing
+/// A ruler changes pixels, not layout. Drawing its ticks in one retained view
+/// avoids rebuilding GeometryReader/Canvas/mask trees during momentum and
+/// avoids propagating a scrubber's spring transaction into a scrolling panel.
+private struct ScrubberRulerSurface: UIViewRepresentable {
+    let tickPosition: CGFloat
+    let isEditing: Bool
+    let maximumTickPosition: CGFloat?
 
-                    let halfVisibleTicks = Int(ceil((size.width * 0.5) / spacing))
-                    let startIndex = max(0, Int(floor(tickPosition)) - halfVisibleTicks - 1)
-                    let visibleEndIndex = Int(ceil(tickPosition)) + halfVisibleTicks + 1
-                    let endIndex =
-                        maximumTickPosition.map {
-                            min(Int(ceil($0)), visibleEndIndex)
-                        } ?? visibleEndIndex
+    final class RulerView: UIView {
+        var tickPosition: CGFloat = 0
+        var isEditing = false
+        var maximumTickPosition: CGFloat?
 
-                    if startIndex <= endIndex {
-                        for index in startIndex...endIndex {
-                            let indexPosition =
-                                maximumTickPosition.map {
-                                    min(CGFloat(index), $0)
-                                } ?? CGFloat(index)
-                            let x =
-                                size.width * 0.5
-                                + (indexPosition - tickPosition) * spacing
-                            let isRoundNumber = index.isMultiple(of: 10)
-                            let height: CGFloat = 8
-                            let rect = CGRect(
-                                x: x - 0.6,
-                                y: (size.height - height) * 0.5,
-                                width: 1.2,
-                                height: height
-                            )
-                            context.fill(
-                                Path(roundedRect: rect, cornerRadius: 0.6),
-                                with: .color(
-                                    Color.primary.opacity(isRoundNumber ? 0.52 : 0.24)
-                                )
-                            )
-                        }
-                    }
-                }
-                .mask {
-                    LinearGradient(
-                        stops: [
-                            .init(color: .clear, location: 0),
-                            .init(color: .white, location: 0.14),
-                            .init(color: .white, location: 0.86),
-                            .init(color: .clear, location: 1)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                }
-
-                Capsule()
-                    .fill(MotionaryTheme.accent)
-                    .frame(width: isEditing ? 2.5 : 1.5, height: isEditing ? 24 : 9)
-                    .shadow(
-                        color: MotionaryTheme.accent.opacity(isEditing ? 0.5 : 0.15),
-                        radius: isEditing ? 3 : 1
-                    )
-
-            }
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isOpaque = false
+            isUserInteractionEnabled = false
+            contentMode = .redraw
         }
-        .frame(minWidth: 72, maxWidth: .infinity)
-        .frame(height: EditorWorkspaceControlStyle.height)
-        .animation(.spring(duration: 0.24, bounce: 0.18), value: isEditing)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func draw(_ rect: CGRect) {
+            guard let context = UIGraphicsGetCurrentContext(), bounds.width > 0 else { return }
+            let background = UIColor(EditorWorkspaceControlStyle.backgroundColor(isActive: isEditing))
+            background.setFill()
+            UIBezierPath(roundedRect: bounds, cornerRadius: EditorWorkspaceControlStyle.cornerRadius).fill()
+            let spacing = InfiniteScrubberTrack.tickSpacing
+            let halfVisibleTicks = Int(ceil(bounds.width * 0.5 / spacing))
+            let first = max(0, Int(floor(tickPosition)) - halfVisibleTicks - 1)
+            let visibleLast = Int(ceil(tickPosition)) + halfVisibleTicks + 1
+            let last = maximumTickPosition.map { min(Int(ceil($0)), visibleLast) } ?? visibleLast
+            if first <= last {
+                for index in first...last {
+                    let position = maximumTickPosition.map { min(CGFloat(index), $0) } ?? CGFloat(index)
+                    let x = bounds.midX + (position - tickPosition) * spacing
+                    let edgeDistance = min(x, bounds.width - x) / bounds.width
+                    let fade = min(max(edgeDistance / 0.14, 0), 1)
+                    UIColor.label.withAlphaComponent((index.isMultiple(of: 10) ? 0.52 : 0.24) * fade).setFill()
+                    UIBezierPath(roundedRect: CGRect(x: x - 0.6, y: bounds.midY - 4, width: 1.2, height: 8),
+                                 cornerRadius: 0.6).fill()
+                }
+            }
+            let accent = UIColor(MotionaryTheme.accent)
+            context.setShadow(offset: .zero, blur: isEditing ? 3 : 1,
+                              color: accent.withAlphaComponent(isEditing ? 0.5 : 0.15).cgColor)
+            accent.setFill()
+            let width: CGFloat = isEditing ? 2.5 : 1.5
+            let height: CGFloat = isEditing ? 24 : 9
+            UIBezierPath(roundedRect: CGRect(x: bounds.midX - width / 2, y: bounds.midY - height / 2,
+                                             width: width, height: height), cornerRadius: width / 2).fill()
+        }
+    }
+
+    func makeUIView(context: Context) -> RulerView { RulerView() }
+    func updateUIView(_ view: RulerView, context: Context) {
+        view.tickPosition = tickPosition
+        view.isEditing = isEditing
+        view.maximumTickPosition = maximumTickPosition
+        view.setNeedsDisplay()
     }
 }
 
@@ -2782,6 +2830,7 @@ struct TimelineContextKeyframes: View {
             }
         }
         .frame(width: width, height: height)
+        .clipped()
     }
 
     @ViewBuilder
@@ -2822,10 +2871,7 @@ struct TimelineContextKeyframes: View {
     }
 
     private func markerX(for time: Double) -> CGFloat {
-        min(
-            max(CGFloat(time / max(item.placementDuration, 0.001)) * width, 7),
-            max(width - 7, 7)
-        )
+        CGFloat(time / max(item.placementDuration, 0.001)) * width
     }
 
     private func keyframeTimes(in section: KeyframeSection) -> [Double] {

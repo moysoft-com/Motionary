@@ -86,6 +86,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
         failurePolicy: RenderFailurePolicy
     ) throws -> CIImage {
         var current = input
+        var linearInput: EffectLinearSurface?
         var prefix: [EffectInstance] = []
         for storedEffect in stack.effects where storedEffect.isEnabled && storedEffect.moduleID != .reverseTime {
             let effect: EffectInstance
@@ -132,6 +133,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
             moduleContext.temporalPrefix = EffectStack(effects: prefix)
             moduleContext.temporalSourceExtent = input.extent
             moduleContext.effectInput = input
+            moduleContext.linearInput = linearInput
             let result = try module.render(
                 current,
                 effect: effect,
@@ -146,6 +148,7 @@ final class EffectRenderRegistry: @unchecked Sendable {
             // expanded footprint so trails survive placement and compositing.
             let preservesMotionExtent = effect.moduleID == .motionBlur
             let extent = preservesMotionExtent ? current.extent.union(result.image.extent) : current.extent
+            linearInput = mix >= 0.999_9 && result.image.extent == extent ? result.linearOutput : nil
             current = Self.mix(current, with: result.image.cropped(to: extent), amount: mix)
                 .cropped(to: extent)
         }

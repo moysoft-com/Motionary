@@ -120,7 +120,7 @@ private final class ScratchTexturePool {
         let bytesPerPixel: Int
         switch texture.pixelFormat {
         case .rgba16Float: bytesPerPixel = 8
-        case .bgra8Unorm, .bgra8Unorm_srgb, .rgba8Unorm, .rgba8Unorm_srgb: bytesPerPixel = 4
+        case .bgra8Unorm, .bgra8Unorm_srgb, .rgba8Unorm, .rgba8Unorm_srgb, .rg16Float: bytesPerPixel = 4
         case .rg8Unorm: bytesPerPixel = 2
         default: bytesPerPixel = 1
         }
@@ -210,7 +210,7 @@ final class MetalRenderResources: @unchecked Sendable {
         commandQueue.label = "Motionary Rendering Engine v2"
 
         guard let workingColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearSRGB),
-            let outputColorSpace = CGColorSpace(name: CGColorSpace.itur_709),
+            let outputColorSpace = VideoColorSpace.rec709,
             let generatedColorSpace = CGColorSpace(name: CGColorSpace.sRGB)
         else {
             throw MetalRenderingError.invalidRenderTarget
@@ -239,7 +239,6 @@ final class MetalRenderResources: @unchecked Sendable {
         }
 
         let functionNames = [
-            "motionaryYUVToRGBA",
             "motionaryShapeKernel",
             "motionaryEffectKernel",
             "motionaryDisplacementMapKernel",
@@ -384,52 +383,6 @@ final class MetalRenderResources: @unchecked Sendable {
         return textureReference
     }
 
-    fileprivate func sourceColorSpace(for pixelBuffer: CVPixelBuffer) -> CGColorSpace {
-        let primaries = attachment(
-            kCVImageBufferColorPrimariesKey,
-            in: pixelBuffer
-        )
-        let transfer = attachment(
-            kCVImageBufferTransferFunctionKey,
-            in: pixelBuffer
-        )
-        if primaries == kCVImageBufferColorPrimaries_P3_D65 as String,
-            let colorSpace = CGColorSpace(name: CGColorSpace.displayP3)
-        {
-            return colorSpace
-        }
-        if primaries == kCVImageBufferColorPrimaries_ITU_R_2020 as String,
-            let colorSpace = CGColorSpace(name: CGColorSpace.itur_2020)
-        {
-            return colorSpace
-        }
-        if transfer == kCVImageBufferTransferFunction_sRGB as String,
-            let colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
-        {
-            return colorSpace
-        }
-        if primaries == kCVImageBufferColorPrimaries_ITU_R_709_2 as String,
-            let colorSpace = CGColorSpace(name: CGColorSpace.itur_709)
-        {
-            return colorSpace
-        }
-        // SD Rec.601 and untagged RGB buffers are closest to sRGB among the
-        // calibrated system spaces. Crucially, they are not mislabeled Rec.709.
-        return generatedColorSpace
-    }
-
-    fileprivate func yuvMatrixCode(for pixelBuffer: CVPixelBuffer) -> UInt32 {
-        let matrix = attachment(kCVImageBufferYCbCrMatrixKey, in: pixelBuffer)
-        if matrix == kCVImageBufferYCbCrMatrix_ITU_R_601_4 as String { return 0 }
-        if matrix == kCVImageBufferYCbCrMatrix_ITU_R_2020 as String { return 2 }
-        if matrix == kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String { return 1 }
-        return CVPixelBufferGetWidth(pixelBuffer) >= 1_280 ? 1 : 0
-    }
-
-    private func attachment(_ key: CFString, in pixelBuffer: CVPixelBuffer) -> String? {
-        CVBufferCopyAttachment(pixelBuffer, key, nil) as? String
-    }
-
     private static func scratchTexturePoolBudgetBytes() -> Int {
         let physicalMemory = ProcessInfo.processInfo.physicalMemory
         let lowerBound = 96 * 1_024 * 1_024
@@ -451,9 +404,21 @@ final class MetalFrameResources {
     private var scratchTextureIDs = Set<ObjectIdentifier>()
     private var reusableScratchTextures: [ScratchTextureKey: [MTLTexture]] = [:]
     private var reusableScratchTextureIDs = Set<ObjectIdentifier>()
+    private var displacementMaps: [DisplacementMapKey: MTLTexture]?
+    private var retainedDisplacementMapIDs = Set<ObjectIdentifier>()
+    private var retainedDisplacementMapBytes = 0
     private var retainedCVTextures: [CVMetalTexture] = []
+    private var retainedSourceBuffers: [CVPixelBuffer] = []
     private var completionHandlers: [CompletionHandler] = []
     private var didFinish = false
+
+    private struct DisplacementMapKey: Hashable {
+        let size: SIMD2<UInt32>
+        let time: UInt32
+        let frequency: UInt32
+        let speed: UInt32
+        let detail: UInt32
+    }
 
     fileprivate init(
         owner: MetalRenderResources,
@@ -502,6 +467,7 @@ final class MetalFrameResources {
     func releaseScratchTexture(_ texture: MTLTexture) {
         let identifier = ObjectIdentifier(texture)
         guard scratchTextureIDs.contains(identifier),
+            !retainedDisplacementMapIDs.contains(identifier),
             reusableScratchTextureIDs.insert(identifier).inserted
         else { return }
         let key = ScratchTextureKey(
@@ -522,6 +488,43 @@ final class MetalFrameResources {
         for texture in scratchTextures where !protected.contains(ObjectIdentifier(texture)) {
             releaseScratchTexture(texture)
         }
+    }
+
+    func reusingDisplacementMaps<T>(_ encode: () throws -> T) rethrows -> T {
+        guard displacementMaps == nil else { return try encode() }
+        displacementMaps = [:]
+        defer {
+            retainedDisplacementMapIDs.removeAll()
+            if let displacementMaps {
+                for map in displacementMaps.values { releaseScratchTexture(map) }
+            }
+            displacementMaps = nil
+            retainedDisplacementMapBytes = 0
+        }
+        return try encode()
+    }
+
+    func displacementMap(
+        for uniforms: MotionaryEffectUniforms,
+        encode: (MTLTexture) throws -> Void
+    ) throws -> MTLTexture {
+        // Only inputs read by motionaryDisplacementMapKernel enter this key.
+        // Keep the exact shader input bits, including signed zero.
+        let key = DisplacementMapKey(size: uniforms.size, time: uniforms.time.bitPattern,
+            frequency: uniforms.parameters.y.bitPattern, speed: uniforms.parameters.z.bitPattern,
+            detail: uniforms.parameters.w.bitPattern)
+        if let map = displacementMaps?[key] { return map }
+        let map = try makeScratchTexture(
+            width: Int(uniforms.size.x), height: Int(uniforms.size.y), pixelFormat: .rg16Float
+        )
+        try encode(map)
+        let bytes = map.allocatedSize
+        if displacementMaps != nil, retainedDisplacementMapBytes + bytes <= 24 * 1_024 * 1_024 {
+            displacementMaps?[key] = map
+            retainedDisplacementMapIDs.insert(ObjectIdentifier(map))
+            retainedDisplacementMapBytes += bytes
+        }
+        return map
     }
 
     /// Runs after this frame's command buffer has reached a terminal state.
@@ -571,76 +574,16 @@ final class MetalFrameResources {
 
     func makeSourceImage(from pixelBuffer: CVPixelBuffer) throws -> CIImage {
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-
-        if format == kCVPixelFormatType_32BGRA {
-            let reference = try owner.makePixelBufferTexture(
-                pixelBuffer,
-                pixelFormat: .bgra8Unorm,
-                width: width,
-                height: height,
-                planeIndex: 0
-            )
-            retainedCVTextures.append(reference)
-            guard let texture = CVMetalTextureGetTexture(reference),
-                let image = CIImage(
-                    mtlTexture: texture,
-                    options: [.colorSpace: owner.sourceColorSpace(for: pixelBuffer)]
-                )
-            else { throw MetalRenderingError.invalidRenderTarget }
-            return image
-        }
-
-        guard format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        guard format == kCVPixelFormatType_32BGRA
+            || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
             || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-        else {
-            throw MetalRenderingError.unsupportedPixelFormat(format)
-        }
-
-        let lumaReference = try owner.makePixelBufferTexture(
-            pixelBuffer,
-            pixelFormat: .r8Unorm,
-            width: CVPixelBufferGetWidthOfPlane(pixelBuffer, 0),
-            height: CVPixelBufferGetHeightOfPlane(pixelBuffer, 0),
-            planeIndex: 0
-        )
-        let chromaReference = try owner.makePixelBufferTexture(
-            pixelBuffer,
-            pixelFormat: .rg8Unorm,
-            width: CVPixelBufferGetWidthOfPlane(pixelBuffer, 1),
-            height: CVPixelBufferGetHeightOfPlane(pixelBuffer, 1),
-            planeIndex: 1
-        )
-        retainedCVTextures.append(contentsOf: [lumaReference, chromaReference])
-        guard let lumaTexture = CVMetalTextureGetTexture(lumaReference),
-            let chromaTexture = CVMetalTextureGetTexture(chromaReference)
-        else { throw MetalRenderingError.invalidRenderTarget }
-
-        let outputTexture = try makeScratchTexture(width: width, height: height)
-        let pipeline = try owner.pipeline(named: "motionaryYUVToRGBA")
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw MetalRenderingError.commandBufferUnavailable
-        }
-        encoder.label = "Rec.709 YUV normalization"
-        encoder.setComputePipelineState(pipeline)
-        encoder.setTexture(lumaTexture, index: 0)
-        encoder.setTexture(chromaTexture, index: 1)
-        encoder.setTexture(outputTexture, index: 2)
-        let uniform = try writeUniforms(MotionaryYUVUniforms(
-            size: SIMD2(UInt32(width), UInt32(height)),
-            fullRange: format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ? 1 : 0,
-            matrix: owner.yuvMatrixCode(for: pixelBuffer)
-        ))
-        encoder.setBuffer(uniform.buffer, offset: uniform.offset, index: 0)
-        dispatch(encoder: encoder, pipeline: pipeline, width: width, height: height)
-        encoder.endEncoding()
-
-        guard let image = CIImage(
-            mtlTexture: outputTexture,
-            options: [.colorSpace: owner.sourceColorSpace(for: pixelBuffer)]
-        ) else { throw MetalRenderingError.invalidRenderTarget }
-        return image
+        else { throw MetalRenderingError.unsupportedPixelFormat(format) }
+        // Core Image honors the complete source color description, range,
+        // chroma siting and clean aperture. Wrapping bare Metal planes loses
+        // those semantics, especially for SMPTE-C/ICC-tagged video. Conversion
+        // remains on the GPU and can fuse into the subsequent CI render.
+        retainedSourceBuffers.append(pixelBuffer)
+        return VideoSourceGeometry.engineImage(CIImage(cvPixelBuffer: pixelBuffer))
     }
 
     func dispatch(
@@ -669,6 +612,7 @@ final class MetalFrameResources {
         reusableScratchTextures.removeAll(keepingCapacity: false)
         reusableScratchTextureIDs.removeAll(keepingCapacity: false)
         retainedCVTextures.removeAll(keepingCapacity: false)
+        retainedSourceBuffers.removeAll(keepingCapacity: false)
         guard commandBuffer.status == .completed else {
             throw MetalRenderingError.commandBufferFailed(commandBuffer.error)
         }
@@ -684,11 +628,12 @@ final class MetalFrameResources {
         let slot = uniformSlot
         let textures = scratchTextures
         let retainedTextureReferences = retainedCVTextures
+        let retainedBuffers = retainedSourceBuffers
         let completionHandlers = completionHandlers
         commandBuffer.addCompletedHandler { commandBuffer in
             completionHandlers.forEach { $0(commandBuffer) }
             owner.finishFrame(slot: slot, textures: textures)
-            _ = retainedTextureReferences.count
+            withExtendedLifetime((retainedTextureReferences, retainedBuffers)) {}
             guard commandBuffer.status == .completed else {
                 completion(.failure(MetalRenderingError.commandBufferFailed(commandBuffer.error)))
                 return
@@ -701,6 +646,7 @@ final class MetalFrameResources {
         reusableScratchTextures.removeAll(keepingCapacity: false)
         reusableScratchTextureIDs.removeAll(keepingCapacity: false)
         retainedCVTextures.removeAll(keepingCapacity: false)
+        retainedSourceBuffers.removeAll(keepingCapacity: false)
         self.completionHandlers.removeAll(keepingCapacity: false)
     }
 
@@ -713,6 +659,7 @@ final class MetalFrameResources {
         reusableScratchTextures.removeAll(keepingCapacity: false)
         reusableScratchTextureIDs.removeAll(keepingCapacity: false)
         retainedCVTextures.removeAll(keepingCapacity: false)
+        retainedSourceBuffers.removeAll(keepingCapacity: false)
         completionHandlers.removeAll(keepingCapacity: false)
     }
 

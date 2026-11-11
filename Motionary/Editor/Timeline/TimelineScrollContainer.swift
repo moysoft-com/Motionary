@@ -45,7 +45,7 @@ private final class TimelineUIScrollView: UIScrollView {
 
 struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     @Binding var pixelsPerSecond: CGFloat
-    @Binding var horizontalScrollOffset: CGFloat
+    let horizontalScrollOffset: Binding<CGFloat>?
     let currentTime: Double
     let duration: Double
     let maximumTimelineTime: Double
@@ -71,7 +71,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
     init(
         pixelsPerSecond: Binding<CGFloat>,
-        horizontalScrollOffset: Binding<CGFloat> = .constant(0),
+        horizontalScrollOffset: Binding<CGFloat>? = nil,
         currentTime: Double,
         duration: Double,
         maximumTimelineTime: Double? = nil,
@@ -96,7 +96,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         @ViewBuilder content: () -> Content
     ) {
         _pixelsPerSecond = pixelsPerSecond
-        _horizontalScrollOffset = horizontalScrollOffset
+        self.horizontalScrollOffset = horizontalScrollOffset
         self.currentTime = currentTime
         self.duration = duration
         self.maximumTimelineTime = min(max(maximumTimelineTime ?? duration, 0), max(duration, 0))
@@ -272,6 +272,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private let maximumPixelsPerSecond: CGFloat = 280
         private var pendingHorizontalScrollOffset: CGFloat?
         private var isHorizontalScrollOffsetUpdateScheduled = false
+        private var horizontalPresentationGeneration = 0
         private weak var scrollView: UIScrollView?
         private var autoScrollDisplayLink: CADisplayLink?
         private var lastAutoScrollTimestamp: CFTimeInterval?
@@ -304,6 +305,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func stopInteractions(in scrollView: UIScrollView) {
+            horizontalPresentationGeneration &+= 1
             autoScrollDisplayLink?.invalidate()
             autoScrollDisplayLink = nil
             scrubDisplayLink?.invalidate()
@@ -702,22 +704,26 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func publishHorizontalScrollOffset(_ offset: CGFloat, immediately: Bool = false) {
+            horizontalPresentationGeneration &+= 1
             if shouldDeferStateUpdates {
-                DispatchQueue.main.async { [weak state = parent.scrollPresentationState] in
+                let generation = horizontalPresentationGeneration
+                DispatchQueue.main.async { [weak self, weak state = parent.scrollPresentationState] in
+                    guard self?.horizontalPresentationGeneration == generation else { return }
                     state?.update(horizontalOffset: offset)
                 }
             } else {
                 parent.scrollPresentationState?.update(horizontalOffset: offset)
             }
+            guard let binding = parent.horizontalScrollOffset else { return }
             if immediately {
                 pendingHorizontalScrollOffset = nil
-                guard abs(parent.horizontalScrollOffset - offset) > 0.01 else { return }
+                guard abs(binding.wrappedValue - offset) > 0.01 else { return }
                 if shouldDeferStateUpdates {
                     pendingHorizontalScrollOffset = offset
                     scheduleDeferredHorizontalScrollOffsetPublish()
                     return
                 }
-                parent.horizontalScrollOffset = offset
+                binding.wrappedValue = offset
                 return
             }
 
@@ -731,10 +737,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 isHorizontalScrollOffsetUpdateScheduled = false
-                guard let offset = pendingHorizontalScrollOffset else { return }
+                guard let offset = pendingHorizontalScrollOffset,
+                    let binding = parent.horizontalScrollOffset else { return }
                 pendingHorizontalScrollOffset = nil
-                guard abs(parent.horizontalScrollOffset - offset) > 0.01 else { return }
-                parent.horizontalScrollOffset = offset
+                guard abs(binding.wrappedValue - offset) > 0.01 else { return }
+                binding.wrappedValue = offset
             }
         }
 

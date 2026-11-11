@@ -44,8 +44,62 @@ private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
     }
 }
 
+private final class FixedClockPlayer: AVPlayer, @unchecked Sendable {
+    override func currentTime() -> CMTime { CMTime(value: 53, timescale: 60) }
+}
+
 @Suite(.serialized)
 struct PreviewRebuildTests {
+    @MainActor
+    @Test func pauseHandoffUsesTheActualPlayerPosition() {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        model.player = FixedClockPlayer(playerItem: AVPlayerItem(asset: AVMutableComposition()))
+        model.updateCurrentTime(0.75)
+        model.isPlaying = true
+        model.togglePlayback()
+        #expect(!model.isPlaying)
+        #expect(model.currentTime == 53 / 60.0)
+    }
+
+    @MainActor
+    @Test(arguments: [false, true])
+    func aStructuralEditInstallsItsGraphDuringTheNextScrub(releaseBeforeBuild: Bool) async throws {
+        let shape = ShapeTimelineItem(name: "Scrub after cut", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: .white, width: 64, height: 64),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let track = TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])
+        let project = EditorProject(title: "Cut then scrub",
+            renderSettings: RenderSettings(width: 96, height: 128), tracks: [track])
+        let model = EditorViewModel(projectID: UUID(), projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: project))
+        defer { model.stop() }
+        model.start()
+        await model.rebuildTask?.value
+        let originalItem = model.player?.currentItem
+        model.selectTimelineItem(shape.id, trackID: track.id)
+        model.updateCurrentTime(2)
+        let revision = model.renderService.livePreviewState.snapshot().revision
+        _ = try #require(model.splitSelectedTimelineItem())
+        #expect(model.renderService.livePreviewState.snapshot().revision > revision)
+        model.beginScrub()
+        model.updateScrub(to: 1.25)
+        if releaseBeforeBuild { model.endScrub(at: 1.25) }
+        let rebuild = try #require(model.rebuildTask, "Scrubbing must retain required topology work")
+        await rebuild.value
+        #expect(model.player?.currentItem !== originalItem)
+        #expect(!model.pendingPreviewInvalidation.contains(.compositionTopology))
+        if !releaseBeforeBuild { #expect(model.isScrubbing) }
+        let instructions = model.player?.currentItem?.videoComposition?.instructions
+        let instruction = try #require(instructions?.first as? MotionaryVideoCompositionInstruction)
+        #expect(instruction.clips.count == 2)
+        model.endScrub(at: 1.25)
+        for _ in 0..<1000 where model.isScrubbing { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(!model.isScrubbing)
+        #expect(model.currentTime == 1.25)
+        #expect(model.errorMessage == nil)
+    }
+
     @MainActor
     @Test func adjustmentTargetChangesInvalidateAndRefreshPreview() async throws {
         let shape = ShapeTimelineItem(
@@ -289,27 +343,12 @@ struct PreviewRebuildTests {
             #expect(required == expected)
             #expect(active.count == ((time == 0.1 || time == 0.5) ? 1 : 0))
         }
-        // Exercise the real compositor after a source ends and through the
-        // trailing audio interval, with a bounded asynchronous test deadline.
-        let generator = AVAssetImageGenerator(asset: rendered.composition)
-        generator.videoComposition = composition
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                for time in [0.1, 0.3, 0.5, 0.8] {
-                    let frame = try await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)).image
-                    #expect(frame.width == 96)
-                    #expect(frame.height == 128)
-                }
-            }
-            group.addTask {
-                try await Task.sleep(for: .seconds(10))
-                generator.cancelAllCGImageGeneration()
-                throw CancellationError()
-            }
-            defer { group.cancelAll() }
-            try await group.next()
+        // Exercise the real compositor after a source ends and through the trailing audio interval.
+        let probe = PlayerFrameProbe(asset: rendered.composition, videoComposition: composition)
+        for time in [0.1, 0.3, 0.5, 0.8] {
+            let image = try await probe.image(at: CMTime(seconds: time, preferredTimescale: 600))
+            #expect(image.extent.width == 96)
+            #expect(image.extent.height == 128)
         }
     }
 
@@ -558,12 +597,61 @@ struct PreviewRebuildTests {
         #expect(CVPixelBufferCreate(kCFAllocatorDefault, 96, 96, kCVPixelFormatType_32BGRA,
             [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &frame) == kCVReturnSuccess)
         let buffer = try #require(frame)
+        model.renderService.livePreviewState.cacheFrame(buffer, at: 0.1,
+            sessionID: model.previewRenderSessionID,
+            revision: model.renderService.livePreviewState.snapshot().revision)
         completions[0](buffer)
         for _ in 0..<100 where requests.count < 2 { try await Task.sleep(for: .milliseconds(2)) }
         #expect(requests == [0.1, 0.8])
         #expect(player.pendingSeekCount == 0)
         #expect(model.livePreviewPresentation.frame === buffer)
         if completions.count == 2 { completions[1](buffer) }
+    }
+
+    @MainActor
+    @Test func aLateScrubFrameCannotReplaceTheCloserPresentation() throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        model.updateCurrentTime(0.8)
+        var buffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let frame = try #require(buffer)
+        model.presentScrubFrame(frame, at: 0.75)
+        model.presentScrubFrame(frame, at: 0.2)
+        #expect(model.livePreviewPresentation.frameTime == 0.75)
+        model.presentScrubFrame(frame, at: 0.8)
+        #expect(model.livePreviewPresentation.frameTime == 0.8)
+    }
+
+    @MainActor
+    @Test func navigatingBeyondLastFrameSupersedesScrubAndCanSeekBack() async throws {
+        // The short partial frame rounds down to the exclusive composition end.
+        let model = makeGeneratedLayerViewModel(duration: 120.0005)
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        model.beginScrub()
+        model.endScrub(at: 119.5)
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        try #require(player.pendingSeekCount == 1)
+
+        model.seek(to: 121)
+        for _ in 0..<100 where player.pendingSeekCount < 2 { await Task.yield() }
+        try #require(player.pendingSeekCount == 2)
+        #expect(player.seekRequests[1].time < model.livePreviewPresentationTime(model.duration))
+        player.completeSeek(at: 1, finished: true)
+        player.completeSeek(at: 0, finished: false)
+        #expect(!model.isScrubbing)
+        #expect(!model.scrubIsFinishing)
+        #expect(model.currentTime == model.duration)
+
+        model.seek(to: 119)
+        for _ in 0..<100 where player.pendingSeekCount < 3 { await Task.yield() }
+        try #require(player.pendingSeekCount == 3)
+        player.completeSeek(at: 2, finished: true)
+        #expect(player.seekRequests[2].time == 119)
+        #expect(model.currentTime == 119)
+        #expect(model.previewRecoveryAttemptCount == 0)
     }
 
     @MainActor
@@ -753,6 +841,55 @@ struct PreviewRebuildTests {
         #expect(await latestSeek.value == .completed)
         #expect(!viewModel.isPreviewSeekInFlight)
         #expect(viewModel.previewRecoveryAttemptCount == 0)
+    }
+
+    @MainActor
+    @Test func cancellingSeekTaskDoesNotWaitForFiveSecondDecoderTimeout() async {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        let seek = Task { await model.boundedSeek(
+            player: player, to: 0.3, toleranceBefore: .zero, toleranceAfter: .zero,
+            timeoutNanoseconds: 5_000_000_000
+        ) }
+        for _ in 0..<100 where player.pendingSeekCount < 1 { await Task.yield() }
+        #expect(player.pendingSeekCount == 1)
+        let started = ContinuousClock.now
+        seek.cancel()
+        #expect(await seek.value == .superseded)
+        #expect(started.duration(to: .now) < .milliseconds(100))
+        #expect(!model.isPreviewSeekInFlight)
+        #expect(model.previewRecoveryAttemptCount == 0)
+        // The decoder can still deliver a late callback; it cannot resume twice.
+        player.completeSeek(at: 0, finished: true)
+    }
+
+    @MainActor
+    @Test func workspaceScrollDefersCommitWorkAndResumesItOnceAfterDeceleration() {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let owner = UUID()
+        let secondOwner = UUID()
+        model.setWorkspaceScrolling(true, owner: owner)
+        model.setWorkspaceScrolling(true, owner: secondOwner)
+        model.schedulePreviewRebuild(invalidation: [.previewFrame])
+        model.schedulePreviewRebuild(invalidation: [.audioMix, .compositionTopology])
+        model.persist()
+        model.scheduleLivePreviewFrameRefresh()
+        #expect(model.rebuildTask == nil)
+        #expect(model.autosaveTask == nil)
+        #expect(!model.livePreviewFrameRefreshInFlight)
+        #expect(model.workspacePersistencePending)
+        #expect(model.pendingPreviewInvalidation == [.previewFrame, .audioMix, .compositionTopology])
+        model.setWorkspaceScrolling(false, owner: owner)
+        #expect(model.rebuildTask == nil)
+        model.setWorkspaceScrolling(false, owner: secondOwner)
+        #expect(model.rebuildTask != nil)
+        #expect(model.autosaveTask != nil)
+        let generation = model.previewGeneration
+        model.setWorkspaceScrolling(false, owner: secondOwner)
+        #expect(model.previewGeneration == generation)
     }
 
     @MainActor
@@ -1225,6 +1362,7 @@ struct PreviewRebuildTests {
         viewModel.installPreviewItemHealthObservers(for: oldItem)
         player.replaceCurrentItem(with: newItem)
         viewModel.installPreviewItemHealthObservers(for: newItem)
+        viewModel.isPlaying = true
 
         NotificationCenter.default.post(
             name: .AVPlayerItemPlaybackStalled,
@@ -1295,17 +1433,57 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
+    @Test func backgroundPreviewIgnoresStaleFailuresAndRebuildsAtTheSamePlayhead() async throws {
+        let model = makeGeneratedLayerViewModel(duration: 120.01)
+        defer { model.stop() }
+        let time = 119.5
+        let invalidation: EditorInvalidation = [.previewFrame, .compositionTopology, .audioMix]
+        model.schedulePreviewRebuild(seekTo: time, delay: false, invalidation: invalidation)
+        await model.rebuildTask?.value
+        let original = try #require(model.player)
+        let originalSession = model.previewRenderSessionID
+        model.schedulePreviewRecovery(reason: .compositorFailure, resumePlayback: false)
+
+        model.suspendPreview()
+        #expect(model.player == nil)
+        #expect(model.rebuildTask == nil)
+        for _ in 0..<6 { model.schedulePreviewRecovery(reason: .seekTimeout, resumePlayback: false) }
+        NotificationCenter.default.post(name: .motionaryVideoCompositorPersistentFailure, object: nil,
+            userInfo: ["renderSessionID": originalSession])
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(!model.previewRecoveryCircuitIsOpen)
+        #expect(model.currentTime == time)
+
+        model.resumePreview()
+        await model.rebuildTask?.value
+        let restored = try #require(model.player)
+        #expect(restored !== original)
+        #expect(model.previewRenderSessionID != originalSession)
+        #expect(abs(restored.currentTime().seconds - time) < 1 / 30)
+        #expect(model.currentTime == time)
+        #expect(model.previewRecoveryAttemptCount == 0)
+        #expect(!model.isPlaying)
+    }
+
+    @MainActor
+    @Test func duplicateRecoverySignalsShareOneAttempt() {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        for _ in 0..<6 {
+            model.schedulePreviewRecovery(reason: .compositorFailure, resumePlayback: false)
+        }
+        #expect(model.previewRecoveryAttemptCount == 1)
+        #expect(!model.previewRecoveryCircuitIsOpen)
+    }
+
+    @MainActor
     @Test func repeatedPreviewRecoveryOpensCircuitInsteadOfLoopingForever() async throws {
         let viewModel = makeGeneratedLayerViewModel()
         defer { viewModel.stop() }
         viewModel.player = AVPlayer()
         viewModel.isPlaying = true
 
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: true)
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: true)
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: true)
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: true)
-        await Task.yield()
+        await exhaustPreviewRecovery(for: viewModel)
 
         #expect(viewModel.previewRecoveryCircuitIsOpen)
         #expect(viewModel.player == nil)
@@ -1327,17 +1505,22 @@ struct PreviewRebuildTests {
         }
         viewModel.player = AVPlayer()
 
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: false)
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: false)
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: false)
-        viewModel.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: false)
-        await Task.yield()
+        await exhaustPreviewRecovery(for: viewModel)
         #expect(viewModel.previewRecoveryCircuitIsOpen)
 
         viewModel.schedulePreviewRebuild(seekTo: 0.2, delay: false, invalidation: [.previewFrame])
 
         #expect(!viewModel.previewRecoveryCircuitIsOpen)
         #expect(viewModel.rebuildTask != nil)
+    }
+
+    @MainActor
+    private func exhaustPreviewRecovery(for model: EditorViewModel) async {
+        for _ in 0..<4 {
+            model.schedulePreviewRecovery(reason: .playerItemFailed, resumePlayback: false)
+            await model.previewRecoveryTask?.value
+            model.rebuildTask?.cancel()
+        }
     }
 
     @MainActor
@@ -1518,9 +1701,10 @@ struct PreviewRebuildTests {
 
         #expect(viewModel.interactiveEditSnapshot == nil)
         #expect(viewModel.undoStack.count == 2)
-        #expect(viewModel.deferredPreviewInvalidation.contains(.previewFrame))
-        #expect(viewModel.deferredPreviewInvalidation.contains(.compositionTopology))
-        #expect(viewModel.deferredPreviewInvalidation.contains(.audioMix))
+        #expect(viewModel.pendingPreviewInvalidation.contains(.previewFrame))
+        #expect(viewModel.pendingPreviewInvalidation.contains(.compositionTopology))
+        #expect(viewModel.pendingPreviewInvalidation.contains(.audioMix))
+        #expect(viewModel.rebuildTask != nil)
     }
 
     @MainActor
@@ -1939,7 +2123,7 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
-    private func makeGeneratedLayerViewModel() -> EditorViewModel {
+    private func makeGeneratedLayerViewModel(duration: Double = 1) -> EditorViewModel {
         let shape = ShapeTimelineItem(
             name: "Preview Recovery",
             mediaID: MediaID(),
@@ -1950,7 +2134,7 @@ struct PreviewRebuildTests {
                 height: 64
             ),
             timelineStart: 0,
-            sourceRange: TimeRangeValue(start: 0, duration: 1)
+            sourceRange: TimeRangeValue(start: 0, duration: duration)
         )
         return EditorViewModel(
             projectID: UUID(),

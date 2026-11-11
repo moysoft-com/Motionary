@@ -41,10 +41,17 @@ final class EditorViewModel: ObservableObject {
     var project: EditorProject {
         didSet {
             projectItemIndexGeneration &+= 1
+            cachedProjectDuration = nil
         }
     }
+    private var cachedProjectDuration: Double?
     var projectItemIndexGeneration = 0
     var projectItemLookupIndex = ProjectItemLookupIndex()
+    @Published var depthPreparationProgress: Double?
+    @Published var depthPreparationIndeterminate = false
+    var depthPreparationID: UUID?
+    var depthPreparationEffectID: UUID?
+    var cancelledDepthPreparationID: UUID?
     @Published var player: AVPlayer?
     @Published var previewRendererIdentity = UUID()
     var currentTime: Double {
@@ -189,7 +196,14 @@ final class EditorViewModel: ObservableObject {
     var rebuildTask: Task<Void, Never>?
     var previewGeneration = 0
     var previewQuality: PreviewQuality = .balanced
+    /// Physical preview-surface size in device pixels, published by the preview
+    /// view. Preview rendering sizes itself to this surface (never above the
+    /// 960 budget) so older devices with small surfaces skip fill rate that
+    /// would only be upscaled away. Nil preserves the 960-only behavior.
+    var previewDisplayPixelSize: CGSize?
     var scrubSeekTask: Task<Void, Never>?
+    var scrubPrefetchTask: Task<Void, Never>?
+    var lastScrubDirection: Double = 0
     var importTask: Task<Void, Never>?
     var exportTask: Task<Void, Never>?
     var analysisTask: Task<Void, Never>?
@@ -199,12 +213,16 @@ final class EditorViewModel: ObservableObject {
     var lastProjectPosterSignature: Data?
     var interactivePreviewThrottleTask: Task<Void, Never>?
     var livePreviewFrameRefreshTask: Task<Void, Never>?
+    var livePreviewSeekTask: Task<Void, Never>?
     var liveAudioPreviewTask: Task<Void, Never>?
     var lastInteractivePreviewRebuild: CFAbsoluteTime = 0
     var lastLivePreviewFrameRefresh: CFAbsoluteTime = 0
     var lastLiveAudioPreviewRefresh: CFAbsoluteTime = 0
     var livePreviewFrameRefreshInFlight = false
     var pendingInteractivePreviewInvalidation: EditorInvalidation = []
+    var workspaceScrollOwners: Set<UUID> = []
+    var workspacePersistencePending = false
+
     /// Visual inspector mutations are consumed directly by the existing
     /// compositor instruction. The IDs remain pending until a committed
     /// descriptor rebuild has presented a fresh frame.
@@ -232,6 +250,7 @@ final class EditorViewModel: ObservableObject {
     var previewRecoveryLoopWindowStartedAt: CFAbsoluteTime = 0
     var previewRecoveryLoopCount = 0
     var previewRecoveryCircuitIsOpen = false
+    var previewIsSuspended = false
     var previewRenderSessionID = UUID()
     var lastPreviewRenderedFrameAt: CFAbsoluteTime = 0
     var lastPreviewRenderedTimelineTime: Double?
@@ -253,19 +272,28 @@ final class EditorViewModel: ObservableObject {
     var stateCancellables: Set<AnyCancellable> = []
     let clipRevealEpsilon = 0.01
 
-    var duration: Double { project.duration }
+    var duration: Double {
+        if let cachedProjectDuration { return cachedProjectDuration }
+        let duration = project.duration
+        cachedProjectDuration = duration
+        return duration
+    }
     var lastPlayableTime: Double {
-        guard duration > 0 else { return 0 }
-        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
-        return max(duration - frameDuration, 0)
+        let duration = duration
+        guard duration.isFinite, duration > 0 else { return 0 }
+        let frameRate = Double(max(project.renderSettings.frameRate, 1))
+        let renderEnd = min(duration, livePreviewPresentationTime(duration))
+        // The instruction end is exclusive and uses the same 600 Hz
+        // timebase as seeks. Keep partial frames that survive that rounding.
+        return max(ceil(renderEnd * frameRate - 0.000_001) - 1, 0) / frameRate
     }
 
     func clampedTimelineTime(_ time: Double) -> Double {
-        min(max(time, 0), duration)
+        time.isNaN ? 0 : min(max(time, 0), duration)
     }
 
     func clampedPlayableTime(_ time: Double) -> Double {
-        min(max(time, 0), lastPlayableTime)
+        min(clampedTimelineTime(time), lastPlayableTime)
     }
 
     var longRunningTaskTitle: String? {
@@ -278,8 +306,11 @@ final class EditorViewModel: ObservableObject {
         if let analysisState {
             return "\(analysisState.kind.title) \(Int(analysisState.progress * 100))%"
         }
+        if let progress = depthPreparationProgress {
+            return depthPreparationIndeterminate ? "Preparing Depth Map" : "Preparing Depth Map \(Int(progress * 100))%"
+        }
         if isInitialPreviewLoadBlocking {
-            return "Preparing preview \(Int(previewProgress * 100))%"
+            return "Preparing preview"
         }
         return nil
     }
@@ -292,7 +323,7 @@ final class EditorViewModel: ObservableObject {
         if let analysisState {
             return analysisState.blocksEditor
         }
-        return isExporting || isImporting || isInitialPreviewLoadBlocking
+        return isExporting || isImporting || isInitialPreviewLoadBlocking || depthPreparationProgress != nil
     }
 
     var isInitialPreviewLoadBlocking: Bool {
@@ -390,6 +421,35 @@ final class EditorViewModel: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Records the physical preview surface and rebuilds once the effective
+    /// render size materially changes. Layout noise (rotation, window moves,
+    /// split-view animation) is coalesced by `schedulePreviewRebuild`'s own
+    /// delayed cancel-and-reschedule.
+    func setPreviewDisplayPixelSize(_ size: CGSize?) {
+        let sanitized = size.flatMap { pixelSize -> CGSize? in
+            guard pixelSize.width >= 2, pixelSize.height >= 2,
+                pixelSize.width.isFinite, pixelSize.height.isFinite
+            else { return nil }
+            return pixelSize
+        }
+        let previousSize = previewDisplayPixelSize
+        guard previousSize != sanitized else { return }
+        let oldEffective = previewEffectiveRenderDimension()
+        previewDisplayPixelSize = sanitized
+        guard previewQuality.maximumDimension != nil, sanitized != nil else { return }
+        // Materiality is judged on the effective render dimension, not the
+        // raw rectangle, so stable windows do not rebuild on subpixel layout.
+        if abs(previewEffectiveRenderDimension() - oldEffective) >= 16 {
+            schedulePreviewRebuild(seekTo: currentTime, invalidation: [.previewFrame])
+        }
+    }
+
+    private func previewEffectiveRenderDimension() -> Double {
+        guard let maximum = previewQuality.maximumDimension else { return .infinity }
+        guard let size = previewDisplayPixelSize else { return maximum }
+        return min(maximum, max(Double(size.width), Double(size.height)))
+    }
+
     func indexedTimelineItem(id: UUID) -> TimelineItem? {
         projectItemLookupIndex.item(
             id: id,
@@ -404,6 +464,38 @@ final class EditorViewModel: ObservableObject {
             in: project,
             generation: projectItemIndexGeneration
         )
+    }
+
+    /// A gesture edits a single, already normalized item in place. The
+    /// transaction still reconciles the library once on commit.
+    func applyInteractiveClipReplacement(_ replacement: ReplaceClipCommand) -> Bool {
+        let item = replacement.after
+        guard project.schemaVersion == EditorProject.currentSchemaVersion,
+            let location = indexedTimelineItemLocation(id: item.id),
+            project.tracks[location.track].items[location.item] == replacement.before
+        else { return false }
+
+        switch (replacement.before, item) {
+        case (.media(let before), .media(let after)):
+            guard before.mediaID == after.mediaID,
+                before.mediaType == after.mediaType,
+                project.mediaLibrary[after.mediaID]?.mediaType == after.mediaType
+            else { return false }
+        case (.shape(let before), .shape(let after)):
+            guard before.mediaID == after.mediaID,
+                project.mediaLibrary[after.mediaID]?.mediaType == .video
+            else { return false }
+        case (.adjustment, .adjustment), (.text, .text):
+            break
+        default:
+            return false
+        }
+
+        let preservedDuration = replacement.before.timelineEnd == item.timelineEnd ? cachedProjectDuration : nil
+        project.tracks[location.track].items[location.item] = item
+        project.synchronizeExportFrameRate()
+        cachedProjectDuration = preservedDuration
+        return true
     }
 
     func refreshSelectedTimelineRange() {

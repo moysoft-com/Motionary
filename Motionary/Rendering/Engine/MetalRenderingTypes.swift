@@ -22,6 +22,12 @@ enum RenderQualityProfile: String, Sendable {
 enum GeneratedRasterPolicy {
     static let maximumTextureDimension = 8_192
     static let maximumRasterizedCanvasCoverage: CGFloat = 10
+    /// Pre-allocation pixel budget for a single generated raster. Per-dimension
+    /// caps alone still permit pathological allocations (e.g. 10x canvas
+    /// coverage on a large canvas), which is the jetsam risk on 3 GB devices.
+    /// 16M pixels covers full-canvas 4K generation with headroom; any
+    /// legitimate preview/export raster is far below this.
+    static let maximumRasterizedPixelCount: CGFloat = 16_777_216
     static let textCacheBytes = 64 * 1_024 * 1_024
     static let gpuImageCacheBytes = 256 * 1_024 * 1_024
     static let livePreviewShapeCacheBytes = 32 * 1_024 * 1_024
@@ -40,15 +46,29 @@ enum GeneratedRasterPolicy {
     static func boundedRasterScale(
         _ requestedScale: CGSize,
         logicalSize: CGSize,
-        maximumTextureDimension: Int = Self.maximumTextureDimension
+        maximumTextureDimension: Int = Self.maximumTextureDimension,
+        maximumRasterizedPixelCount: CGFloat = Self.maximumRasterizedPixelCount
     ) -> CGSize {
         let textureLimit = CGFloat(max(maximumTextureDimension, 1))
         let logicalWidth = max(logicalSize.width, 1)
         let logicalHeight = max(logicalSize.height, 1)
-        return CGSize(
+        var scale = CGSize(
             width: min(max(requestedScale.width, 1), max(textureLimit / logicalWidth, 1)),
             height: min(max(requestedScale.height, 1), max(textureLimit / logicalHeight, 1))
         )
+        // Enforce the total pixel budget before any texture is allocated.
+        // The scale is shrunk proportionally in both axes, but never below 1:
+        // a logical surface larger than the budget must still rasterize once.
+        let pixelCount = logicalWidth * logicalHeight * scale.width * scale.height
+        let pixelLimit = max(maximumRasterizedPixelCount, 1)
+        if pixelCount > pixelLimit {
+            let factor = (pixelLimit / pixelCount).squareRoot()
+            scale = CGSize(
+                width: max(scale.width * factor, 1),
+                height: max(scale.height * factor, 1)
+            )
+        }
+        return scale
     }
 
     static func canvasCoverageScale(
@@ -231,6 +251,17 @@ final class LivePreviewRenderState: @unchecked Sendable {
         return composedFrames.frame(at: time, sessionID: sessionID, revision: revision)
     }
 
+    /// Transient scrub fallback only. Returns the closest composed frame
+    /// within `window` seconds of `time`, restricted to the current edit revision.
+    /// Callers must still seek to (and present) the exact time; the
+    /// nearby frame is only a better hold than the previously displayed one
+    /// or a blank surface.
+    func cachedFrameNear(at time: Double, sessionID: UUID, window: Double) -> (frame: CVPixelBuffer, time: Double)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return composedFrames.frameNear(at: time, sessionID: sessionID, window: window, revision: revision)
+    }
+
     func cacheFrame(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision renderedRevision: UInt64) {
         lock.lock()
         defer { lock.unlock() }
@@ -241,6 +272,8 @@ final class LivePreviewRenderState: @unchecked Sendable {
     func invalidateComposedFrames() {
         lock.lock()
         revision &+= 1
+        // A timeline edit can assign completely different source content to
+        // the same timeline timestamp. Such entries are not valid scrub holds.
         composedFrames.removeAll()
         lock.unlock()
     }
@@ -636,6 +669,19 @@ extension RenderClipDescriptor {
         if override.isHidden {
             transform.opacity = AnimatableProperty(baseValue: 0)
         }
+        var resolvedEffects = visuals?.effectStack ?? effectStack
+        if visuals != nil, temporalSource != nil {
+            // New depth analysis becomes usable with the prepared descriptor.
+            // Live style edits can still use the installed track immediately.
+            resolvedEffects.effects = resolvedEffects.effects.compactMap { effect in
+                guard effect.moduleID == .depthMap, effect.isEnabled else { return effect }
+                guard let prepared = effectStack.effects.first(where: { $0.id == effect.id && $0.isEnabled }) else {
+                    return nil
+                }
+                return DepthBakeStore.stability(of: prepared) == DepthBakeStore.stability(of: effect)
+                    ? effect : prepared
+            }
+        }
         var result = RenderClipDescriptor(
             trackID: trackID,
             backgroundMaskTrackID: backgroundMaskTrackID,
@@ -649,7 +695,7 @@ extension RenderClipDescriptor {
             backgroundMaskSourceTransform: backgroundMaskSourceTransform,
             transform: transform,
             adjustments: visuals?.adjustments ?? adjustments,
-            effectStack: visuals?.effectStack ?? effectStack,
+            effectStack: resolvedEffects,
             mask: resolvedMask,
             backgroundRemoval: resolvedBackgroundRemoval,
             blendMode: visuals?.blendMode ?? blendMode,
@@ -714,9 +760,11 @@ struct EffectRenderContext: Sendable {
     let quality: RenderQualityProfile
     var temporalSource: EffectTemporalSource? = nil
     var temporalPrefix = EffectStack()
+    var depthSourceEffects = EffectStack()
     var temporalSourceExtent: CGRect? = nil
     var frameDuration: Double = 1 / 30
     var effectInput: CIImage? = nil
+    var linearInput: EffectLinearSurface? = nil
     var layerMotion: EffectLayerMotion? = nil
     var motionScene: EffectMotionScene? = nil
 
@@ -744,13 +792,21 @@ struct EffectRenderContext: Sendable {
     }
 }
 
+/// A borrowed linear FP16 surface from the current frame's command buffer.
+/// The effect chain only reads it and the frame owns its lifetime.
+struct EffectLinearSurface: @unchecked Sendable {
+    let texture: MTLTexture
+}
+
 struct EffectRenderResult {
     let image: CIImage
     let requiredMargin: CGFloat
+    let linearOutput: EffectLinearSurface?
 
-    init(image: CIImage, requiredMargin: CGFloat = 0) {
+    init(image: CIImage, requiredMargin: CGFloat = 0, linearOutput: EffectLinearSurface? = nil) {
         self.image = image
         self.requiredMargin = max(requiredMargin, 0)
+        self.linearOutput = linearOutput
     }
 }
 
@@ -765,12 +821,6 @@ struct MotionaryEffectUniforms {
     var sourceBounds = SIMD4<Float>(0, 0, 1, 1)
     var parameters2 = SIMD4<Float>(0.5, 0.5, 0, 0)
     var parameters3 = SIMD4<Float>(1, 1, 1, 1)
-}
-
-struct MotionaryYUVUniforms {
-    var size: SIMD2<UInt32>
-    var fullRange: UInt32
-    var matrix: UInt32
 }
 
 enum MotionaryMetalEffectKind: UInt32 {
@@ -805,6 +855,8 @@ enum MotionaryMetalEffectKind: UInt32 {
     case neonEdges = 30
     case cameraTransform = 31
     case mirror = 32
+    case ripple = 33
+    case deepGlow = 34
 }
 
 struct EffectRenderDiagnostic: Equatable, Sendable {

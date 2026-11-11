@@ -320,8 +320,7 @@ struct CoreToolBar: View {
                 title: "Edit",
                 isSelected: true
             ) {
-                propertyContextClipID = viewModel.selectedTimelineItemID
-                activePanel = activePanel == .effects ? .timeline : .effects
+                openEffectsPanel()
             }
         case .caption, .compound:
             EmptyView()

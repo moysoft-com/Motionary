@@ -19,7 +19,16 @@ enum MetalEffectSupport {
         resources: MetalFrameResources
     ) throws -> EffectRenderResult {
         let extent = pixelAligned(image.extent.insetBy(dx: -margin, dy: -margin))
-        let inputTexture = try rasterize(image, in: extent, resources: resources)
+        // These passes sample the supplied image directly in the same linear
+        // FP16 format. Other modules may build a CI graph before this call.
+        // The previous effect's linear output is already in that format, so
+        // any single-pass effect whose frame extent matches the input can
+        // consume it directly instead of paying a full-frame CI rasterization
+        // per effect. Effects with a nonzero margin expand the frame and keep
+        // the rasterization, which is also where transparent padding is
+        // required.
+        let previousTexture = extent == image.extent ? context.linearInput?.texture : nil
+        let inputTexture = try previousTexture ?? rasterize(image, in: extent, resources: resources)
         let outputTexture = try resources.makeScratchTexture(
             width: inputTexture.width,
             height: inputTexture.height
@@ -46,11 +55,11 @@ enum MetalEffectSupport {
         )
         let mapTexture: MTLTexture?
         if EffectRegistry.shared.descriptor(for: effect.moduleID)?.renderConfiguration.usesDisplacementMap == true {
-            let map = try resources.makeScratchTexture(width: inputTexture.width, height: inputTexture.height)
-            try encode(pipelineName: "motionaryDisplacementMapKernel", textures: [(map, 0)],
-                uniforms: uniforms, width: map.width, height: map.height,
-                label: "Displacement Map", resources: resources)
-            mapTexture = map
+            mapTexture = try resources.displacementMap(for: uniforms) { map in
+                try encode(pipelineName: "motionaryDisplacementMapKernel", textures: [(map, 0)],
+                    uniforms: uniforms, width: map.width, height: map.height,
+                    label: "Displacement Map", resources: resources)
+            }
         } else {
             mapTexture = nil
         }
@@ -63,11 +72,12 @@ enum MetalEffectSupport {
             label: EffectRegistry.shared.descriptor(for: effect.moduleID)?.name ?? effect.moduleID.rawValue,
             resources: resources
         )
-        resources.releaseScratchTexture(inputTexture)
+        if previousTexture == nil { resources.releaseScratchTexture(inputTexture) }
         if let mapTexture { resources.releaseScratchTexture(mapTexture) }
         return EffectRenderResult(
             image: try makeImage(from: outputTexture, positionedAt: extent, resources: resources),
-            requiredMargin: margin
+            requiredMargin: margin,
+            linearOutput: EffectLinearSurface(texture: outputTexture)
         )
     }
 
@@ -77,12 +87,13 @@ enum MetalEffectSupport {
         radius: Float,
         threshold: Float,
         tint: Float,
+        intensity: Float = 1,
         effect: EffectInstance,
         context: EffectRenderContext,
         resources: MetalFrameResources
     ) throws -> EffectRenderResult {
         let radius = max(radius * context.quality.blurScale, 0.5)
-        let margin = ceil(CGFloat(radius) * (kind == .anamorphicFlare ? 1.25 : 2.5))
+        let margin = ceil(CGFloat(radius) * (kind == .deepGlow ? 5 : (kind == .anamorphicFlare ? 1.25 : 2.5)))
         let extent = pixelAligned(image.extent.insetBy(dx: -margin, dy: -margin))
         let sourceTexture = try rasterize(image, in: extent, resources: resources)
         let highlights = try resources.makeScratchTexture(
@@ -95,7 +106,7 @@ enum MetalEffectSupport {
         )
         let size = SIMD2(UInt32(sourceTexture.width), UInt32(sourceTexture.height))
         let seed = context.deterministicSeed(storedSeed: effect.seed, effectID: effect.id)
-        let commonParameters = SIMD4(radius, min(max(threshold, 0), 1), min(max(tint, 0), 1), 0)
+        let commonParameters = SIMD4(radius, min(max(threshold, 0), 1), min(max(tint, 0), 1), intensity)
 
         try encode(
             pipelineName: "motionaryHighlightKernel",
@@ -167,9 +178,28 @@ enum MetalEffectSupport {
             height: sourceTexture.height
         )
 
+        var wideGlow = blurred
+        if kind == .deepGlow {
+            let wideHorizontal = try resources.makeScratchTexture(width: sourceTexture.width, height: sourceTexture.height)
+            wideGlow = try resources.makeScratchTexture(width: sourceTexture.width, height: sourceTexture.height)
+            var wideParameters = commonParameters
+            wideParameters.x = radius * 2
+            for (input, output, direction, label) in [
+                (blurred, wideHorizontal, SIMD2<Float>(1, 0), "Wide glow horizontal"),
+                (wideHorizontal, wideGlow, SIMD2<Float>(0, 1), "Wide glow vertical"),
+            ] {
+                try encode(pipelineName: "motionarySeparableBlurKernel", textures: [(input, 0), (output, 1)],
+                    uniforms: MotionaryEffectUniforms(size: size, effectKind: kind.rawValue, seed: seed,
+                        time: Float(context.compositionTime), frameIndex: Float(context.frameIndex),
+                        direction: direction, parameters: wideParameters),
+                    width: sourceTexture.width, height: sourceTexture.height, label: label, resources: resources)
+            }
+            resources.releaseScratchTexture(wideHorizontal)
+        }
+
         try encode(
             pipelineName: "motionaryGlowCompositeKernel",
-            textures: [(sourceTexture, 0), (blurred, 1), (output, 2)],
+            textures: [(sourceTexture, 0), (blurred, 1), (output, 2), (wideGlow, 3)],
             uniforms: MotionaryEffectUniforms(
                 size: size,
                 effectKind: kind.rawValue,
@@ -186,6 +216,7 @@ enum MetalEffectSupport {
         )
         resources.releaseScratchTexture(sourceTexture)
         resources.releaseScratchTexture(blurred)
+        if kind == .deepGlow { resources.releaseScratchTexture(wideGlow) }
 
         return EffectRenderResult(
             image: try makeImage(from: output, positionedAt: extent, resources: resources),
@@ -505,6 +536,18 @@ struct SoftGlowEffectRenderer: EffectRenderModule {
             context: context,
             resources: resources
         )
+    }
+}
+
+struct DeepGlowEffectRenderer: EffectRenderModule {
+    let moduleID: EffectModuleID = .deepGlow
+
+    func render(_ image: CIImage, effect: EffectInstance, context: EffectRenderContext, resources: MetalFrameResources) throws -> EffectRenderResult {
+        let radius = Float((8 + scalar(.radius, in: effect, at: context.clipTime) * 48) * Double(context.renderScale))
+        return try MetalEffectSupport.renderGlow(image, kind: .deepGlow, radius: radius,
+            threshold: Float(scalar(.threshold, in: effect, at: context.clipTime)), tint: 0,
+            intensity: Float(scalar(.amount, in: effect, at: context.clipTime)),
+            effect: effect, context: context, resources: resources)
     }
 }
 

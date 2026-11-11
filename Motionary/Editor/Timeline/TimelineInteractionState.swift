@@ -153,7 +153,7 @@ final class TimelineScrollPresentationState: ObservableObject {
     }
 
     func update(horizontalOffset: CGFloat) {
-        hasResolvedHorizontalOffset = true
+        if !hasResolvedHorizontalOffset { hasResolvedHorizontalOffset = true }
         guard abs(self.horizontalOffset - horizontalOffset) >= 0.5 else { return }
         self.horizontalOffset = horizontalOffset
     }

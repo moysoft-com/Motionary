@@ -1008,6 +1008,33 @@ struct TimelineEditingTests {
     }
 
     @MainActor
+    @Test func effectScrubbingSkipsGeometryAndRepeatedBoundaryFrames() throws {
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .cameraWiggle))
+        var clip = TimelineClip(
+            name: "Effect inspector",
+            source: ClipSource(url: URL(fileURLWithPath: "/tmp/effect-inspector.mov"),
+                mediaType: .video, originalDuration: 2),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2))
+        clip.effectStack = EffectStack(effects: [effect])
+        let track = TimelineTrack(name: "Video", kind: .visual, clips: [clip])
+        let model = EditorViewModel(projectID: UUID(), projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: EditorProject(title: "Inspector", tracks: [track])))
+        defer { model.stop() }
+        model.selectClip(clip.id, trackID: track.id)
+        let target = KeyframeTarget.effectParameter(effect.id, "scale", .scalar)
+        let geometryRevision = model.previewCanvasState.visualRevision
+        model.setSelectedKeyframeValue(1, target: target, interactive: true)
+        #expect(model.displayedValue(for: target) == 1)
+        #expect(model.previewCanvasState.visualRevision == geometryRevision)
+        let revision = model.renderService.livePreviewState.snapshot().revision
+        for _ in 0..<10 {
+            model.setSelectedKeyframeValue(1, target: target, interactive: true)
+        }
+        #expect(model.renderService.livePreviewState.snapshot().revision == revision)
+        #expect(model.previewCanvasState.visualRevision == geometryRevision)
+    }
+
+    @MainActor
     @Test func silentInspectorMutationStillRefreshesTimelineValueSnapshot() throws {
         let clipID = UUID()
         let clip = TimelineClip(

@@ -355,10 +355,7 @@ private struct TimelineKeyframeMarkers: View {
             let firstIndex = lowerBoundIndex(in: times, value: localVisibleStart)
             var index = firstIndex
             while index < times.count, times[index] <= localVisibleEnd {
-                let x = min(
-                    max(CGFloat(times[index] / max(duration, 0.001)) * size.width, 7),
-                    max(size.width - 7, 7)
-                )
+                let x = CGFloat(times[index] / max(duration, 0.001)) * size.width
                 let y = size.height * 0.5
                 var diamond = Path()
                 diamond.move(to: CGPoint(x: x, y: y - 4.5))
@@ -375,6 +372,7 @@ private struct TimelineKeyframeMarkers: View {
             }
         }
         .frame(width: width, height: height)
+        .clipped()
     }
 
     private func lowerBoundIndex(in values: [Double], value: Double) -> Int {

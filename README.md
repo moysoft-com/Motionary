@@ -46,5 +46,6 @@ xcrun swift-format format --in-place --recursive \
 - [Architecture](Documentation/ARCHITECTURE.md)
 - [Development conventions](Documentation/DEVELOPMENT.md)
 - [Modernization summary](Documentation/MODERNIZATION.md)
+- [Reliability overhaul and verification](Documentation/ReliabilityOverhaul.md)
 
 Release verification and outstanding device/operational checks are tracked in [Release readiness](Documentation/ReleaseReadiness.md).

@@ -184,3 +184,28 @@ these groups as single rows and stores selections by stable track identities.
 The input list follows active sources at the playhead (clamped to the selected
 adjustment's interval). Effects, masks, opacity, and group transforms retain their
 canvas coordinate domain through nested groups.
+
+### Depth Map
+
+Depth Anything V2 Small runs locally. Video depth is prepared before a composition
+is installed, at 24 depth samples per second, and cached as immutable PNGs under
+Caches/DepthTracks-v5. Rendering interpolates adjacent depth samples. It does not
+invoke Core ML. Scrub order therefore cannot change the resulting depth.
+
+Medium/High stabilization uses an offline three-frame median with a difference
+gate to avoid smearing moving edges and cuts. This reduces local temporal noise;
+it does not turn the single-image model into a video depth model.
+
+Cache identity includes the source URL and modification date, trim, speed map,
+orientation and stabilization mode. Output contrast, brightness,
+direction and style are applied afterwards and reuse the analysis. Source color
+adjustments are intentionally excluded from depth inference. Preparation supports
+cancellation; incomplete tracks have no completion marker and are rebuilt. Old
+tracks beyond the eight most recent are eligible for eviction after seven days.
+The decoded depth image cache is bounded to 32 MB. Stills use a content hash at
+model resolution and reuse one stored inference result.
+
+Depth output replaces the clip's source before adjustments and other effects.
+The Bands control is shown only for the Bands style. Legacy Source mix styles
+fall back to Grayscale. The effect library normalizes its bundled DepthMapPreview
+asset to the same square framing as the original, without model loading.

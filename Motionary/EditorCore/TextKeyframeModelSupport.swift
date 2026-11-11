@@ -45,8 +45,17 @@ extension TextTimelineItem {
         }
     }
 
-    func keyframeTimes(in section: KeyframeSection) -> [Double] {
+    func keyframeTimes(in section: KeyframeSection, effectID: UUID? = nil) -> [Double] {
         if section == .effects {
+            if let effectID {
+                guard let effect = visuals.effectStack.effects.first(where: { $0.id == effectID }) else {
+                    return []
+                }
+                return KeyframeMergeSupport.mergedTimes([
+                    effect.mix.keyframes.map(\.time),
+                    effect.parameters.values.flatMap { $0.keyframes.map(\.time) },
+                ])
+            }
             return visuals.effectStack.allKeyframeTimes
         }
         return Array(
@@ -486,11 +495,11 @@ extension TextTimelineItem {
 extension TimelineItem {
     func keyframeTargets(in section: KeyframeSection) -> [KeyframeTarget] {
         switch self {
-        case .media, .shape:
-            legacyClip()?.keyframeTargets(in: section) ?? []
+        case .media, .shape, .adjustment:
+            visualEditingClip()?.keyframeTargets(in: section) ?? []
         case .text(let item):
             item.keyframeTargets(in: section)
-        case .caption, .adjustment, .compound:
+        case .caption, .compound:
             []
         }
     }
@@ -499,13 +508,13 @@ extension TimelineItem {
         switch self {
         case .media where section == .speed:
             return []
-        case .media, .shape:
+        case .media, .shape, .adjustment:
             return visibleKeyframeTimes(
-                legacyClip()?.keyframeTimes(in: section, effectID: effectID) ?? []
+                visualEditingClip()?.keyframeTimes(in: section, effectID: effectID) ?? []
             )
         case .text(let item):
-            return item.keyframeTimes(in: section)
-        case .caption, .adjustment, .compound:
+            return visibleKeyframeTimes(item.keyframeTimes(in: section, effectID: effectID))
+        case .caption, .compound:
             return []
         }
     }

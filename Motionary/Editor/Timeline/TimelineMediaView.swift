@@ -80,6 +80,44 @@ struct TimelineThumbnailTile: View {
     }
 }
 
+/// Exclusive checkout pool for thumbnail image generators. Many timeline tiles
+/// share one source asset; reusing its already-loaded asset/generator across
+/// tiles avoids recreating `AVURLAsset` + `AVAssetImageGenerator` per tile.
+/// A generator is checked out to exactly one task, so concurrent tiles never
+/// mutate the same generator; the pool is keyed by any content identity the URL
+/// already carries and does not extend the tile cache's own freshness.
+private final class TimelineThumbnailGeneratorPool: @unchecked Sendable {
+    static let shared = TimelineThumbnailGeneratorPool()
+
+    private let lock = NSLock()
+    private var available: [URL: [AVAssetImageGenerator]] = [:]
+    private let maximumPerURL = 2
+
+    func checkout(url: URL) -> AVAssetImageGenerator {
+        lock.lock()
+        var bucket = available[url] ?? []
+        let generator: AVAssetImageGenerator
+        if let reused = bucket.popLast() {
+            generator = reused
+        } else {
+            generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        }
+        available[url] = bucket
+        lock.unlock()
+        return generator
+    }
+
+    func checkin(_ generator: AVAssetImageGenerator, url: URL) {
+        lock.lock()
+        var bucket = available[url] ?? []
+        if bucket.count < maximumPerURL {
+            bucket.append(generator)
+            available[url] = bucket
+        }
+        lock.unlock()
+    }
+}
+
 private actor TimelineThumbnailGenerationLimiter {
     static let shared = TimelineThumbnailGenerationLimiter(limit: 3)
 
@@ -345,8 +383,8 @@ enum TimelineThumbnailLoader {
         let sourceStart = clip.sourceRange.start
         let sourceEnd = clip.sourceRange.end
         return await Task<UIImage?, Never>.detached(priority: .utility) {
-            let asset = AVURLAsset(url: url)
-            let generator = AVAssetImageGenerator(asset: asset)
+            let generator = TimelineThumbnailGeneratorPool.shared.checkout(url: url)
+            defer { TimelineThumbnailGeneratorPool.shared.checkin(generator, url: url) }
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(
                 width: max(targetSize.width * displayScale, 24),
@@ -354,16 +392,27 @@ enum TimelineThumbnailLoader {
             )
             generator.requestedTimeToleranceBefore = CMTime(seconds: 0.08, preferredTimescale: 600)
             generator.requestedTimeToleranceAfter = CMTime(seconds: 0.08, preferredTimescale: 600)
+            // Deduped while preserving order: a tile needs the first (nearest)
+            // candidate only; duplicate times would only repeat a failed
+            // decode.
+            var fallbacks: [Double] = []
+            var seen: Set<Int64> = []
+            for seconds in [
+                sourceTime,
+                min(max(sourceTime + 0.04, sourceStart), sourceEnd),
+                max(sourceStart, min(sourceEnd, sourceStart + max(clip.sourceRange.duration, 0.001) * 0.5)),
+                sourceStart,
+                0
+            ] {
+                guard seconds.isFinite else { continue }
+                let key = Int64((max(seconds, 0) * 600).rounded())
+                guard seen.insert(key).inserted else { continue }
+                fallbacks.append(seconds)
+            }
             guard
                 let cgImage = await copyImage(
                     using: generator,
-                    fallbackSeconds: [
-                        sourceTime,
-                        min(max(sourceTime + 0.04, sourceStart), sourceEnd),
-                        max(sourceStart, min(sourceEnd, sourceStart + max(clip.sourceRange.duration, 0.001) * 0.5)),
-                        sourceStart,
-                        0
-                    ]
+                    fallbackSeconds: fallbacks
                 )
             else {
                 return nil

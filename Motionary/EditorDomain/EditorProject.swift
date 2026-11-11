@@ -35,6 +35,7 @@ struct EditorProject: Identifiable, Codable, Equatable {
 
     var duration: Double {
         tracks
+            .lazy
             .flatMap(\.items)
             .map(\.timelineEnd)
             .max() ?? 0

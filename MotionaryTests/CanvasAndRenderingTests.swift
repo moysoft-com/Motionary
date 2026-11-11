@@ -56,8 +56,58 @@ private final class AdjustmentExtentRecorder: EffectRenderModule, @unchecked Sen
     }
 }
 
+private struct DistortionTextureBarrier: EffectRenderModule {
+    let moduleID: EffectModuleID = .sepia
+
+    func render(
+        _ image: CIImage,
+        effect: EffectInstance,
+        context: EffectRenderContext,
+        resources: MetalFrameResources
+    ) throws -> EffectRenderResult {
+        EffectRenderResult(image: image)
+    }
+}
+
 @Suite(.serialized)
 struct CanvasAndRenderingTests {
+    @Test(arguments: [1.0, 0.45])
+    func chainedDistortionsMatchSeparateRasterization(mix: Double) throws {
+        let bounds = CGRect(x: -13, y: 19, width: 64, height: 48)
+        let backdrop = CIImage(color: CIColor(red: 0.1, green: 0.4, blue: 0.9, alpha: 0.6))
+            .cropped(to: bounds)
+        let foreground = CIImage(color: CIColor(red: 0.9, green: 0.15, blue: 0.05, alpha: 0.55))
+            .cropped(to: bounds.insetBy(dx: 11, dy: 7).offsetBy(dx: 4, dy: -3))
+        let input = foreground.composited(over: backdrop)
+        let registry = try EffectRenderRegistry(modules: [
+            SpatialEffectRenderer(moduleID: .waveWarp, kind: .waveWarp),
+            SpatialEffectRenderer(moduleID: .displacementMap, kind: .displacementMap),
+            DistortionTextureBarrier(),
+        ])
+        let renderer = try MetalFrameRenderer(effectRegistry: registry)
+        var warp = try #require(EffectRegistry.shared.makeEffect(moduleID: .waveWarp))
+        warp.mix = AnimatableProperty(baseValue: mix)
+        let displacement = try #require(EffectRegistry.shared.makeEffect(moduleID: .displacementMap))
+        var barrier = try #require(EffectRegistry.shared.makeEffect(moduleID: .sepia))
+        barrier.mix = AnimatableProperty(baseValue: 1)
+        let context = CIContext()
+
+        func pixels(_ effects: [EffectInstance]) throws -> Data {
+            let image = try renderer.renderEffectsSynchronously(
+                EffectStack(effects: effects), to: input, at: 0.4, renderScale: 1
+            )
+            let bytesPerRow = Int(bounds.width) * 4
+            var data = Data(count: bytesPerRow * Int(bounds.height))
+            data.withUnsafeMutableBytes {
+                context.render(image, toBitmap: $0.baseAddress!, rowBytes: bytesPerRow, bounds: bounds,
+                    format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+            }
+            return data
+        }
+
+        #expect(try pixels([warp, displacement]) == pixels([warp, barrier, displacement]))
+    }
+
     @Test(arguments: [1.0, 0.45])
     func unfoldedEffectChainsStayInsideObjectBounds(mix: Double) throws {
         let bounds = CGRect(x: 13, y: 19, width: 64, height: 48)
@@ -3943,5 +3993,48 @@ struct CanvasAndRenderingTests {
         #expect(CompositionAudioPolicy.includesSourceAudio(for: .video))
         #expect(!CompositionAudioPolicy.includesSourceAudio(for: .image))
         #expect(!CompositionAudioPolicy.includesSourceAudio(for: .audio))
+    }
+
+    @Test func rasterPixelBudgetBoundsExtremeGeneratedScales() {
+        let logicalSize = CGSize(width: 4_000, height: 4_000)
+        let bounded = GeneratedRasterPolicy.boundedRasterScale(
+            CGSize(width: 10, height: 10), logicalSize: logicalSize)
+        let pixels = logicalSize.width * bounded.width * logicalSize.height * bounded.height
+        #expect(pixels <= GeneratedRasterPolicy.maximumRasterizedPixelCount + 1)
+        #expect(bounded.width >= 1 && bounded.height >= 1)
+    }
+
+    @MainActor
+    @Test func previewRenderSizeBindsToPhysicalDisplaySize() async throws {
+        func shapeProject() -> EditorProject {
+            let item = ShapeTimelineItem(
+                name: "Shape", mediaID: MediaID(),
+                shape: ClipShape(kind: .rectangle, color: .white, width: 400, height: 225),
+                timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1))
+            return EditorProject(
+                title: "Display sized preview",
+                renderSettings: RenderSettings(width: 1_920, height: 1_080, frameRate: 30),
+                tracks: [TimelineTrack(name: "Shape", kind: .shape, items: [.shape(item)])]
+            )
+        }
+        let service = CompositionRenderService()
+        let unbound = try #require(
+            try await service.preparePreview(
+                for: shapeProject(), quality: .balanced,
+                invalidation: [.previewFrame, .compositionTopology]))
+        #expect(unbound.videoComposition?.renderSize == CGSize(width: 960, height: 540))
+        let unboundInstruction = try #require(
+            unbound.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        #expect(abs(unboundInstruction.vectorRenderScale - 0.75) < 0.001)
+        let bound = try #require(
+            try await service.preparePreview(
+                for: shapeProject(), quality: .balanced,
+                invalidation: [.previewFrame, .compositionTopology],
+                displayPixelSize: CGSize(width: 640, height: 360)))
+        #expect(bound.videoComposition?.renderSize == CGSize(width: 640, height: 360))
+        let boundInstruction = try #require(
+            bound.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        #expect(abs(boundInstruction.vectorRenderScale - (CGFloat(640) / CGFloat(1920))) < 0.001)
+        #expect(abs(boundInstruction.renderScale - (CGFloat(640) / CGFloat(1920))) < 0.001)
     }
 }

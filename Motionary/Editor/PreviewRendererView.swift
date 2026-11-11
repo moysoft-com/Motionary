@@ -54,36 +54,34 @@ final class LivePreviewPresentation: ObservableObject {
         set { setFrame(newValue, at: nil) }
     }
     private weak var surface: LivePreviewSampleView?
-    private var isInteracting = false
 
     var maximumFramesPerSecond: Int {
         surface?.window?.windowScene?.screen.maximumFramesPerSecond ?? 60
     }
 
-    func setInteracting(_ active: Bool) {
-        guard isInteracting != active else { return }
-        isInteracting = active
-        surface?.setInteracting(active)
-    }
-
     func setFrame(_ frame: CVPixelBuffer?, at time: Double?) {
         storedFrame = frame
-        frameTime = frame == nil ? nil : time
+        // `frameTime` is observed by the preview canvas, so publishing the
+        // same time again (the common case for inspector/canvas drags at a
+        // fixed playhead) would invalidate the whole canvas for no visual
+        // reason — the frame itself reaches the display layer directly.
+        if let time, frame != nil, frameTime != time {
+            frameTime = time
+        } else if frame == nil || time == nil, frameTime != nil {
+            frameTime = nil
+        }
         surface?.present(frame)
     }
 
     func attach(_ view: LivePreviewSampleView) {
         guard surface !== view else { return }
-        surface?.setInteracting(false)
         surface?.present(nil)
         surface = view
-        view.setInteracting(isInteracting)
         view.present(frame)
     }
 
     func detach(_ view: LivePreviewSampleView) {
         guard surface === view else { return }
-        view.setInteracting(false)
         view.present(nil)
         surface = nil
     }
@@ -100,25 +98,26 @@ final class LivePreviewSampleView: UIView {
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
     private var presentedFrame: CVPixelBuffer?
-    private var formatDescription: CMVideoFormatDescription?
     private var displayLink: CADisplayLink?
-    private var isInteracting = false
-    private var waitingFrame: CVPixelBuffer?
+    private var waitingSample: (sample: CMSampleBuffer, frame: CVPixelBuffer)?
+    // Sample-buffer construction is pure CoreMedia work (format description +
+    // a wrapper sample buffer); only the `enqueue` itself must stay on Main
+    // because it touches UIKit. Construction moves to a dedicated serial
+    // queue so the MainActor no longer pays it per frame; the latest request
+    // wins, so a slow queue can never reorder frames.
+    private let presentQueue = DispatchQueue(label: "com.motionary.live-preview.present", qos: .userInitiated)
+    private var presentGeneration: UInt64 = 0
+    private var offMainFormatDescription: CMVideoFormatDescription?
 
     // A weak target avoids a view/display-link retain cycle when a window
     // disappears during an interaction.
     private final class DisplayLinkTarget: NSObject {
         weak var view: LivePreviewSampleView?
         @objc func tick() {
-            if let frame = view?.waitingFrame { view?.present(frame) }
+            view?.retryWaitingSample()
         }
     }
     private let displayLinkTarget = DisplayLinkTarget()
-
-    func setInteracting(_ active: Bool) {
-        isInteracting = active
-        updateDisplayLink()
-    }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -128,7 +127,7 @@ final class LivePreviewSampleView: UIView {
     private func updateDisplayLink() {
         // A paused edit can hit backpressure too. Retry its latest frame even
         // after the gesture has ended, rather than leaving the old image up.
-        guard isInteracting || waitingFrame != nil,
+        guard waitingSample != nil,
             let screen = window?.windowScene?.screen
         else {
             displayLink?.invalidate()
@@ -149,30 +148,58 @@ final class LivePreviewSampleView: UIView {
     deinit { displayLink?.invalidate() }
 
     func present(_ frame: CVPixelBuffer?) {
+        // An older backpressured sample must never supersede a new request.
+        presentGeneration &+= 1
+        waitingSample = nil
+        updateDisplayLink()
         guard let frame else {
-            waitingFrame = nil
-            updateDisplayLink()
             presentedFrame = nil
-            formatDescription = nil
             displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: true)
             isHidden = true
             return
         }
-        guard presentedFrame !== frame else { return }
-        let renderer = displayLayer.sampleBufferRenderer
-        if renderer.status == .failed { renderer.flush() }
-        guard renderer.isReadyForMoreMediaData else {
-            waitingFrame = frame
-            updateDisplayLink()
-            return
+        guard presentedFrame !== frame || displayLayer.sampleBufferRenderer.status == .failed else { return }
+        let generation = presentGeneration
+        // Visibility flips synchronously on Main; only the sample build and
+        // the `enqueue` itself are deferred. An empty display layer is
+        // transparent, and the canonical player frame / opening placeholder
+        // behind this surface already shows through, so presenting early
+        // stays invisible while callers can rely on the view being visible
+        // without awaiting the off-main build. A failed build restores the
+        // previous visibility instead of stranding an empty view.
+        let wasHidden = isHidden
+        isHidden = false
+        presentQueue.async { [weak self, frame] in
+            guard let self else { return }
+            self.makeSample(for: frame) { [weak self] sample in
+                guard let self else { return }
+                DispatchQueue.main.async { [weak self, frame, wasHidden] in
+                    guard let self, self.presentGeneration == generation else { return }
+                    self.enqueue(sample, frame: frame, fallbackHidden: wasHidden)
+                }
+            }
         }
-        if formatDescription.map({ CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: frame) }) != true {
+    }
+
+    /// Builds the sample buffer off the main thread. CoreMedia wrapper
+    /// construction has no UIKit dependency, so the produced sample is
+    /// byte-identical to the previous main-thread version.
+    private func makeSample(for frame: CVPixelBuffer, completion: @escaping (CMSampleBuffer?) -> Void) {
+        if offMainFormatDescription.map({ CMVideoFormatDescriptionMatchesImageBuffer($0, imageBuffer: frame) }) != true {
+            var format: CMVideoFormatDescription?
             guard CMVideoFormatDescriptionCreateForImageBuffer(
                 allocator: kCFAllocatorDefault, imageBuffer: frame,
-                formatDescriptionOut: &formatDescription
-            ) == noErr else { return }
+                formatDescriptionOut: &format
+            ) == noErr, let format else {
+                completion(nil)
+                return
+            }
+            offMainFormatDescription = format
         }
-        guard let format = formatDescription else { return }
+        guard let format = offMainFormatDescription else {
+            completion(nil)
+            return
+        }
         var timing = CMSampleTimingInfo(duration: .invalid,
                                        presentationTimeStamp: .zero,
                                        decodeTimeStamp: .invalid)
@@ -181,13 +208,38 @@ final class LivePreviewSampleView: UIView {
             allocator: kCFAllocatorDefault, imageBuffer: frame,
             formatDescription: format, sampleTiming: &timing,
             sampleBufferOut: &sample
-        ) == noErr, let sample else { return }
+        ) == noErr, let sample else {
+            completion(nil)
+            return
+        }
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(
             sample, createIfNecessary: true
         ) as? [NSMutableDictionary] {
             attachments.first?[kCMSampleAttachmentKey_DisplayImmediately] = true
         }
-        waitingFrame = nil
+        completion(sample)
+    }
+
+    /// Runs on Main only: backpressure, `enqueue` and visibility all touch
+    /// UIKit and therefore stay on the main queue.
+    private func enqueue(_ sample: CMSampleBuffer?, frame: CVPixelBuffer, fallbackHidden: Bool) {
+        guard let sample else {
+            isHidden = fallbackHidden
+            return
+        }
+        waitingSample = (sample, frame)
+        retryWaitingSample()
+    }
+
+    private func retryWaitingSample() {
+        guard let (sample, frame) = waitingSample else { return }
+        let renderer = displayLayer.sampleBufferRenderer
+        if renderer.status == .failed { renderer.flush() }
+        guard renderer.isReadyForMoreMediaData else {
+            updateDisplayLink()
+            return
+        }
+        waitingSample = nil
         updateDisplayLink()
         renderer.enqueue(sample)
         presentedFrame = frame

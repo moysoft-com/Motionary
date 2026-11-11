@@ -20,6 +20,7 @@ struct SpatialEffectRenderer: EffectRenderModule {
         }
         let parameters: SIMD4<Float>
         switch kind {
+        case .ripple: parameters = SIMD4(value(.amount), value(.wavelength), value(.speed), value(.reflection))
         case .waveWarp: parameters = SIMD4(value(.amount), value(.wavelength), radians(.angle), value(.speed))
         // Twist is an amount, not a cyclic orientation: full turns still deform
         // points with partial radial influence and must not be discarded.
@@ -138,8 +139,18 @@ struct EchoTrailsEffectRenderer: EffectRenderModule {
             guard time >= 0 || context.temporalSource == nil else { continue }
             var historical: CIImage
             if let source = context.temporalSource {
-                historical = try source.image(at: max(time, 0),
+                var rawSource = source
+                if !context.depthSourceEffects.effects.isEmpty { rawSource.adjustments = AdjustmentSettings() }
+                historical = try rawSource.image(at: max(time, 0),
                     fitting: context.temporalSourceExtent ?? image.extent, quality: context.quality)
+                if !context.depthSourceEffects.effects.isEmpty {
+                    let depthContext = EffectRenderContext(compositionTime: context.compositionTime - Double(index) * spacing,
+                        clipTime: time, frameIndex: context.frameIndex, itemID: context.itemID,
+                        renderScale: context.renderScale, quality: context.quality, temporalSource: source)
+                    historical = try EffectRenderRegistry.shared.render(context.depthSourceEffects, to: historical,
+                        context: depthContext, resources: resources, failurePolicy: .failOnUnavailableEffects)
+                    historical = EffectColorAdjustments.apply(source.adjustments, to: historical, at: time)
+                }
             } else { historical = image }
             if context.temporalSource != nil {
                 let pastContext = EffectRenderContext(compositionTime: context.compositionTime - Double(index) * spacing,

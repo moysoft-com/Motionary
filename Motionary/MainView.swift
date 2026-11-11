@@ -91,6 +91,8 @@ struct MainView: App {
                         home: { EffectsGestureTestScene() }, settings: { Text("Settings") }
                     )
                     .ignoresSafeArea(.container)
+                } else if ProcessInfo.processInfo.arguments.contains("--adjustment-editor-tests") {
+                    NavigationStack { AdjustmentEditorTestScene() }
                 } else if ProcessInfo.processInfo.arguments.contains("--timeline-gesture-tests") {
                     TimelineGestureTestScene()
                 } else {

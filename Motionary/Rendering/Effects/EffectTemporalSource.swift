@@ -17,10 +17,10 @@ struct EffectTemporalSource: Sendable {
 
     func image(at clipTime: Double, fitting extent: CGRect, quality: RenderQualityProfile,
                adjustmentTime: Double? = nil, applyCutout: Bool = false,
-               renderScale: CGFloat = 1) throws -> CIImage {
+               renderScale: CGFloat = 1, videoSampleRanges: [CMTimeRange] = []) throws -> CIImage {
         let sourceTime = sourceStart + speedMap.sourceTime(at: clipTime, sourceDuration: sourceDuration)
         let image = try EffectTemporalFrameStore.shared.image(url: url, time: sourceTime,
-            size: extent.size, quality: quality)
+            size: extent.size, quality: quality, videoSampleRanges: videoSampleRanges)
         func fit(_ image: CIImage, orientation: CGAffineTransform) -> CIImage {
             // Apply exactly the same Core Image orientation as decoder buffers.
             // ImageGenerator's preferred-track rotation uses a different space.
@@ -63,19 +63,23 @@ enum EffectColorAdjustments {
     }
 }
 
-/// Bounded decoded-frame cache. Generator access is serialized because a single
-/// asset generator must not be mutated while another render uses it.
+/// Bounded decoded-frame cache. Generator access is serialized per asset
+/// because a single asset generator must not be mutated while another render
+/// uses it. Assets are independent, so one slow decoder no longer blocks
+/// temporal samples for every other asset on the compositor queue.
 private final class EffectTemporalFrameStore: @unchecked Sendable {
     static let shared = EffectTemporalFrameStore()
     private let lock = NSLock()
+    private var urlLocks: [URL: NSLock] = [:]
     private let frames = NSCache<NSString, CGImage>()
     private let generators = NSCache<NSURL, AVAssetImageGenerator>()
-    private func request(url: URL, time: Double, size: CGSize, quality: RenderQualityProfile) -> (String, CMTime, Int, Int) {
-        let width = max(Int(size.width.rounded()), 1)
-        let height = max(Int(size.height.rounded()), 1)
-        let seconds = max(time, 0)
-        let target = CMTime(seconds: seconds, preferredTimescale: 60_000)
-        return ("\(url.absoluteString)|\(target.value)|\(width)x\(height)", target, width, height)
+    private func lockFor(url: URL) -> NSLock {
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = urlLocks[url] { return existing }
+        let created = NSLock()
+        urlLocks[url] = created
+        return created
     }
 
     private init() {
@@ -84,13 +88,37 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
         generators.countLimit = 4
     }
 
-    func image(url: URL, time: Double, size: CGSize, quality: RenderQualityProfile) throws -> CIImage {
-        let (key, target, width, height) = request(url: url, time: time, size: size, quality: quality)
+    func image(url: URL, time: Double, size: CGSize, quality: RenderQualityProfile,
+               videoSampleRanges: [CMTimeRange] = []) throws -> CIImage {
+        let width = max(Int(size.width.rounded()), 1)
+        let height = max(Int(size.height.rounded()), 1)
+        let requested = CMTime(seconds: max(time, 0), preferredTimescale: 60_000)
+        // A depth bake can encounter audio padding or empty video edits. Keep
+        // these requests inside the nearest nonempty video segment.
+        func distance(to range: CMTimeRange) -> CMTime {
+            max(range.start - requested, requested - range.end, .zero)
+        }
+        let videoSampleRange = videoSampleRanges.first { $0.start <= requested && requested < $0.end }
+            ?? videoSampleRanges.min { distance(to: $0) < distance(to: $1) }
+        let target: CMTime
+        if let range = videoSampleRange {
+            let last = max(range.start, range.end - CMTime(value: 1, timescale: 60_000))
+            let clamped = min(max(requested, range.start), last).convertScale(60_000, method: .roundTowardZero)
+            target = max(clamped, range.start)
+        } else {
+            target = requested
+        }
+        var key = "\(url.absoluteString)|\(target.value)/\(target.timescale)|\(width)x\(height)"
+        if let range = videoSampleRange {
+            // Approximate depth samples cannot satisfy exact temporal effects.
+            key += "|depth|\(range.start.seconds)|\(range.end.seconds)"
+        }
         // Cache hits must not wait behind another asset's decoder request.
-        if let frame = frames.object(forKey: key as NSString) { return CIImage(cgImage: frame) }
-        lock.lock()
-        defer { lock.unlock() }
-        if let frame = frames.object(forKey: key as NSString) { return CIImage(cgImage: frame) }
+        if let frame = frames.object(forKey: key as NSString) { return VideoSourceGeometry.engineImage(CIImage(cgImage: frame)) }
+        let urlLock = lockFor(url: url)
+        urlLock.lock()
+        defer { urlLock.unlock() }
+        if let frame = frames.object(forKey: key as NSString) { return VideoSourceGeometry.engineImage(CIImage(cgImage: frame)) }
         guard !url.isFileURL || FileManager.default.fileExists(atPath: url.path) else {
             throw MetalRenderingError.sourceFrameUnavailable
         }
@@ -105,20 +133,53 @@ private final class EffectTemporalFrameStore: @unchecked Sendable {
             generators.setObject(generator, forKey: url as NSURL)
         }
         generator.maximumSize = CGSize(width: width, height: height)
+        let frame: CGImage
+        do {
+            frame = try decode(generator, at: target, quality: quality)
+        } catch {
+            generators.removeObject(forKey: url as NSURL)
+            guard let range = videoSampleRange else { throw error }
+            try Task.checkCancellation()
+            // Some sources have irregular sample times or edit lists.
+            // Retry with a fresh decoder and bounded, in-track tolerance.
+            let retry = AVAssetImageGenerator(asset: AVURLAsset(url: url,
+                options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]))
+            retry.appliesPreferredTrackTransform = false
+            retry.maximumSize = generator.maximumSize
+            let tolerance = CMTime(value: 1, timescale: 12)
+            retry.requestedTimeToleranceBefore = min(tolerance, target - range.start)
+            retry.requestedTimeToleranceAfter = min(tolerance, range.end - target)
+            frame = try decode(retry, at: target, quality: quality)
+        }
+        frames.setObject(frame, forKey: key as NSString, cost: frame.bytesPerRow * frame.height)
+        return VideoSourceGeometry.engineImage(CIImage(cgImage: frame))
+    }
+
+    private func decode(_ generator: AVAssetImageGenerator, at target: CMTime,
+                        quality: RenderQualityProfile) throws -> CGImage {
         let decoded = DecodedFrame()
         let ready = DispatchSemaphore(value: 0)
         generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: target)]) { _, image, _, result, error in
             decoded.complete(image: result == .succeeded ? image : nil, error: error)
             ready.signal()
         }
-        guard ready.wait(timeout: .now() + 8) == .success else {
+        // Decode waits run on the compositor's single render queue. Export
+        // keeps the full 8 s budget because it has no fallback frame; preview
+        // already finishes a timed-out request with the compositor's
+        // last-good-frame fallback, so interactive frames keep a 1 s budget
+        // and balanced frames 2 s instead of pinning the queue for 8 s when a
+        // thumbnail or slow decoder stalls.
+        let deadline: DispatchTime
+        switch quality {
+        case .export: deadline = .now() + 8
+        case .balanced: deadline = .now() + 2
+        case .interactive: deadline = .now() + 1
+        }
+        guard ready.wait(timeout: deadline) == .success else {
             generator.cancelAllCGImageGeneration()
-            generators.removeObject(forKey: url as NSURL)
             throw MetalRenderingError.sourceFrameUnavailable
         }
-        let frame = try decoded.get()
-        frames.setObject(frame, forKey: key as NSString, cost: frame.bytesPerRow * frame.height)
-        return CIImage(cgImage: frame)
+        return try decoded.get()
     }
 }
 

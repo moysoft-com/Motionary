@@ -82,6 +82,42 @@ struct CameraMotionEffectTests {
         }
     }
 
+    @Test func rippleAnimatesAndZeroAmountPreservesImage() throws {
+        let renderer = try MetalFrameRenderer()
+        var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .ripple))
+        effect.parameters[EffectParameterID.center.rawValue] = EffectParameterState(
+            baseValue: .point(EffectPoint(x: 0.3, y: 0.5)))
+        func render(_ time: Double) throws -> [UInt8] {
+            pixels(try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: pattern, at: time, renderScale: 1))
+        }
+        let first = try render(0.3)
+        #expect(first == (try render(0.3)))
+        #expect(first != (try render(1.1)))
+        effect.parameters[EffectParameterID.amount.rawValue] = EffectParameterState(baseValue: .scalar(0))
+        #expect(try render(0.3) == pixels(pattern))
+    }
+
+    @Test func rippleLightsAUniformSurfaceAndPreservesTransparency() throws {
+        let renderer = try MetalFrameRenderer()
+        var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .ripple))
+        let surface = CIImage(color: CIColor(red: 0.4, green: 0.4, blue: 0.4)).cropped(to: bounds)
+        func render(_ image: CIImage) throws -> [UInt8] {
+            pixels(try renderer.renderEffectsSynchronously(EffectStack(effects: [effect]),
+                to: image, at: 0.3, renderScale: 1))
+        }
+        let lit = try render(surface)
+        let original = pixels(surface)
+        #expect(lit != original)
+        effect.parameters[EffectParameterID.reflection.rawValue] = EffectParameterState(baseValue: .scalar(0))
+        #expect(try render(surface) == original)
+        effect.parameters[EffectParameterID.reflection.rawValue] = EffectParameterState(baseValue: .scalar(0.7))
+        #expect(stride(from: 3, to: lit.count, by: 4).allSatisfy { lit[$0] == 255 })
+        #expect(try render(CIImage(color: .clear).cropped(to: bounds)).allSatisfy { $0 == 0 })
+        effect.parameters[EffectParameterID.amount.rawValue] = EffectParameterState(baseValue: .scalar(0))
+        #expect(try render(surface) == original)
+    }
+
     @Test func zoomOutUnfoldFillsEdgesWhileTransparentExposesThem() throws {
         let renderer = try MetalFrameRenderer()
         var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .zoom))

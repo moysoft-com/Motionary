@@ -449,6 +449,59 @@ enum PreviewRasterDeliveryPolicy {
     }
 }
 
+/// Per-pass memo for deterministic canvas geometry. `body`, the live
+/// `TimelineView` overlay, snapping and hit testing currently recompute the
+/// same inputs several times per pass; within one generation (unchanged
+/// preview time, revisions, render size and canvas size) each value is
+/// computed once and shared. Every input that can change a value —
+/// including the exact live transform — participates in the key, so the memo
+/// can never serve a stale interaction value.
+private final class PreviewFrameMemo {
+    struct Generation: Equatable {
+        let previewTime: Double
+        let contentRevision: Int
+        let timelineRevision: Int
+        let renderWidth: CGFloat
+        let renderHeight: CGFloat
+        let canvasWidth: CGFloat
+        let canvasHeight: CGFloat
+    }
+
+    private var generation: Generation?
+    private var frames: [UUID: (transform: ClipTransform, localTime: Double, frame: PreviewClipFrame?)] = [:]
+    private var samples: [UUID: (localTime: Double, sample: TextAnimationSample)] = [:]
+
+    func resetIfStale(generation: Generation) {
+        guard self.generation != generation else { return }
+        self.generation = generation
+        frames.removeAll(keepingCapacity: true)
+        samples.removeAll(keepingCapacity: true)
+    }
+
+    func frame(
+        for id: UUID,
+        transform: ClipTransform,
+        localTime: Double,
+        compute: () -> PreviewClipFrame?
+    ) -> PreviewClipFrame? {
+        if let entry = frames[id], entry.transform == transform, entry.localTime == localTime {
+            return entry.frame
+        }
+        let frame = compute()
+        frames[id] = (transform, localTime, frame)
+        return frame
+    }
+
+    func sample(for id: UUID, localTime: Double, compute: () -> TextAnimationSample) -> TextAnimationSample {
+        if let entry = samples[id], entry.localTime == localTime {
+            return entry.sample
+        }
+        let sample = compute()
+        samples[id] = (localTime, sample)
+        return sample
+    }
+}
+
 struct PreviewTransformCanvas: View {
     private static let interactionStartTextureDimension = 1_024
     private static let minimumCombinedHandleScaleFactor = 0.08
@@ -488,6 +541,7 @@ struct PreviewTransformCanvas: View {
     @State private var isTransforming = false
     @State private var isCommitPresenting = false
     @State private var textGeometryRenderer = TextLayerRenderer()
+    @State private var frameMemo = PreviewFrameMemo()
     @State private var textRasterizer = PreviewTextRasterizer()
     @State private var shapeRasterizer = PreviewShapeRasterizer()
     @State private var visualIntervalIndex: PreviewVisualIntervalIndex
@@ -616,11 +670,14 @@ struct PreviewTransformCanvas: View {
             .gesture(previewSelectionGesture)
             .position(x: canvasFrame.midX, y: canvasFrame.midY)
 
-            // Sample AVPlayer's clock at display cadence so animated transforms
-            // keep pace between the editor's coarser periodic time updates.
+            // Sample AVPlayer's clock so animated transforms keep pace between
+            // the editor's coarser periodic time updates. The compositor's
+            // source cadence is at most the project frame rate, so sampling
+            // past 60 Hz (ProMotion) only re-evaluates identical geometry;
+            // clamp to the same 60 Hz ceiling the render path uses.
             TimelineView(
                 .animation(
-                    minimumInterval: 1 / Double(max(livePreviewPresentation.maximumFramesPerSecond, 1)),
+                    minimumInterval: 1 / Double(min(60, max(livePreviewPresentation.maximumFramesPerSecond, 1))),
                     paused: !playbackState.isPlaying
                 )
             ) { _ in
@@ -1623,58 +1680,66 @@ struct PreviewTransformCanvas: View {
         localTime: Double
     ) -> PreviewClipFrame? {
         let transform = transform ?? clip.transform
-        if let shape = clip.shape {
-            guard
-                let baseSize = geometryMapper.canvasSize(
-                    forRenderSize: CGSize(
-                        width: CGFloat(shape.width.value(at: localTime)),
-                        height: CGFloat(shape.height.value(at: localTime))
+        // One body pass computes each item's frame several times (list, live
+        // overlay, snapping, hit test). All call sites share the same inputs
+        // within a pass, so the deterministic result is memoized per
+        // pass-generation instead of recomputed per call site.
+        return memoizedFrame(for: clip.id, transform: transform, localTime: localTime) {
+            if let shape = clip.shape {
+                guard
+                    let baseSize = geometryMapper.canvasSize(
+                        forRenderSize: CGSize(
+                            width: CGFloat(shape.width.value(at: localTime)),
+                            height: CGFloat(shape.height.value(at: localTime))
+                        )
                     )
+                else { return nil }
+                let scale = transform.scale.value(at: localTime)
+                let size = geometryMapper.scaledSize(baseSize, by: scale)
+                let center = previewCenter(for: clip, transform: transform)
+                return geometryMapper.frame(
+                    center: center,
+                    size: size,
+                    rotationDegrees: transform.rotationDegrees.value(at: localTime)
                 )
-            else { return nil }
+            }
+
+            let sourceSize = viewModel.project.naturalSize(for: clip)?.cgSize ?? viewModel.project.renderSettings.size
+            guard let baseSize = geometryMapper.fittedCanvasSize(forSourceSize: sourceSize) else { return nil }
             let scale = transform.scale.value(at: localTime)
             let size = geometryMapper.scaledSize(baseSize, by: scale)
             let center = previewCenter(for: clip, transform: transform)
+
             return geometryMapper.frame(
                 center: center,
                 size: size,
                 rotationDegrees: transform.rotationDegrees.value(at: localTime)
             )
         }
-
-        let sourceSize = viewModel.project.naturalSize(for: clip)?.cgSize ?? viewModel.project.renderSettings.size
-        guard let baseSize = geometryMapper.fittedCanvasSize(forSourceSize: sourceSize) else { return nil }
-        let scale = transform.scale.value(at: localTime)
-        let size = geometryMapper.scaledSize(baseSize, by: scale)
-        let center = previewCenter(for: clip, transform: transform)
-
-        return geometryMapper.frame(
-            center: center,
-            size: size,
-            rotationDegrees: transform.rotationDegrees.value(at: localTime)
-        )
     }
 
     private func previewFrame(
         for text: TextTimelineItem,
         transform: ClipTransform? = nil
     ) -> PreviewClipFrame? {
-        guard let baseSize = previewBaseSize(for: text) else { return nil }
         let transform = transform ?? text.visuals.transform
         let localTime = localTime(for: text)
-        let scale = transform.scale.value(at: localTime)
-        let animationScale = max(textAnimationSample(for: text).scale, 0.001)
-        let size = geometryMapper.scaledSize(
-            baseSize,
-            by: ScaleValue(x: scale.x * animationScale, y: scale.y * animationScale),
-            minimum: 0.001
-        )
-        let center = previewCenter(for: text, transform: transform)
-        return geometryMapper.frame(
-            center: center,
-            size: size,
-            rotationDegrees: previewRotationDegrees(for: text, transform: transform)
-        )
+        return memoizedFrame(for: text.id, transform: transform, localTime: localTime) {
+            guard let baseSize = previewBaseSize(for: text) else { return nil }
+            let scale = transform.scale.value(at: localTime)
+            let animationScale = max(textAnimationSample(for: text).scale, 0.001)
+            let size = geometryMapper.scaledSize(
+                baseSize,
+                by: ScaleValue(x: scale.x * animationScale, y: scale.y * animationScale),
+                minimum: 0.001
+            )
+            let center = previewCenter(for: text, transform: transform)
+            return geometryMapper.frame(
+                center: center,
+                size: size,
+                rotationDegrees: previewRotationDegrees(for: text, transform: transform)
+            )
+        }
     }
 
     private func previewFrame(
@@ -1763,12 +1828,43 @@ struct PreviewTransformCanvas: View {
         min(max(previewTime - adjustment.timelineStart, 0), adjustment.duration)
     }
 
+    /// Memoized per pass-generation. One frame previously evaluated this
+    /// deterministic function 4-5 times (frame, offset, rotation, live proxy,
+    /// load); the evaluator is pure in `(animations, localTime, duration)`,
+    /// so reuse is value-identical.
     private func textAnimationSample(for text: TextTimelineItem) -> TextAnimationSample {
-        TextAnimationEvaluator.sample(
-            animations: text.animations,
-            at: localTime(for: text),
-            clipDuration: text.duration
+        frameMemo.resetIfStale(generation: memoGeneration)
+        let localTime = localTime(for: text)
+        return frameMemo.sample(for: text.id, localTime: localTime) {
+            TextAnimationEvaluator.sample(
+                animations: text.animations,
+                at: localTime,
+                clipDuration: text.duration
+            )
+        }
+    }
+
+    private var memoGeneration: PreviewFrameMemo.Generation {
+        let renderSize = viewModel.project.renderSettings.size
+        return PreviewFrameMemo.Generation(
+            previewTime: previewTime,
+            contentRevision: previewState.contentRevision,
+            timelineRevision: timelineState.contentRevision,
+            renderWidth: renderSize.width,
+            renderHeight: renderSize.height,
+            canvasWidth: canvasRect.width,
+            canvasHeight: canvasRect.height
         )
+    }
+
+    private func memoizedFrame(
+        for id: UUID,
+        transform: ClipTransform,
+        localTime: Double,
+        compute: () -> PreviewClipFrame?
+    ) -> PreviewClipFrame? {
+        frameMemo.resetIfStale(generation: memoGeneration)
+        return frameMemo.frame(for: id, transform: transform, localTime: localTime, compute: compute)
     }
 
     private func textAnimationOffset(for text: TextTimelineItem) -> CGPoint {

@@ -361,7 +361,7 @@ extension EditorViewModel {
             applied = min(max(snap.time - referenceStart, maxBackward), maxForward)
         }
 
-        let item = currentItem.trimmingStart(by: applied)
+        let item = (baseline ?? currentItem).trimmingStart(by: applied)
 
         let result = TimelineTrimResult(
             edgeTime: item.timelineStart,
@@ -494,7 +494,7 @@ extension EditorViewModel {
             applied = min(max(snap.time - referenceEnd, maxBackward), maxForward)
         }
 
-        let item = currentItem.trimmingEnd(by: applied)
+        let item = (baseline ?? currentItem).trimmingEnd(by: applied)
 
         let result = TimelineTrimResult(
             edgeTime: referenceEnd + applied,

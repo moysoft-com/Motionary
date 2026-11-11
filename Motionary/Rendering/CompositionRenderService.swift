@@ -74,6 +74,14 @@ private final class StillImageValidationCache: @unchecked Sendable {
 }
 
 enum VideoSourceGeometry {
+    /// Native Core Image images use bottom-left coordinates. The existing
+    /// compositor graph uses Metal texture rows, with the first row at y=0.
+    /// Apply the same conversion to decoder buffers and time-addressed samples.
+    static func engineImage(_ image: CIImage) -> CIImage {
+        image.transformed(by: CGAffineTransform(translationX: 0, y: image.extent.minY + image.extent.maxY)
+            .scaledBy(x: 1, y: -1))
+    }
+
     static func displayRect(naturalSize: CGSize, transform: CGAffineTransform) -> CGRect {
         CGRect(origin: .zero, size: naturalSize)
             .applying(transform)
@@ -420,6 +428,7 @@ final class MotionaryVideoCompositionInstruction:
     let backgroundColor: RGBAColor
     let frameDuration: Double
     let qualityProfile: RenderQualityProfile
+    let previewFrameTimeoutMilliseconds: Int
     let failurePolicy: RenderFailurePolicy
     let livePreviewState: LivePreviewRenderState?
     let renderSessionID: UUID
@@ -473,6 +482,20 @@ final class MotionaryVideoCompositionInstruction:
         self.backgroundColor = backgroundColor
         self.frameDuration = frameDuration
         self.qualityProfile = qualityProfile
+        // Only the threshold matters. Large projects already exceed it by
+        // clip count alone, and interval instructions share the same budget.
+        var cost = clips.count
+        for clip in clips {
+            guard cost <= 8 else { break }
+            cost += 2 * clip.effectStack.effects.lazy.filter(\.isEnabled).count
+            cost += clip.text == nil ? 0 : 2
+            cost += clip.isAdjustmentLayer ? 2 : 0
+        }
+        switch qualityProfile {
+        case .interactive: previewFrameTimeoutMilliseconds = cost > 8 ? 1_800 : 1_200
+        case .balanced: previewFrameTimeoutMilliseconds = cost > 8 ? 4_000 : 2_500
+        case .export: previewFrameTimeoutMilliseconds = 5_000
+        }
         self.failurePolicy = failurePolicy
         self.livePreviewState = livePreviewState
         self.renderSessionID = renderSessionID
@@ -497,6 +520,7 @@ final class MotionaryVideoCompositionInstruction:
         backgroundColor = template.backgroundColor
         frameDuration = template.frameDuration
         qualityProfile = template.qualityProfile
+        previewFrameTimeoutMilliseconds = template.previewFrameTimeoutMilliseconds
         failurePolicy = template.failurePolicy
         livePreviewState = template.livePreviewState
         renderSessionID = template.renderSessionID
@@ -594,6 +618,43 @@ private struct PreviewRenderGraph {
     let topology: PreviewTopology
     let rendered: RenderedComposition
     let renderDescriptors: [RenderClipDescriptor]
+}
+
+/// Packs cuts from the same decoded source into a few composition tracks.
+/// Adjacent cuts stay on separate tracks so AVFoundation can preroll them.
+private final class PreviewVideoTrackPool {
+    private struct Lane {
+        let track: AVMutableCompositionTrack
+        var end: CMTime
+    }
+
+    private var lanesByURL: [URL: [Lane]] = [:]
+
+    func insert(
+        _ range: CMTimeRange,
+        from sourceTrack: AVAssetTrack,
+        url: URL,
+        at start: CMTime,
+        prerollGap: CMTime,
+        into composition: AVMutableComposition
+    ) throws -> AVMutableCompositionTrack? {
+        var lanes = lanesByURL[url, default: []]
+        let end = CMTimeAdd(start, range.duration)
+        if let index = lanes.firstIndex(where: { CMTimeCompare(CMTimeAdd($0.end, prerollGap), start) <= 0 }) {
+            let track = lanes[index].track
+            try track.insertTimeRange(range, of: sourceTrack, at: start)
+            lanes[index].end = end
+            lanesByURL[url] = lanes
+            return track
+        }
+        guard let track = composition.addMutableTrack(withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { return nil }
+        try track.insertTimeRange(range, of: sourceTrack, at: start)
+        lanes.append(Lane(track: track, end: end))
+        lanesByURL[url] = lanes
+        return track
+    }
 }
 
 private struct PreviewTopology: Equatable {
@@ -792,6 +853,7 @@ final class CompositionRenderService {
     private let retimingTimescale: CMTimeScale = 60_000
     private let assetCache: MediaAssetCache
     private let previewProxyStore: PreviewProxyStore?
+    private let reusesPreviewVideoTracks: Bool
     private let stillImageValidationCache = StillImageValidationCache()
     private let previewAudioEnvelopePreparer = PreviewAudioEnvelopePreparer()
     let livePreviewState = LivePreviewRenderState()
@@ -800,9 +862,14 @@ final class CompositionRenderService {
     @MainActor private var previewGraphRevision = 0
     @MainActor private var previewPreparationGeneration = 0
 
-    init(assetCache: MediaAssetCache = .shared, previewProxyStore: PreviewProxyStore? = .shared) {
+    init(
+        assetCache: MediaAssetCache = .shared,
+        previewProxyStore: PreviewProxyStore? = .shared,
+        reusesPreviewVideoTracks: Bool = true
+    ) {
         self.assetCache = assetCache
         self.previewProxyStore = previewProxyStore
+        self.reusesPreviewVideoTracks = reusesPreviewVideoTracks
     }
 
     @MainActor
@@ -819,7 +886,8 @@ final class CompositionRenderService {
         for project: EditorProject,
         quality: PreviewQuality,
         invalidation: EditorInvalidation,
-        renderSessionID: UUID = UUID()
+        renderSessionID: UUID = UUID(),
+        displayPixelSize: CGSize? = nil
     ) async throws -> PreparedPreview? {
         if !invalidation.isEmpty { livePreviewState.invalidateComposedFrames() }
         previewPreparationGeneration &+= 1
@@ -845,7 +913,8 @@ final class CompositionRenderService {
         let topology = PreviewTopology(project: project)
         let renderSettings = previewRenderSettings(
             for: project,
-            quality: quality
+            quality: quality,
+            displayPixelSize: displayPixelSize
         )
         let requiresTopologyBuild =
             invalidation.contains(.compositionTopology)
@@ -866,7 +935,8 @@ final class CompositionRenderService {
                 failurePolicy: .skipUnavailableEffects,
                 livePreviewState: livePreviewState,
                 renderSessionID: renderSessionID,
-                usesPreviewProxies: true
+                usesPreviewProxies: true,
+                displayPixelSize: displayPixelSize
             )
             try Task.checkCancellation()
             guard preparationGeneration == previewPreparationGeneration else {
@@ -923,6 +993,9 @@ final class CompositionRenderService {
         guard preparationGeneration == previewPreparationGeneration else {
             throw CancellationError()
         }
+        try await DepthBakeStore.prepare(descriptors)
+        try Task.checkCancellation()
+        guard preparationGeneration == previewPreparationGeneration else { throw CancellationError() }
         let videoComposition =
             invalidation.contains(.previewFrame)
             ? makeVideoComposition(
@@ -932,7 +1005,8 @@ final class CompositionRenderService {
                 vectorRenderScale: vectorRenderScale(
                     renderSettings: renderSettings,
                     projectSettings: project.renderSettings,
-                    qualityProfile: quality.renderQualityProfile
+                    qualityProfile: quality.renderQualityProfile,
+                    displayPixelSize: displayPixelSize
                 ),
                 clips: descriptors,
                 sourceTrackIDs: sourceTrackIDs(
@@ -1004,7 +1078,8 @@ final class CompositionRenderService {
     func makePreviewBackgroundImage(
         for project: EditorProject,
         at time: Double,
-        excluding itemID: UUID
+        excluding itemID: UUID,
+        displayPixelSize: CGSize? = nil
     ) async throws -> UIImage? {
         guard let item = project.item(id: itemID) else { return nil }
         var backgroundProject = project
@@ -1030,13 +1105,15 @@ final class CompositionRenderService {
         }
         backgroundProject.replaceItem(id: itemID, with: hiddenItem)
 
-        let renderSettings = previewRenderSettings(for: project, quality: .balanced)
+        let renderSettings = previewRenderSettings(
+            for: project, quality: .balanced, displayPixelSize: displayPixelSize)
         let rendered = try await makeComposition(
             for: backgroundProject,
             renderSettings: renderSettings,
             backgroundRemovalPolicy: .omitUnavailable,
             qualityProfile: .balanced,
-            failurePolicy: .skipUnavailableEffects
+            failurePolicy: .skipUnavailableEffects,
+            displayPixelSize: displayPixelSize
         )
         guard rendered.hasVideo, let videoComposition = rendered.videoComposition else {
             return nil
@@ -1076,7 +1153,8 @@ final class CompositionRenderService {
         failurePolicy: RenderFailurePolicy,
         livePreviewState: LivePreviewRenderState? = nil,
         renderSessionID: UUID = UUID(),
-        usesPreviewProxies: Bool = false
+        usesPreviewProxies: Bool = false,
+        displayPixelSize: CGSize? = nil
     ) async throws -> RenderedComposition {
         let composition = AVMutableComposition()
         var renderClips: [RenderClipDescriptor] = []
@@ -1094,6 +1172,7 @@ final class CompositionRenderService {
         }
         for track in visualTracks.reversed() {
             try Task.checkCancellation()
+            let previewVideoTracks = usesPreviewProxies && reusesPreviewVideoTracks ? PreviewVideoTrackPool() : nil
             for item in track.items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
                 try Task.checkCancellation()
                 switch item {
@@ -1103,6 +1182,7 @@ final class CompositionRenderService {
                         source: TimelineVisualSource(mediaItem),
                         project: project,
                         proxyStore: usesPreviewProxies ? previewProxyStore : nil,
+                        previewVideoTracks: previewVideoTracks,
                         frameRate: renderSettings.frameRate,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
@@ -1292,6 +1372,8 @@ final class CompositionRenderService {
             for: renderClips,
             videoClockTrackID: videoClockTrackID
         )
+        try await DepthBakeStore.prepare(renderClips)
+        try Task.checkCancellation()
         let videoComposition = makeVideoComposition(
             renderSettings: renderSettings,
             renderScale: CGFloat(renderSettings.width)
@@ -1299,7 +1381,8 @@ final class CompositionRenderService {
             vectorRenderScale: vectorRenderScale(
                 renderSettings: renderSettings,
                 projectSettings: project.renderSettings,
-                qualityProfile: qualityProfile
+                qualityProfile: qualityProfile,
+                displayPixelSize: displayPixelSize
             ),
             clips: renderClips,
             sourceTrackIDs: videoSourceTrackIDs,
@@ -1360,25 +1443,18 @@ final class CompositionRenderService {
             livePreviewState: livePreviewState,
             renderSessionID: renderSessionID
         )
-        // Request decoder frames only while their source is present. Asking
-        // for every clip over the entire timeline makes ended/future tracks
-        // dependencies of unrelated frames, including audio-only tails.
-        let boundaries = Array(Set(
-            [CMTime.zero, cmTime(duration)] + clips.flatMap { clip in
-                [cmTime(min(max(clip.timelineStart, 0), duration)),
-                 cmTime(min(max(clip.timelineStart + clip.duration, 0), duration))]
-            }
-        )).sorted { CMTimeCompare($0, $1) < 0 }
-        let clockID = sourceTrackIDForFrameTiming
-        let instructions = zip(boundaries, boundaries.dropFirst()).map { start, end in
-            let midpoint = (CMTimeGetSeconds(start) + CMTimeGetSeconds(end)) / 2
-            let active = instruction.clipIntervals.activeClipIndices(at: midpoint)
-                .map { instruction.clips[$0] }
-            return MotionaryVideoCompositionInstruction(
-                timeRange: CMTimeRange(start: start, end: end),
-                template: instruction,
-                sourceTrackIDs: self.sourceTrackIDs(for: active, videoClockTrackID: clockID)
+        let instructions: [MotionaryVideoCompositionInstruction]
+        if clips.contains(where: {
+            $0.trackID != kCMPersistentTrackID_Invalid
+                || ($0.backgroundMaskTrackID ?? kCMPersistentTrackID_Invalid) != kCMPersistentTrackID_Invalid
+        }) {
+            instructions = decoderInstructions(
+                template: instruction, duration: duration, clockID: sourceTrackIDForFrameTiming
             )
+        } else {
+            // Generated content only needs the clock. The renderer still
+            // resolves every cut from the shared index at the actual frame time.
+            instructions = [instruction]
         }
         if #available(iOS 26.0, *) {
             let configuration = AVVideoComposition.Configuration(
@@ -1413,6 +1489,44 @@ final class CompositionRenderService {
         composition.sourceSampleDataTrackIDs = []
         composition.sourceTrackIDForFrameTiming = sourceTrackIDForFrameTiming
         return composition.copy() as? AVVideoComposition
+    }
+
+    private func decoderInstructions(
+        template: MotionaryVideoCompositionInstruction,
+        duration: Double,
+        clockID: CMPersistentTrackID
+    ) -> [MotionaryVideoCompositionInstruction] {
+        // Keep the original dependency lookup at each boundary, including
+        // quantized cuts and gaps. Adjacent intervals with the same decoder
+        // sources can share an instruction even if their visual layers differ.
+        let boundaries = Array(Set(
+            [CMTime.zero, cmTime(duration)] + template.clips.flatMap { clip in
+                [cmTime(min(max(clip.timelineStart, 0), duration)),
+                 cmTime(min(max(clip.timelineStart + clip.duration, 0), duration))]
+            }
+        )).sorted { CMTimeCompare($0, $1) < 0 }
+        var instructions: [MotionaryVideoCompositionInstruction] = []
+        var rangeStart = CMTime.zero
+        var previousSources: [CMPersistentTrackID]?
+        func appendRange(endingAt end: CMTime, sources: [CMPersistentTrackID]) {
+            instructions.append(MotionaryVideoCompositionInstruction(
+                timeRange: CMTimeRange(start: rangeStart, end: end), template: template, sourceTrackIDs: sources
+            ))
+        }
+        for (start, end) in zip(boundaries, boundaries.dropFirst()) {
+            let midpoint = (CMTimeGetSeconds(start) + CMTimeGetSeconds(end)) / 2
+            let active = template.clipIntervals.activeClipIndices(at: midpoint).map { template.clips[$0] }
+            let sources = sourceTrackIDs(for: active, videoClockTrackID: clockID)
+            if let previousSources, sources != previousSources {
+                appendRange(endingAt: start, sources: previousSources)
+                rangeStart = start
+            }
+            previousSources = sources
+        }
+        if let previousSources, let end = boundaries.last {
+            appendRange(endingAt: end, sources: previousSources)
+        }
+        return instructions
     }
 
     private func sourceTrackIDs(
@@ -1458,13 +1572,26 @@ final class CompositionRenderService {
 
     private func previewRenderSettings(
         for project: EditorProject,
-        quality: PreviewQuality
+        quality: PreviewQuality,
+        displayPixelSize: CGSize? = nil
     ) -> RenderSettings {
         let settings = project.renderSettings
         guard let maximumDimension = quality.maximumDimension else { return settings }
+        // Bind preview resolution to the physical preview surface. Rendering
+        // past the surface only spends fill rate on upscaling the layer
+        // afterwards, and rendering below the old 960 cap would soften text
+        // the user can already see at display size. The effective cap is
+        // therefore the smaller of the long-standing 960 budget and the
+        // surface's pixel size. Export never reaches this helper.
+        let effectiveMaximumDimension: Double
+        if let displayPixelSize, displayPixelSize.width >= 2, displayPixelSize.height >= 2 {
+            effectiveMaximumDimension = min(maximumDimension, max(Double(displayPixelSize.width), Double(displayPixelSize.height)))
+        } else {
+            effectiveMaximumDimension = maximumDimension
+        }
         let width = Double(max(settings.width, 1))
         let height = Double(max(settings.height, 1))
-        let scale = min(1, maximumDimension / max(width, height))
+        let scale = min(1, effectiveMaximumDimension / max(width, height))
 
         func evenDimension(_ value: Double) -> Int {
             let rounded = max(Int((value * scale).rounded()), 2)
@@ -1482,7 +1609,8 @@ final class CompositionRenderService {
     private func vectorRenderScale(
         renderSettings: RenderSettings,
         projectSettings: RenderSettings,
-        qualityProfile: RenderQualityProfile
+        qualityProfile: RenderQualityProfile,
+        displayPixelSize: CGSize? = nil
     ) -> CGFloat {
         let logicalScale = CGFloat(renderSettings.width)
             / CGFloat(max(projectSettings.width, 1))
@@ -1492,8 +1620,18 @@ final class CompositionRenderService {
         case .interactive, .balanced:
             // A 1.5x supersampled vector proxy remains crisp on the preview
             // surface without forcing every text/shape project through a full
-            // export-resolution frame graph.
-            return min(max(logicalScale * 1.5, logicalScale), 1)
+            // export-resolution frame graph. Never raster text/shape past the
+            // physical surface either: the display downsamples excess pixels
+            // for free, so cap the supersampling at the surface's own scale.
+            let supersampled = min(max(logicalScale * 1.5, logicalScale), 1)
+            guard let displayPixelSize, displayPixelSize.width >= 2, displayPixelSize.height >= 2 else {
+                return supersampled
+            }
+            let displayScale = max(
+                CGFloat(displayPixelSize.width) / CGFloat(max(projectSettings.width, 1)),
+                CGFloat(displayPixelSize.height) / CGFloat(max(projectSettings.height, 1))
+            )
+            return min(supersampled, min(max(displayScale, logicalScale), 1))
         }
     }
 
@@ -1501,6 +1639,7 @@ final class CompositionRenderService {
         source: TimelineVisualSource,
         project: EditorProject,
         proxyStore: PreviewProxyStore? = nil,
+        previewVideoTracks: PreviewVideoTrackPool? = nil,
         frameRate: Int32,
         composition: AVMutableComposition,
         visualTrackIDs: inout [UUID: CMPersistentTrackID],
@@ -1627,7 +1766,7 @@ final class CompositionRenderService {
         var sourcePixelTransform = CGAffineTransform.identity
         if source.mediaType == .video, let proxyStore {
             do {
-                if let proxy = try await proxyStore.prepare(source: metadata) {
+                if let proxy = try await proxyStore.availableProxy(source: metadata) {
                     videoMetadata = try await assetCache.metadata(for: proxy.url)
                     sourcePixelTransform = proxy.sourcePixelTransform
                 }
@@ -1645,12 +1784,22 @@ final class CompositionRenderService {
             return
         }
 
-        guard
-            let compositionVideoTrack = composition.addMutableTrack(
+        let destination: AVMutableCompositionTrack?
+        let usesSharedTrack = previewVideoTracks != nil && source.mediaType == .video
+            && !source.speedMap.hasVariableSpeed && source.speedMap.speed(at: 0) == 1
+        if usesSharedTrack {
+            destination = try previewVideoTracks?.insert(
+                CMTimeRange(start: cmTime(source.sourceRange.start), duration: cmTime(source.sourceRange.duration)),
+                from: sourceVideoTrack, url: videoMetadata.asset.url, at: cmTime(source.timelineStart),
+                prerollGap: CMTime(value: 1, timescale: max(frameRate, 1)), into: composition
+            )
+        } else {
+            destination = composition.addMutableTrack(
                 withMediaType: .video,
                 preferredTrackID: kCMPersistentTrackID_Invalid
             )
-        else {
+        }
+        guard let compositionVideoTrack = destination else {
             if sourceAvailabilityPolicy == .required {
                 throw CompositionRenderError.visualTrackUnavailable(source.name)
             }
@@ -1668,7 +1817,7 @@ final class CompositionRenderService {
                 compositionVideoTrack: compositionVideoTrack,
                 frameRate: frameRate
             )
-        } else {
+        } else if !usesSharedTrack {
             try insertRetimedTrack(
                 sourceTrack: sourceVideoTrack,
                 compositionTrack: compositionVideoTrack,

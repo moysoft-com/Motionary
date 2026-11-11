@@ -169,6 +169,26 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    @Test func aDeferredLayoutSampleCannotRewindTheRuler() async {
+        let state = TimelineScrollPresentationState()
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: .constant(88), currentTime: 118, duration: 120,
+            contentRevision: 0, contentSize: CGSize(width: 10_860, height: 200),
+            isScrollDisabled: false, scrollPresentationState: state,
+            onScrubStart: {}, onScrubChanged: { _ in }, onScrubEnd: { _ in },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        coordinator.isUpdatingUIView = true
+        coordinator.publishHorizontalScrollOffset(10_384)
+        coordinator.isUpdatingUIView = false
+        coordinator.publishHorizontalScrollOffset(10_472, immediately: true)
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        #expect(state.horizontalOffset == 10_472)
+    }
+
+    @MainActor
     @Test func playingTimelineAdvancesWhilePinchingEvenWithoutScaleChanges() {
         let playback = PlaybackState()
         playback.currentTime = 2

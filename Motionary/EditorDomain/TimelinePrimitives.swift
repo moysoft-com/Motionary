@@ -401,6 +401,9 @@ extension AnimatableProperty where Value == Double {
         guard !keyframes.isEmpty else { return self }
         let offset = min(delta, oldDuration)
         guard offset != 0 else { return self }
+        // Cropping an interpolated segment must retain its sampled edge and
+        // the corresponding part of its easing curve, just like splitting.
+        if offset > 0 { return split(at: offset).right }
         let edgeValue = value(at: max(offset, 0))
         let frames = keyframes.compactMap { frame -> Keyframe<Double>? in
             guard frame.time >= offset else { return nil }
@@ -415,8 +418,7 @@ extension AnimatableProperty where Value == Double {
         guard !keyframes.isEmpty else { return self }
         let duration = max(newDuration, 0)
         guard duration < oldDuration else { return self }
-        let frames = keyframes.filter { $0.time <= duration }
-        return AnimatableProperty(baseValue: frames.isEmpty ? value(at: duration) : baseValue, keyframes: frames)
+        return split(at: duration).left
     }
 
     func clamped(to range: ClosedRange<Double>) -> AnimatableProperty<Double> {
@@ -438,7 +440,7 @@ extension AnimatableProperty where Value == Double {
     }
 }
 
-private extension KeyframeInterpolation {
+extension KeyframeInterpolation {
     func split(at linearProgress: Double) -> (
         left: KeyframeInterpolation,
         right: KeyframeInterpolation

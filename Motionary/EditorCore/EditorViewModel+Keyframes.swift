@@ -274,12 +274,13 @@ extension EditorViewModel {
         }
         activeKeyframeTarget = target
 
-        updateSelectedClip(
+        let changed = updateSelectedClip(
             rebuild: !interactive,
             recordHistory: !interactive,
             persistChanges: !interactive,
             touchUpdatedAt: !interactive,
-            refreshTimeline: true
+            refreshTimeline: true,
+            affectsPreviewGeometry: target.effectID == nil
         ) { clip in
             let localTime = self.snappedKeyframeTime(
                 self.currentTime - clip.timelineStart,
@@ -316,6 +317,7 @@ extension EditorViewModel {
 
             clip.setAnimatableProperty(property, for: target)
         }
+        guard changed else { return }
         if interactive {
             scheduleInteractivePreviewRebuild(invalidation: interactiveInvalidation(for: target))
         }
@@ -580,22 +582,26 @@ extension EditorViewModel {
         var addedEffectID: UUID?
         updateSelectedClip { clip in
             guard clip.mediaType != .audio else { return }
+            if moduleID == .depthMap {
+                guard self.selectedTimelineItem?.isAdjustmentLayer != true, !clip.effectStack.effects.contains(where: { $0.moduleID == .depthMap }) else { return }
+            }
             guard let effect = EffectRegistry.shared.makeEffect(moduleID: moduleID) else { return }
-            clip.effectStack.effects.append(effect)
+            if moduleID == .depthMap { clip.effectStack.effects.insert(effect, at: 0) }
+            else { clip.effectStack.effects.append(effect) }
             addedEffectID = effect.id
-            self.activeKeyframeTarget = .effectMix(effect.id)
+            self.activeKeyframeTarget = effect.parameterTargets.first
         }
         return addedEffectID
     }
 
     func toggleEffectKeyframe(_ effectID: UUID) {
-        activeKeyframeTarget = .effectMix(effectID)
         updateSelectedClip { clip in
             let time = self.snappedKeyframeTime(
                 self.currentTime - clip.timelineStart,
                 clip: clip
             )
             let targets = clip.keyframeTargets(in: .effects, effectID: effectID)
+            self.activeKeyframeTarget = targets.first
             let hasMarker = targets.contains { target in
                 clip.animatableProperty(for: target)?.keyframeIndex(
                     at: time,
@@ -618,7 +624,7 @@ extension EditorViewModel {
                     effectID: effectID,
                     into: &clip
                 )
-                self.selectedKeyframeID = clip.animatableProperty(for: .effectMix(effectID))?
+                self.selectedKeyframeID = targets.first.flatMap { clip.animatableProperty(for: $0) }?
                     .keyframes.first {
                         abs($0.time - time) <= self.keyframeTimeTolerance
                     }?.id
@@ -658,7 +664,9 @@ extension EditorViewModel {
     func moveEffect(_ effectID: UUID, offset: Int) {
         updateSelectedClip { clip in
             guard let index = clip.effectStack.effects.firstIndex(where: { $0.id == effectID }) else { return }
-            let destination = min(max(index + offset, 0), clip.effectStack.effects.count - 1)
+            guard clip.effectStack.effects[index].moduleID != .depthMap else { return }
+            let minimum = clip.effectStack.effects.first?.moduleID == .depthMap ? 1 : 0
+            let destination = min(max(index + offset, minimum), clip.effectStack.effects.count - 1)
             guard destination != index else { return }
             let effect = clip.effectStack.effects.remove(at: index)
             clip.effectStack.effects.insert(effect, at: destination)

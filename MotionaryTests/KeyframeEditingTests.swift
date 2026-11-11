@@ -369,16 +369,18 @@ struct KeyframeEditingTests {
         let secondID = splitClips[1].id
         viewModel.trimClipStart(secondID, by: 0.5, rebuild: false)
         var trimmed = try #require(viewModel.project.clip(id: secondID))
-        #expect(trimmed.transform.positionX.keyframes.map(\.time) == [1.5])
-        #expect(trimmed.transform.positionX.keyframes.first?.value == 0)
+        #expect(trimmed.transform.positionX.keyframes.map(\.time) == [0, 1.5])
+        #expect(trimmed.transform.positionX.value(at: 0) == 0.75)
+        #expect(trimmed.transform.positionX.keyframes.last?.value == 0)
 
         viewModel.trimClipEnd(secondID, by: -0.5, rebuild: false)
         trimmed = try #require(viewModel.project.clip(id: secondID))
         #expect(trimmed.transform.positionX.keyframes.allSatisfy { $0.time <= 1.0 + 0.0001 })
-        #expect(trimmed.transform.positionX.keyframes.isEmpty)
+        #expect(trimmed.transform.positionX.keyframes.map(\.time) == [0, 1])
+        #expect(trimmed.transform.positionX.value(at: 1) == 0.25)
     }
 
-    @Test func trimmingDoesNotCreateBoundaryKeyframes() {
+    @Test func trimmingPreservesRetainedKeysAndSampledBoundaries() {
         let first = Keyframe(time: 1, value: 0.0)
         let last = Keyframe(time: 3, value: 1.0)
         let property = AnimatableProperty(baseValue: 0.0, keyframes: [first, last])
@@ -388,13 +390,23 @@ struct KeyframeEditingTests {
         #expect(extendedStart.keyframes.map(\.id) == [first.id, last.id])
         #expect(extendedStart.keyframes.map(\.time) == [2, 4])
         #expect(property.trimmedEnd(newDuration: 6, oldDuration: 4) == property)
-        #expect(property.trimmedStart(by: 2, oldDuration: 4).keyframes.map(\.id) == [last.id])
-        #expect(property.trimmedEnd(newDuration: 2, oldDuration: 4).keyframes.map(\.id) == [first.id])
+        let start = property.trimmedStart(by: 2, oldDuration: 4)
+        let end = property.trimmedEnd(newDuration: 2, oldDuration: 4)
+        #expect(start.keyframes.last?.id == last.id)
+        #expect(start.keyframes.map(\.time) == [0, 1])
+        #expect(start.value(at: 0) == 0.5)
+        #expect(end.keyframes.first?.id == first.id)
+        #expect(end.keyframes.map(\.time) == [1, 2])
+        #expect(end.value(at: 2) == 0.5)
 
         #expect(effect.trimmedStart(by: -1, oldDuration: 4).keyframes.map(\.id) == [first.id, last.id])
         #expect(effect.trimmedEnd(newDuration: 6, oldDuration: 4) == effect)
-        #expect(effect.trimmedStart(by: 2, oldDuration: 4).keyframes.map(\.id) == [last.id])
-        #expect(effect.trimmedEnd(newDuration: 2, oldDuration: 4).keyframes.map(\.id) == [first.id])
+        let effectStart = effect.trimmedStart(by: 2, oldDuration: 4)
+        let effectEnd = effect.trimmedEnd(newDuration: 2, oldDuration: 4)
+        #expect(effectStart.keyframes.last?.id == last.id)
+        #expect(effectStart.value(at: 0) == .scalar(0.5))
+        #expect(effectEnd.keyframes.first?.id == first.id)
+        #expect(effectEnd.value(at: 2) == .scalar(0.5))
     }
 
     @Test func audioEnvelopeSamplerApproximatesBezierAndKeepsHoldAsExactStep() async throws {
