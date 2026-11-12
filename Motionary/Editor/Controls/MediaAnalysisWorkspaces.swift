@@ -310,7 +310,7 @@ struct AutoBeatsWorkspaceView: View {
         let sourceTime: Double
         let timelineTime: Double
         let score: Double
-        var id: Int64 { Int64((sourceTime * 1_000_000).rounded()) }
+        var id: Int64 { Int64((timelineTime * 1_000_000).rounded()) }
     }
 
     private var suggestedCuts: [SuggestedCut] {
@@ -320,20 +320,19 @@ struct AutoBeatsWorkspaceView: View {
 
     static func suggestedCuts(for audioItem: MediaTimelineItem) -> [SuggestedCut] {
         guard let analysis = audioItem.beatAnalysis else { return [] }
-        return analysis.markers.compactMap { marker -> SuggestedCut? in
+        return analysis.markers.flatMap { marker -> [SuggestedCut] in
             // Suggested cuts must land on the same beat positions shown and
             // used for snapping in the timeline.
             let cutTime = marker.sourceTime
             guard let score = marker.editScore, score.isFinite,
                   cutTime >= audioItem.sourceRange.start,
-                  cutTime <= audioItem.sourceRange.end else { return nil }
-            let local = audioItem.speedMap.timelineTime(
+                  cutTime <= audioItem.sourceRange.end else { return [] }
+            return audioItem.speedMap.timelineTimes(
                 at: cutTime - audioItem.sourceRange.start,
                 sourceDuration: audioItem.sourceRange.duration
             )
-            guard local >= 0.16, local <= audioItem.timelineDuration - 0.16 else { return nil }
-            return SuggestedCut(sourceTime: cutTime,
-                                timelineTime: audioItem.timelineStart + local, score: score)
+            .filter { $0 >= 0.16 && $0 <= audioItem.timelineDuration - 0.16 }
+            .map { SuggestedCut(sourceTime: cutTime, timelineTime: audioItem.timelineStart + $0, score: score) }
         }.sorted {
             $0.score == $1.score ? $0.timelineTime < $1.timelineTime : $0.score > $1.score
         }.prefix(8).sorted { $0.timelineTime < $1.timelineTime }

@@ -42,220 +42,73 @@ struct SpeedMapSegment: Equatable, Sendable {
 }
 
 struct SpeedMap: Codable, Equatable, Sendable {
-    var keyframes: [SpeedKeyframe]
+    private(set) var keyframes: [SpeedKeyframe]
+    var timeRemap: TimeRemap?
 
     init(keyframes: [SpeedKeyframe] = []) {
-        let initial = keyframes
-            .map {
-                SpeedKeyframe(
-                    time: $0.time.isFinite ? max($0.time, 0) : 0,
-                    speed: Self.boundedSpeed($0.speed)
-                )
-            }
-            .sorted { $0.time < $1.time }
-            .first
-        self.keyframes = [
-            SpeedKeyframe(time: 0, speed: initial?.speed ?? 1)
-        ]
+        let initial = keyframes.min { left, right in
+            let leftTime = left.time.isFinite ? max(left.time, 0) : 0
+            let rightTime = right.time.isFinite ? max(right.time, 0) : 0
+            return leftTime < rightTime
+        }
+        self.keyframes = [SpeedKeyframe(time: 0, speed: Self.boundedSpeed(initial?.speed ?? 1))]
     }
 
     static let constant = constant(speed: 1)
 
     static func constant(speed: Double) -> SpeedMap {
-        SpeedMap(
-            keyframes: [SpeedKeyframe(time: 0, speed: boundedSpeed(speed))]
-        )
+        SpeedMap(keyframes: [SpeedKeyframe(time: 0, speed: speed)])
     }
 
-    var hasVariableSpeed: Bool {
-        guard let firstSpeed = keyframes.first?.speed else { return false }
-        return keyframes.dropFirst().contains {
-            abs($0.speed - firstSpeed) > 0.000_001
-        }
-    }
+    var constantSpeed: Double { keyframes[0].speed }
+
+    var hasVariableSpeed: Bool { timeRemap?.hasVariableSpeed ?? false }
 
     func speed(at sourceTime: Double) -> Double {
-        guard let first = keyframes.first else { return 1 }
-        let sourceTime = sourceTime.isFinite ? max(sourceTime, 0) : 0
-        return keyframes.last(where: { $0.time <= sourceTime + 0.000_001 })?.speed
-            ?? first.speed
+        timeRemap?.averageSpeed ?? constantSpeed
     }
 
     func timelineDuration(sourceDuration: Double) -> Double {
-        let safeDuration = Self.safeDuration(sourceDuration)
-        guard safeDuration > 0 else { return 0 }
-        return renderSegments(sourceDuration: safeDuration)
-            .reduce(0) { $0 + $1.timelineDuration }
+        timeRemap?.duration ?? max(sourceDuration, 0) / constantSpeed
     }
 
     func timelineTime(at sourceTime: Double, sourceDuration: Double) -> Double {
-        let safeDuration = Self.safeDuration(sourceDuration)
-        let safeSourceTime = sourceTime.isFinite ? sourceTime : 0
-        let target = min(max(safeSourceTime, 0), safeDuration)
-        var elapsed = 0.0
-        for segment in renderSegments(sourceDuration: safeDuration) {
-            let segmentSourceEnd = segment.sourceStart + segment.sourceDuration
-            if target >= segmentSourceEnd {
-                elapsed += segment.timelineDuration
-                continue
-            }
-            if target > segment.sourceStart {
-                elapsed += (target - segment.sourceStart)
-                    / segment.sourceDuration
-                    * segment.timelineDuration
-            }
-            break
-        }
-        return elapsed
+        let time = min(max(sourceTime.isFinite ? sourceTime : 0, 0), max(sourceDuration, 0))
+        return timeRemap?.timelineTime(at: time) ?? time / constantSpeed
+    }
+
+    func sourceTime(at timelineTime: Double, sourceDuration: Double) -> Double {
+        let time = max(timelineTime.isFinite ? timelineTime : 0, 0)
+        return timeRemap?.sourceTime(at: time) ?? min(time * constantSpeed, max(sourceDuration, 0))
+    }
+
+    func timelineTimes(at sourceTime: Double, sourceDuration: Double) -> [Double] {
+        if let timeRemap { return timeRemap.timelineTimes(at: sourceTime) }
+        return [timelineTime(at: sourceTime, sourceDuration: sourceDuration)]
     }
 
     var topologySignature: UInt64 {
         var hasher = Hasher()
-        hasher.combine(keyframes.count)
-        for keyframe in keyframes {
-            hasher.combine(keyframe.time)
-            hasher.combine(keyframe.speed)
+        hasher.combine(timeRemap != nil)
+        if let timeRemap {
+            hasher.combine(timeRemap.duration)
+            hasher.combine(timeRemap.baseValue)
+            for frame in timeRemap.keyframes {
+                hasher.combine(frame.time)
+                hasher.combine(frame.value)
+                hasher.combine(frame.interpolation)
+            }
+        } else {
+            hasher.combine(constantSpeed)
         }
         return UInt64(bitPattern: Int64(hasher.finalize()))
     }
 
-    func sourceTime(at timelineTime: Double, sourceDuration: Double) -> Double {
-        let safeDuration = Self.safeDuration(sourceDuration)
-        let safeTimelineTime = timelineTime.isFinite ? timelineTime : 0
-        guard safeDuration > 0, safeTimelineTime > 0 else { return 0 }
-        let target = min(
-            safeTimelineTime,
-            self.timelineDuration(sourceDuration: safeDuration)
-        )
-        var elapsed = 0.0
-        for segment in renderSegments(sourceDuration: safeDuration) {
-            let segmentEnd = elapsed + segment.timelineDuration
-            if target <= segmentEnd + 0.000_000_001 {
-                let localTimelineTime = min(max(target - elapsed, 0), segment.timelineDuration)
-                return min(
-                    segment.sourceStart
-                        + localTimelineTime
-                        / segment.timelineDuration
-                        * segment.sourceDuration,
-                    segment.sourceStart + segment.sourceDuration
-                )
-            }
-            elapsed = segmentEnd
-        }
-        return safeDuration
-    }
-
-    func renderSegments(sourceDuration: Double) -> [SpeedMapSegment] {
-        let duration = Self.safeDuration(sourceDuration)
-        guard duration > 0 else { return [] }
-        var result: [SpeedMapSegment] = []
-        var sourceStart = 0.0
-        var currentSpeed = keyframes.first?.speed ?? 1
-
-        for keyframe in keyframes.dropFirst() {
-            guard keyframe.time < duration else { break }
-            let segmentDuration = keyframe.time - sourceStart
-            if segmentDuration > 0 {
-                result.append(
-                    SpeedMapSegment(
-                        sourceStart: sourceStart,
-                        sourceDuration: segmentDuration,
-                        timelineDuration: segmentDuration / currentSpeed
-                    )
-                )
-            }
-            sourceStart = keyframe.time
-            currentSpeed = keyframe.speed
-        }
-        let finalDuration = duration - sourceStart
-        if finalDuration > 0 {
-            result.append(
-                SpeedMapSegment(
-                    sourceStart: sourceStart,
-                    sourceDuration: finalDuration,
-                    timelineDuration: finalDuration / currentSpeed
-                )
-            )
-        }
+    func rebased(from sourceStart: Double, duration: Double) -> SpeedMap {
+        guard let timeRemap else { return self }
+        var result = self
+        result.timeRemap = timeRemap.rebased(from: sourceStart, sourceDuration: duration)
         return result
-    }
-
-    /// Removes speed points that cannot affect this source range. The zero-time
-    /// anchor is retained because every speed map needs an initial segment value.
-    func clamped(toSourceDuration sourceDuration: Double) -> SpeedMap {
-        let duration = sourceDuration.isFinite ? max(sourceDuration, 0) : 0
-        guard duration > 0 else {
-            return .constant(speed: keyframes.first?.speed ?? 1)
-        }
-        let relevant = keyframes.filter {
-            $0.time <= 0.000_001 || $0.time < duration - 0.000_001
-        }
-        return SpeedMap(keyframes: relevant)
-    }
-
-    func sliced(from sourceStart: Double, duration: Double) -> SpeedMap {
-        let start = sourceStart.isFinite ? sourceStart : 0
-        let sliceDuration = duration.isFinite ? max(duration, 0) : 0
-        let sampledStart = max(start, 0)
-        let sourceEnd = start + sliceDuration
-        var slicedKeyframes = [SpeedKeyframe(time: 0, speed: speed(at: sampledStart))]
-        slicedKeyframes.append(
-            contentsOf: keyframes.compactMap { keyframe in
-                guard keyframe.time > sampledStart + 0.000_001,
-                    keyframe.time < sourceEnd - 0.000_001
-                else { return nil }
-                return SpeedKeyframe(
-                    time: keyframe.time - start,
-                    speed: keyframe.speed
-                )
-            }
-        )
-        return SpeedMap(keyframes: slicedKeyframes)
-    }
-
-    func hasKeyframe(at sourceTime: Double, tolerance: Double) -> Bool {
-        keyframes.contains { abs($0.time - sourceTime) <= tolerance }
-    }
-
-    func addingKeyframe(at sourceTime: Double, tolerance: Double) -> SpeedMap {
-        guard !hasKeyframe(at: sourceTime, tolerance: tolerance) else { return self }
-        let sourceTime = sourceTime.isFinite ? max(sourceTime, 0) : 0
-        var updated = keyframes
-        updated.append(
-            SpeedKeyframe(
-                time: sourceTime,
-                speed: speed(at: sourceTime)
-            )
-        )
-        return SpeedMap(keyframes: updated)
-    }
-
-    func removingKeyframe(at sourceTime: Double, tolerance: Double) -> SpeedMap {
-        guard sourceTime > tolerance else { return self }
-        let updated = keyframes.filter { abs($0.time - sourceTime) > tolerance }
-        return SpeedMap(keyframes: updated)
-    }
-
-    func settingSpeed(
-        _ speed: Double,
-        at sourceTime: Double,
-        createKeyframe: Bool,
-        tolerance: Double
-    ) -> SpeedMap {
-        guard createKeyframe else { return .constant(speed: speed) }
-        let sourceTime = sourceTime.isFinite ? max(sourceTime, 0) : 0
-        var updated = keyframes
-        if let index = updated.firstIndex(where: { abs($0.time - sourceTime) <= tolerance }) {
-            updated[index].speed = Self.boundedSpeed(speed)
-        } else {
-            updated.append(
-                SpeedKeyframe(
-                    time: sourceTime,
-                    speed: Self.boundedSpeed(speed)
-                )
-            )
-        }
-        return SpeedMap(keyframes: updated)
     }
 
     private static func boundedSpeed(_ speed: Double) -> Double {
@@ -263,18 +116,15 @@ struct SpeedMap: Codable, Equatable, Sendable {
         return min(max(speed, 0.1), 8)
     }
 
-    private static func safeDuration(_ duration: Double) -> Double {
-        duration.isFinite ? max(duration, 0) : 0
-    }
-
     private enum CodingKeys: String, CodingKey {
         case keyframes
+        case timeRemap
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let keyframes = try container.decodeIfPresent([SpeedKeyframe].self, forKey: .keyframes) ?? []
-        self.init(keyframes: keyframes)
+        self.init(keyframes: try container.decodeIfPresent([SpeedKeyframe].self, forKey: .keyframes) ?? [])
+        timeRemap = try container.decodeIfPresent(TimeRemap.self, forKey: .timeRemap)
     }
 }
 

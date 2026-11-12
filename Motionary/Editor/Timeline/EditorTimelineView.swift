@@ -178,7 +178,6 @@ struct CoreTimelineLayout: View {
             pixelsPerSecond: $pixelsPerSecond,
             currentTime: 0,
             duration: viewModel.duration,
-            maximumTimelineTime: viewModel.lastPlayableTime,
             contentRevision: timelineContentRevision,
             contentSize: CGSize(width: contentWidth, height: max(contentHeight, size.height)),
             isScrollDisabled: activeClipDrag != nil || activeTrackDrag != nil,

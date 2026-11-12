@@ -506,8 +506,8 @@ extension TimelineItem {
 
     func keyframeTimes(in section: KeyframeSection, effectID: UUID? = nil) -> [Double] {
         switch self {
-        case .media where section == .speed:
-            return []
+        case .media(let item) where section == .speed:
+            return item.speedMap.timeRemap?.keyframes.map(\.time) ?? []
         case .media, .shape, .adjustment:
             return visibleKeyframeTimes(
                 visualEditingClip()?.keyframeTimes(in: section, effectID: effectID) ?? []
@@ -522,7 +522,9 @@ extension TimelineItem {
     var allKeyframeTimes: [Double] {
         switch self {
         case .media:
-            return visibleKeyframeTimes(legacyClip()?.allKeyframeTimes ?? [])
+            let visualTimes = visibleKeyframeTimes(legacyClip()?.allKeyframeTimes ?? [])
+            let remapTimes = keyframeTimes(in: .speed)
+            return remapTimes.isEmpty ? visualTimes : KeyframeMergeSupport.mergedTimes([visualTimes, remapTimes])
         case .shape:
             return visibleKeyframeTimes(legacyClip()?.allKeyframeTimes ?? [])
         case .text(let item):

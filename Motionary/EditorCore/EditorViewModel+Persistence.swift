@@ -442,8 +442,16 @@ extension EditorViewModel {
         if effectiveInvalidation.contains(.compositionTopology),
             !pendingPreviewInvalidation.contains(.compositionTopology)
         {
-            // Invalidate at the edit boundary, before the debounce or a new
-            // scrub can reuse frames/decoder snapshots from the old mapping.
+            // Hold the displayed frame through the AVPlayerItem replacement.
+            // The old cache itself must be invalidated before the next scrub.
+            if !isPlaying, livePreviewPresentation.frame == nil {
+                let frameTime = livePreviewPresentationTime(clampedPlayableTime(currentTime))
+                if let frame = renderService.livePreviewState.cachedFrame(
+                    at: frameTime, sessionID: previewRenderSessionID)
+                {
+                    livePreviewPresentation.setFrame(frame, at: frameTime)
+                }
+            }
             renderService.livePreviewState.invalidateComposedFrames()
             renderService.livePreviewState.clearPausedFrameRenderer()
             invalidateLivePreviewPresentation(preservingFrame: true)

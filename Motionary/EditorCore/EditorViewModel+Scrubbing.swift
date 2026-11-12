@@ -8,7 +8,7 @@ extension EditorViewModel {
     func updateScrub(to time: Double) {
         guard !previewIsSuspended, !isPlaying, !playbackState.isStartingPlayback,
             !pendingPlaybackResumeAfterPreviewRebuild else { return }
-        let clamped = clampedPlayableTime(time)
+        let clamped = clampedTimelineTime(time)
         let movement = clamped - currentTime
         if movement != 0 {
             lastScrubDirection = movement

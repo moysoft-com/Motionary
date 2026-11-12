@@ -43,7 +43,11 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         self.timelineStart = max(0, timelineStart)
         self.sourceRange = sourceRange
         self.visuals = visuals
-        self.speedMap = speedMap
+        if let remap = speedMap.timeRemap, remap.sourceDuration != sourceRange.duration {
+            self.speedMap = speedMap.rebased(from: 0, duration: sourceRange.duration)
+        } else {
+            self.speedMap = speedMap
+        }
         self.pitchFollowsSpeed = pitchFollowsSpeed
         self.linkGroupID = linkGroupID
         self.beatAnalysis = beatAnalysis
@@ -563,7 +567,14 @@ extension TimelineItem {
         let replacement = TimelineItem.fromLegacyClip(clip)
         switch (self, replacement) {
         case (.media(let previous), .media(var updated)):
-            updated.speedMap = .constant(speed: previous.speedMap.speed(at: 0))
+            if previous.mediaID == updated.mediaID {
+                updated.speedMap = previous.speedMap.rebased(
+                    from: updated.sourceRange.start - previous.sourceRange.start,
+                    duration: updated.sourceRange.duration
+                )
+            } else {
+                updated.speedMap = .constant(speed: previous.speedMap.constantSpeed)
+            }
             updated.pitchFollowsSpeed = previous.pitchFollowsSpeed
             updated.linkGroupID = previous.linkGroupID
             updated.visuals.blendMode = previous.visuals.blendMode
@@ -603,15 +614,26 @@ extension TimelineItem {
 
         switch self {
         case .media(var item):
+            if let remap = item.speedMap.timeRemap {
+                let splitVisuals = item.visuals.splittingAnimations(at: offset)
+                var second = item
+                second.id = UUID()
+                second.name += " split"
+                second.timelineStart += offset
+                second.speedMap.timeRemap = remap.sliced(
+                    fromTimelineTime: offset, duration: remap.duration - offset)
+                second.visuals = splitVisuals.right
+                item.speedMap.timeRemap = remap.sliced(fromTimelineTime: 0, duration: offset)
+                item.visuals = splitVisuals.left
+                return (.media(item), .media(second))
+            }
             let sourceOffset = item.speedMap.sourceTime(
                 at: offset,
                 sourceDuration: item.sourceRange.duration
             )
             guard sourceOffset > 0.08, sourceOffset < item.sourceRange.duration - 0.08 else { return nil }
             let splitVisuals = item.visuals.splittingAnimations(at: offset)
-            let originalSpeedMap = item.speedMap
             item.sourceRange = TimeRangeValue(start: item.sourceRange.start, duration: sourceOffset)
-            item.speedMap = originalSpeedMap.sliced(from: 0, duration: sourceOffset)
             item.visuals = splitVisuals.left
             var second = item
             second.id = UUID()
@@ -619,10 +641,6 @@ extension TimelineItem {
             second.timelineStart = timelineStart + offset
             second.sourceRange = TimeRangeValue(
                 start: sourceRange.start + sourceOffset,
-                duration: sourceRange.duration - sourceOffset
-            )
-            second.speedMap = originalSpeedMap.sliced(
-                from: sourceOffset,
                 duration: sourceRange.duration - sourceOffset
             )
             second.visuals = splitVisuals.right
@@ -705,16 +723,19 @@ extension TimelineItem {
         case .media(var item):
             let oldSourceDuration = item.sourceRange.duration
             let oldTimelineDuration = item.timelineDuration
+            if let remap = item.speedMap.timeRemap {
+                item.timelineStart += delta
+                item.speedMap.timeRemap = remap.sliced(
+                    fromTimelineTime: delta, duration: oldTimelineDuration - delta)
+                item.visuals.trimAnimationsAtStart(by: delta, oldDuration: oldTimelineDuration)
+                return .media(item)
+            }
             let sourceDelta = delta >= 0
                 ? item.speedMap.sourceTime(at: delta, sourceDuration: oldSourceDuration)
                 : delta * item.speedMap.speed(at: 0)
             item.timelineStart += delta
             item.sourceRange = TimeRangeValue(
                 start: item.sourceRange.start + sourceDelta,
-                duration: oldSourceDuration - sourceDelta
-            )
-            item.speedMap = item.speedMap.sliced(
-                from: sourceDelta,
                 duration: oldSourceDuration - sourceDelta
             )
             item.visuals.trimAnimationsAtStart(by: delta, oldDuration: oldTimelineDuration)
@@ -767,6 +788,11 @@ extension TimelineItem {
             let oldSourceDuration = item.sourceRange.duration
             let oldTimelineDuration = item.timelineDuration
             let newTimelineDuration = max(oldTimelineDuration + delta, 0.1)
+            if let remap = item.speedMap.timeRemap {
+                item.speedMap.timeRemap = remap.sliced(fromTimelineTime: 0, duration: newTimelineDuration)
+                item.visuals.trimAnimationsAtEnd(newDuration: newTimelineDuration, oldDuration: oldTimelineDuration)
+                return .media(item)
+            }
             let newSourceDuration: Double
             if newTimelineDuration <= oldTimelineDuration {
                 newSourceDuration = item.speedMap.sourceTime(
@@ -781,7 +807,6 @@ extension TimelineItem {
                 start: item.sourceRange.start,
                 duration: newSourceDuration
             )
-            item.speedMap = item.speedMap.sliced(from: 0, duration: newSourceDuration)
             item.visuals.trimAnimationsAtEnd(
                 newDuration: newTimelineDuration,
                 oldDuration: oldTimelineDuration

@@ -311,6 +311,220 @@ struct SourceTimingRenderTests {
     }
 
     @MainActor
+    @Test(arguments: [false, true])
+    func easedTimeRemappingUsesTheMappedFramesInPreviewAndExport(reverses: Bool) async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = TimelineClip(
+            name: "Remapped video",
+            source: ClipSource(
+                url: url, mediaType: .video,
+                originalDuration: 4, naturalSize: CGSizeValue(width: 160, height: 96)), timelineStart: 0.5,
+            sourceRange: TimeRangeValue(start: 0.2, duration: 3.6))
+        var project = EditorProject(
+            title: "Time Remapping",
+            renderSettings: RenderSettings(width: 160, height: 96, frameRate: 30),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        var remap = try #require(TimeRemap(sourceDuration: 3.6, timelineDuration: 2))
+        remap.setSourceTime(2.6, at: 1, tolerance: 0.001)
+        remap.setInterpolation(KeyframeCurvePreset.easeInOut.interpolation, at: 0)
+        remap.setInterpolation(KeyframeCurvePreset.easeOut.interpolation, at: 1)
+        if reverses {
+            remap.setSourceTime(3.6, at: 0, tolerance: 0.001)
+            remap.setSourceTime(0.55, at: 1, tolerance: 0.001)
+            remap.setSourceTime(0.55, at: 2, tolerance: 0.001)
+        }
+        var map = SpeedMap.constant
+        map.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: map)
+
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let preview = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.previewFrame, .compositionTopology]))
+        let export = try await VideoExportService().export(
+            project: project, settings: .recommended(for: project), progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: export) }
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: export))
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
+        let context = CIContext()
+        for frame in [6, 14, 25, 29, 30, 31, 45, 58, 59] {
+            let offset = Double(frame) / 30
+            let time = CMTime(value: Int64(frame + 15), timescale: 30)
+            let expectedTime = CMTime(
+                seconds: clip.sourceRange.start + remap.sourceTime(at: offset), preferredTimescale: 60_000)
+            let expected = try await nativeSourcePixel(url: url, at: expectedTime)
+            let previewImage = try await probe.image(at: time)
+            let previewPixel = pixel(try #require(context.createCGImage(previewImage, from: previewImage.extent)))
+            let exportPixel = pixel(try await generator.image(at: time).image)
+            #expect(zip(previewPixel, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 },
+                    "Preview at \(offset): \(previewPixel), source \(expected)")
+            #expect(zip(exportPixel, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 },
+                    "Export at \(offset): \(exportPixel), source \(expected)")
+        }
+    }
+
+    @MainActor
+    @Test func remapSourceTimeChangesCanRenderWithoutReplacingThePreviewItem() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = TimelineClip(
+            name: "Live source time",
+            source: ClipSource(url: url, mediaType: .video, originalDuration: 4,
+                               naturalSize: CGSizeValue(width: 160, height: 96)),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
+        var project = EditorProject(
+            title: "Live remap",
+            renderSettings: RenderSettings(width: 160, height: 96, frameRate: 30),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        var remap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        var speed = SpeedMap.constant
+        speed.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: speed)
+
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let sessionID = UUID()
+        let preview = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.previewFrame, .compositionTopology],
+            renderSessionID: sessionID))
+        let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
+        let time = CMTime(value: 15, timescale: 30)
+        _ = try await probe.image(at: time)
+        let context = CIContext()
+        for sourceTime in [2.5, 0.5, 4, 1.5, 3.5, 0] {
+            remap.setSourceTime(sourceTime, at: time.seconds, tolerance: 0.001)
+            speed.timeRemap = remap
+            service.livePreviewState.setSpeedMap(speed, for: clip.id)
+            let frame: CVPixelBuffer? = await withCheckedContinuation { continuation in
+                if !service.livePreviewState.renderPausedFrame(at: time.seconds, sessionID: sessionID,
+                    completion: { continuation.resume(returning: $0) })
+                {
+                    continuation.resume(returning: nil)
+                }
+            }
+            let image = CIImage(cvPixelBuffer: try #require(frame))
+            let actual = pixel(try #require(context.createCGImage(image, from: image.extent)))
+            let expected = try await nativeSourcePixel(url: url, at: CMTime(
+                seconds: min(sourceTime, 119.0 / 30), preferredTimescale: 60_000))
+            #expect(zip(actual, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 },
+                    "Live edit at source \(sourceTime): \(actual), expected \(expected)")
+        }
+    }
+
+    @MainActor
+    @Test func extendedRemapWithoutKeyframesRendersTheHeldSourceFrame() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = TimelineClip(
+            name: "Held frame",
+            source: ClipSource(url: url, mediaType: .video, originalDuration: 4,
+                               naturalSize: CGSizeValue(width: 160, height: 96)),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
+        var project = EditorProject(
+            title: "Extended held frame",
+            renderSettings: RenderSettings(width: 160, height: 96, frameRate: 30),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        var remap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        remap.toggleKeyframe(at: 0, tolerance: 0.001)
+        remap.toggleKeyframe(at: 4, tolerance: 0.001)
+        remap.setSourceTime(1.5, at: 1, tolerance: 0.001)
+        remap = remap.sliced(fromTimelineTime: 0, duration: 6)
+        var speed = SpeedMap.constant
+        speed.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: speed)
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let preview = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.previewFrame, .compositionTopology]))
+        let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
+        let expected = try await nativeSourcePixel(url: url, at: CMTime(seconds: 1.5, preferredTimescale: 600))
+        let context = CIContext()
+        for seconds in [0.5, 3.5, 5.9] {
+            let image = try await probe.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
+            let actual = pixel(try #require(context.createCGImage(image, from: image.extent)))
+            #expect(zip(actual, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 })
+        }
+    }
+
+    @Test func audioRemappingKeepsContinuousTrackEditsAndTheSelectedPitchMode() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("remap-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 144_000))
+        buffer.frameLength = 144_000
+        let samples = try #require(buffer.floatChannelData?[0])
+        for index in 0..<Int(buffer.frameLength) {
+            samples[index] = Float(sin(Double(index) * 2 * .pi * 440 / format.sampleRate) * 0.3)
+        }
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+        }
+        let clip = TimelineClip(
+            name: "Remapped audio",
+            source: ClipSource(url: url, mediaType: .audio, originalDuration: 3),
+            timelineStart: 0.5, sourceRange: TimeRangeValue(start: 0.25, duration: 2))
+        var project = EditorProject(
+            title: "Time Remapping Audio",
+            tracks: [TimelineTrack(name: "Audio", kind: .audio, clips: [clip])])
+        var remap = try #require(TimeRemap(sourceDuration: 2, timelineDuration: 1.5))
+        remap.setInterpolation(KeyframeCurvePreset.easeInOut.interpolation, at: 0)
+        var map = SpeedMap.constant
+        map.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: map)
+
+        let service = CompositionRenderService()
+        let rendered = try await service.makeComposition(for: project)
+        let track = try #require(rendered.composition.tracks(withMediaType: .audio).first)
+        let edits = track.segments.filter { !$0.isEmpty }
+        #expect(edits.count > 1)
+        #expect(edits.first?.timeMapping.target.start.seconds == 0.5)
+        #expect(edits.last?.timeMapping.target.end.seconds == 2)
+        #expect(edits.first?.timeMapping.source.start.seconds == 0.25)
+        #expect(edits.last?.timeMapping.source.end.seconds == 2.25)
+        #expect(zip(edits, edits.dropFirst()).allSatisfy {
+            $0.timeMapping.target.end == $1.timeMapping.target.start
+                && $0.timeMapping.source.end == $1.timeMapping.source.start
+        })
+        #expect(rendered.audioMix?.inputParameters.first?.audioTimePitchAlgorithm == .timeDomain)
+
+        let location = try #require(project.itemLocation(id: clip.id))
+        guard case .media(var media) = project.tracks[location.track].items[location.item] else {
+            Issue.record("Expected audio media")
+            return
+        }
+        media.pitchFollowsSpeed = true
+        project.replaceItem(id: clip.id, with: .media(media))
+        let pitchFollowsSpeed = try await service.makeComposition(for: project)
+        #expect(pitchFollowsSpeed.audioMix?.inputParameters.first?.audioTimePitchAlgorithm == .varispeed)
+        remap.setSourceTime(2, at: 0, tolerance: 0.001)
+        remap.setSourceTime(0, at: 1, tolerance: 0.001)
+        remap.setSourceTime(0, at: 1.5, tolerance: 0.001)
+        map.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: map)
+        let reversed = try await service.makeComposition(for: project)
+        let reversedTrack = try #require(reversed.composition.tracks(withMediaType: .audio).first)
+        let firstEdit = try #require(reversedTrack.segments.first { !$0.isEmpty })
+        let reversedURL = try #require(firstEdit.sourceURL)
+        #expect(reversedURL != url)
+        let audibleEnd = reversedTrack.segments.last { !$0.isEmpty }?.timeMapping.target.end.seconds
+        #expect(audibleEnd == 1.5)
+        #expect(reversed.composition.duration.seconds >= 2)
+
+        let originalPCM = try AVAudioFile(forReading: url)
+        let reversedPCM = try AVAudioFile(forReading: reversedURL)
+        let originalTail = try #require(AVAudioPCMBuffer(pcmFormat: originalPCM.processingFormat, frameCapacity: 32))
+        let reversedHead = try #require(AVAudioPCMBuffer(pcmFormat: reversedPCM.processingFormat, frameCapacity: 32))
+        originalPCM.framePosition = originalPCM.length - 32
+        try originalPCM.read(into: originalTail)
+        try reversedPCM.read(into: reversedHead)
+        let tail = try #require(originalTail.floatChannelData?[0])
+        let head = try #require(reversedHead.floatChannelData?[0])
+        for index in 0..<32 { #expect(abs(tail[31 - index] - head[index]) < 0.0001) }
+
+    }
+
+    @MainActor
     @Test func previewRendersTheAuthoredFrameAtZero() async throws {
         let url = try await makeVideo()
         defer { try? FileManager.default.removeItem(at: url) }

@@ -517,8 +517,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             let pixel = 1 / max(scrollView.traitCollection.displayScale, 1)
             let x = scrollView.contentOffset.x
             // UIKit may settle on a rounded content boundary. That position
-            // is the last frame even when converting x back to seconds would
-            // yield a slightly earlier value.
+            // is the authored end even when converting x back to seconds
+            // would yield a slightly earlier value.
             if actualEnd > 0, abs(actualEnd - expectedEnd) <= pixel, x >= actualEnd - pixel / 2 {
                 return parent.maximumTimelineTime
             }
@@ -992,10 +992,10 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             in scrollView: UIScrollView
         ) -> CGSize {
             var size = hostedContentSize
-            let playableWidth =
+            let timelineWidth =
                 CGFloat(parent.maximumTimelineTime) * parent.pixelsPerSecond
                 + scrollView.bounds.width
-            size.width = min(hostedContentSize.width, max(playableWidth, scrollView.bounds.width))
+            size.width = min(hostedContentSize.width, max(timelineWidth, scrollView.bounds.width))
             return size
         }
 

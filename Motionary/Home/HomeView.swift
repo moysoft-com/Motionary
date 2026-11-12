@@ -66,16 +66,23 @@ struct HomeView: View {
                             noSearchResults
                         } else {
                             LazyVGrid(columns: columns, spacing: 12) {
-                                ForEach($projectStore.projects) { $project in
+                                ForEach(projectStore.projects) { project in
                                     if matchesSearch(project.title) {
                                         ProjectCard(
-                                            project: $project,
+                                            project: Binding(
+                                                get: { projectStore.projects.first { $0.id == project.id } ?? project },
+                                                set: { updated in
+                                                    guard let index = projectStore.projects.firstIndex(where: { $0.id == project.id }) else { return }
+                                                    projectStore.projects[index] = updated
+                                                }
+                                            ),
                                             isRenaming: editingProjectID == project.id,
                                             onOpen: {
+                                                guard let selected = projectStore.projects.first(where: { $0.id == project.id }) else { return }
                                                 dismissProjectSearch()
                                                 selectedProject = ProjectEditorSelection(
-                                                    project: project,
-                                                    initialContent: projectStore.bestAvailableContent(for: project)
+                                                    project: selected,
+                                                    initialContent: projectStore.bestAvailableContent(for: selected)
                                                 )
                                             },
                                             onRename: {

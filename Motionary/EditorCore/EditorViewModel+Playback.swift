@@ -681,7 +681,7 @@ extension EditorViewModel {
         guard isScrubbing else { return }
         scratchAudio.end()
         scrubIsFinishing = true
-        let clamped = clampedPlayableTime(time)
+        let clamped = clampedTimelineTime(time)
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
         scrubPrefetchTask?.cancel()
@@ -717,7 +717,7 @@ extension EditorViewModel {
                 self.player === player,
                 self.scrubSessionGeneration == generation
             else { return }
-            let target = self.livePreviewPresentationTime(clamped)
+            let target = self.livePreviewPresentationTime(self.clampedPlayableTime(clamped))
             var didSeek = await self.boundedSeek(
                 player: player,
                 to: target,

@@ -85,8 +85,9 @@ extension EditorViewModel {
                     projectStore: projectStore
                 )
                 try Task.checkCancellation()
-                guard let location = project.clipLocation(id: selectedClipID) else { return }
-                let beforeClip = project.tracks[location.track].clips[location.clip]
+                guard let beforeItem = project.item(id: selectedClipID),
+                    let beforeClip = beforeItem.legacyClip()
+                else { return }
                 let beforeMedia = project.mediaAsset(for: beforeClip)
                 let previousDuration = beforeClip.sourceRange.duration
                 var afterClip = beforeClip
@@ -104,10 +105,9 @@ extension EditorViewModel {
                 commit(
                     AnyEditorCommand(
                         ReplaceClipMediaCommand(
-                            clipID: selectedClipID,
-                            beforeClip: beforeClip,
+                            beforeItem: beforeItem,
                             beforeMedia: beforeMedia,
-                            afterClip: afterClip,
+                            afterItem: beforeItem.mergingLegacyClip(afterClip),
                             afterMedia: afterMedia,
                             invalidation: [.previewFrame, .compositionTopology, .audioMix, .timelineLayout, .userInterface, .persistence]
                         )

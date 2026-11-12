@@ -280,7 +280,7 @@ extension EditorViewModel {
                     let item = AVPlayerItem(asset: prepared.composition)
                     item.videoComposition = prepared.videoComposition
                     item.audioMix = prepared.audioMix
-                    replacePreviewPlayer(with: item)
+                    replacePreviewPlayer(with: item, preservingFrame: true)
                     installPreviewItemHealthObservers(for: item)
                     installTimeObserver()
                     updatePreviewProgress(0.72, generation: generation)
@@ -398,7 +398,7 @@ extension EditorViewModel {
         previewProgress = max(previewProgress, progress)
     }
 
-    func replacePreviewPlayer(with item: AVPlayerItem?) {
+    func replacePreviewPlayer(with item: AVPlayerItem?, preservingFrame: Bool = false) {
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
         scrubSeekGeneration &+= 1
@@ -409,7 +409,7 @@ extension EditorViewModel {
         livePreviewSeekTask = nil
         playbackState.isStartingPlayback = false
         scratchAudio.shutdown()
-        livePreviewPresentation.frame = nil
+        if !preservingFrame || item == nil { livePreviewPresentation.frame = nil }
         renderService.livePreviewState.clearPausedFrameRenderer()
         renderService.livePreviewState.invalidateComposedFrames()
         previewSeekGeneration &+= 1

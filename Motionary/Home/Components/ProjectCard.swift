@@ -17,8 +17,7 @@ struct ProjectCard: View {
     @FocusState private var isProjectNameFocused: Bool
 
     var body: some View {
-        Button(action: onOpen) {
-            ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .topTrailing) {
                 VStack(alignment: .leading, spacing: 10) {
                     cover
                         .frame(maxWidth: .infinity)
@@ -76,11 +75,14 @@ struct ProjectCard: View {
                         .foregroundStyle(MotionaryTheme.textSecondary)
                 }
                 .padding(14)
-                .frame(alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
                 .motionaryGlass(cornerRadius: 20)
             }
-        }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onTapGesture { if !isRenaming { onOpen() } }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { if !isRenaming { onOpen() } }
         .task(id: "\(project.id.uuidString)-\(project.updatedAt.timeIntervalSinceReferenceDate)-\(projectStore.posterRevision)") {
             coverImage = await ProjectCoverLoader.cover(for: project, projectStore: projectStore)
         }

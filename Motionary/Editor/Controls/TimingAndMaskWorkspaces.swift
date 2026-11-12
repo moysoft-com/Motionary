@@ -118,103 +118,225 @@ struct AdjustmentTargetsWorkspaceView: View {
 struct SpeedWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let item: TimelineItem?
-    @State private var speedEditSession: SpeedEditSession?
 
     var body: some View {
-        Group {
-            if let item, case .media(let media) = item,
-                media.mediaType == .video || media.mediaType == .audio
-            {
-                PropertyWorkspaceShell(
-                    viewModel: viewModel,
-                    clip: item.legacyClip(),
-                    title: "Speed",
-                    systemImage: "speedometer",
-                    section: nil
-                ) { _, isEnabled in
-                    VStack(spacing: 14) {
-                        speedScrubber(
-                            value: viewModel.selectedSpeedAtPlayhead
-                                ?? media.speedMap.speed(at: 0),
-                            isEnabled: isEnabled
-                        )
-
-                        EditorWorkspaceOnOffControl(
-                            title: "Pitch follows speed",
-                            isOn: media.pitchFollowsSpeed,
-                            isEnabled: isEnabled,
-                            onChange: viewModel.setSelectedPitchFollowsSpeed
-                        )
-
-                        EditorWorkspaceOnOffControl(
-                            title: "Ripple following clips",
-                            isOn: viewModel.isRippleEditingEnabled,
-                            isEnabled: isEnabled
-                        ) { viewModel.isRippleEditingEnabled = $0 }
-
-                        Text(
-                            viewModel.isRippleEditingEnabled
-                                ? "Following clips move with duration changes."
-                                : "Slower speeds stop before they overlap the next clip."
-                        )
-                        .font(.caption)
-                        .foregroundStyle(MotionaryTheme.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
+        if let item, case .media(let media) = item,
+            media.mediaType == .video || media.mediaType == .audio
+        {
+            let isEditable = viewModel.selectedTimelineItemID == media.id
+                && viewModel.project.itemLocation(id: media.id).map {
+                    !viewModel.project.tracks[$0.track].isLocked
+                } == true
+            if let remap = media.speedMap.timeRemap {
+                TimeRemapWorkspaceView(
+                    viewModel: viewModel, item: media, remap: remap, isEditable: isEditable
+                )
+                .id(media.id)
             } else {
-                TimelineItemWorkspaceShell(
-                    viewModel: viewModel,
-                    item: item,
-                    title: "Speed",
+                ConstantSpeedWorkspaceView(viewModel: viewModel, item: media, isEditable: isEditable)
+                    .id(media.id)
+            }
+        } else {
+            TimelineItemWorkspaceShell(
+                viewModel: viewModel,
+                item: item,
+                title: "Speed",
+                systemImage: "speedometer"
+            ) { _, _ in
+                EditorWorkspaceMessage(
+                    text: "Speed controls are available for video and audio clips.",
                     systemImage: "speedometer"
-                ) { _, _ in
-                    EditorWorkspaceMessage(
-                        text: "Speed controls are available for video and audio clips.",
-                        systemImage: "speedometer"
-                    )
-                }
+                )
             }
         }
-        .onDisappear {
-            finishSpeedEditIfNeeded()
-        }
-        .onChange(of: item?.id) { _, _ in
-            finishSpeedEditIfNeeded()
-        }
+    }
+}
+
+private struct ConstantSpeedWorkspaceView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
+    let item: MediaTimelineItem
+    let isEditable: Bool
+    @State private var session: SpeedEditSession?
+
+    init(viewModel: EditorViewModel, item: MediaTimelineItem, isEditable: Bool) {
+        self.viewModel = viewModel
+        self.item = item
+        self.isEditable = isEditable
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
     }
 
-    private func speedScrubber(
-        value: Double,
-        isEnabled: Bool
-    ) -> some View {
-        EditorValueScrubber(
+    var body: some View {
+        let isEnabled = isEditable && playbackState.currentTime >= item.timelineStart
+            && playbackState.currentTime < item.timelineEnd
+        EditorWorkspaceShell(
             title: "Speed",
             systemImage: "speedometer",
-            value: value,
-            range: 0.1...8,
-            step: 0.05,
-            format: { $0.formatted(.number.precision(.fractionLength(2))) + "×" },
-            onBegan: {
-                speedEditSession = viewModel.beginSelectedSpeedEditAtPlayhead()
-            },
-            onChanged: { speed in
-                guard let speedEditSession else { return }
-                _ = viewModel.setSelectedSpeed(
-                    speed,
-                    in: speedEditSession,
-                    interactive: true
-                )
-            },
-            onEnded: finishSpeedEditIfNeeded
+            isEnabled: isEnabled,
+            content: {
+                VStack(spacing: 14) {
+                    EditorValueScrubber(
+                        title: "Speed",
+                        systemImage: "speedometer",
+                        value: item.speedMap.constantSpeed,
+                        range: 0.1...8,
+                        step: 0.05,
+                        format: { $0.formatted(.number.precision(.fractionLength(2))) + "×" },
+                        onBegan: { session = viewModel.beginSelectedSpeedEditAtPlayhead() },
+                        onChanged: { speed in
+                            guard let session else { return }
+                            viewModel.setSelectedSpeed(speed, in: session, interactive: true)
+                        },
+                        onEnded: finishEdit
+                    )
+                    .disabled(!isEnabled && session == nil)
+
+                    EditorWorkspaceOnOffControl(
+                        title: "Time Remapping",
+                        isOn: item.speedMap.timeRemap != nil,
+                        isEnabled: isEditable
+                    ) { enabled in
+                        finishEdit()
+                        viewModel.setSelectedTimeRemapEnabled(enabled)
+                    }
+
+                    TimingWorkspaceOptions(viewModel: viewModel, item: item, isEnabled: isEnabled)
+                }
+            }
         )
-        .disabled(!isEnabled && speedEditSession == nil)
+        .onDisappear(perform: finishEdit)
     }
 
-    private func finishSpeedEditIfNeeded() {
-        guard speedEditSession != nil else { return }
-        speedEditSession = nil
+    private func finishEdit() {
+        guard session != nil else { return }
+        session = nil
         viewModel.finishInteractiveEdit()
+    }
+}
+
+private struct TimeRemapWorkspaceView: View {
+    @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var playbackState: PlaybackState
+    let item: MediaTimelineItem
+    let remap: TimeRemap
+    let isEditable: Bool
+    @State private var session: TimeRemapEditSession?
+
+    init(
+        viewModel: EditorViewModel, item: MediaTimelineItem, remap: TimeRemap,
+        isEditable: Bool
+    ) {
+        self.viewModel = viewModel
+        self.item = item
+        self.remap = remap
+        self.isEditable = isEditable
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+    }
+
+    var body: some View {
+        let tolerance = viewModel.keyframeTimeTolerance
+        let playhead = playbackState.currentTime - item.timelineStart
+        let isEnabled = isEditable && playhead >= -tolerance && playhead <= remap.duration + tolerance
+        let time = viewModel.timeRemapEditTime(at: playhead, in: remap)
+
+        EditorWorkspaceShell(
+            title: "Time Remapping",
+            systemImage: timeRemapIcon,
+            isEnabled: isEnabled,
+            accessory: {
+                SectionKeyframeButton(
+                    viewModel: viewModel,
+                    itemID: item.id,
+                    section: .speed,
+                    isEnabled: isEnabled
+                )
+            },
+            content: {
+                VStack(spacing: 14) {
+                    let start = item.sourceRange.start
+                    EditorValueScrubber(
+                        title: "Source Time",
+                        systemImage: "clock",
+                        value: start + remap.sourceTime(at: time),
+                        range: start...(start + remap.sourceDuration),
+                        step: min(frameStep, max(remap.sourceDuration / 30, 0.001)),
+                        format: formattedTime,
+                        onBegan: beginEdit,
+                        onChanged: { sourceTime in
+                            guard let session else { return }
+                            viewModel.setSelectedRemappedSourceTime(sourceTime - start, in: session)
+                        },
+                        onEnded: finishEdit
+                    )
+                    .disabled(!isEnabled && session == nil)
+
+                    EditorWorkspaceOnOffControl(
+                        title: "Time Remapping",
+                        isOn: item.speedMap.timeRemap != nil,
+                        isEnabled: isEditable
+                    ) { enabled in
+                        finishEdit()
+                        viewModel.setSelectedTimeRemapEnabled(enabled)
+                    }
+
+                    TimingWorkspaceOptions(viewModel: viewModel, item: item, isEnabled: isEnabled)
+                }
+            }
+        )
+        .onDisappear(perform: finishEdit)
+    }
+
+    private var frameStep: Double {
+        1 / Double(max(viewModel.project.renderSettings.frameRate, 1))
+    }
+
+    private func formattedTime(_ value: Double) -> String {
+        value.formatted(.number.precision(.fractionLength(3))) + " s"
+    }
+
+    private func beginEdit() {
+        finishEdit()
+        session = viewModel.beginSelectedTimeRemapEdit(itemID: item.id)
+    }
+
+    private func finishEdit() {
+        guard session != nil else { return }
+        session = nil
+        viewModel.finishInteractiveEdit()
+    }
+}
+
+private let timeRemapIcon = "clock.arrow.circlepath"
+
+private struct TimingWorkspaceOptions: View {
+    @ObservedObject var viewModel: EditorViewModel
+    let item: MediaTimelineItem
+    let isEnabled: Bool
+
+    var body: some View {
+        EditorWorkspaceOnOffControl(
+            title: "Pitch follows speed",
+            isOn: item.pitchFollowsSpeed,
+            isEnabled: isEnabled,
+            onChange: viewModel.setSelectedPitchFollowsSpeed
+        )
+
+        EditorWorkspaceOnOffControl(
+            title: "Ripple following clips",
+            isOn: viewModel.isRippleEditingEnabled,
+            isEnabled: isEnabled
+        ) { viewModel.isRippleEditingEnabled = $0 }
+
+        if item.speedMap.timeRemap == nil {
+            Text(
+                viewModel.isRippleEditingEnabled
+                    ? "Following clips move with duration changes."
+                    : "Slower speeds stop before they overlap the next clip."
+            )
+            .font(.caption)
+            .foregroundStyle(MotionaryTheme.textSecondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

@@ -48,6 +48,7 @@ struct EditorEasingGraph: View {
     let horizontalInset: CGFloat
     let exposesDefaultHandles: Bool
     let overshoot: EditorEasingGraphOvershoot
+    let reversesVerticalAxis: Bool
     let onHandleBegan: () -> Void
     let onInterpolationChanged: (KeyframeInterpolation) -> Void
     let onHandleEnded: () -> Void
@@ -65,6 +66,7 @@ struct EditorEasingGraph: View {
         horizontalInset: CGFloat,
         exposesDefaultHandles: Bool,
         overshoot: EditorEasingGraphOvershoot,
+        reversesVerticalAxis: Bool = false,
         onHandleBegan: @escaping () -> Void,
         onInterpolationChanged: @escaping (KeyframeInterpolation) -> Void,
         onHandleEnded: @escaping () -> Void
@@ -77,6 +79,7 @@ struct EditorEasingGraph: View {
         self.horizontalInset = horizontalInset
         self.exposesDefaultHandles = exposesDefaultHandles
         self.overshoot = overshoot
+        self.reversesVerticalAxis = reversesVerticalAxis
         self.onHandleBegan = onHandleBegan
         self.onInterpolationChanged = onInterpolationChanged
         self.onHandleEnded = onHandleEnded
@@ -277,7 +280,8 @@ struct EditorEasingGraph: View {
     private func updateHandle(isFirst: Bool, location: CGPoint, plot: CGRect) {
         guard var control1 = workingControl1, var control2 = workingControl2 else { return }
         let rawX = Double((location.x - plot.minX) / max(plot.width, 1))
-        let rawY = Double((plot.maxY - location.y) / max(plot.height, 1))
+        let verticalProgress = Double((plot.maxY - location.y) / max(plot.height, 1))
+        let rawY = reversesVerticalAxis ? 1 - verticalProgress : verticalProgress
         let snappedX = GraphHandleSnapper.edgeValue(rawX, axisLength: plot.width)
         let snappedY = GraphHandleSnapper.edgeValue(rawY, axisLength: plot.height)
         let snapAxes = GraphHandleSnapAxes(horizontal: snappedX.didSnap, vertical: snappedY.didSnap)
@@ -347,7 +351,7 @@ struct EditorEasingGraph: View {
     private func point(x: Double, y: Double, in plot: CGRect) -> CGPoint {
         CGPoint(
             x: plot.minX + plot.width * CGFloat(x),
-            y: plot.maxY - plot.height * CGFloat(y)
+            y: plot.maxY - plot.height * CGFloat(reversesVerticalAxis ? 1 - y : y)
         )
     }
 

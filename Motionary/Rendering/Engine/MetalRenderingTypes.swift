@@ -213,6 +213,7 @@ enum RenderFailurePolicy: Sendable, Equatable {
 /// without rebuilding the AVFoundation composition graph for every drag tick.
 struct LivePreviewClipOverride: @unchecked Sendable {
     var transform: ClipTransform?
+    var speedMap: SpeedMap?
     var visuals: TimelineItemVisuals?
     var shape: ClipShape?
     var text: TextTimelineItem?
@@ -220,6 +221,7 @@ struct LivePreviewClipOverride: @unchecked Sendable {
 
     fileprivate var isEmpty: Bool {
         transform == nil
+            && speedMap == nil
             && visuals == nil
             && shape == nil
             && text == nil
@@ -323,6 +325,13 @@ final class LivePreviewRenderState: @unchecked Sendable {
         return currentRevision
     }
 
+    func setSpeedMap(_ speedMap: SpeedMap, for clipID: UUID) {
+        lock.lock()
+        overrides[clipID, default: LivePreviewClipOverride()].speedMap = speedMap
+        revision &+= 1
+        lock.unlock()
+    }
+
     /// Installs a complete render-facing visual override while retaining any
     /// direct canvas transform or hidden handoff already active for the clip.
     ///
@@ -404,8 +413,9 @@ final class LivePreviewRenderState: @unchecked Sendable {
     func clearVisuals(for clipID: UUID) -> UInt64 {
         lock.lock()
         if let existing = overrides[clipID],
-            existing.visuals != nil || existing.shape != nil || existing.text != nil
+            existing.visuals != nil || existing.shape != nil || existing.text != nil || existing.speedMap != nil
         {
+            overrides[clipID]?.speedMap = nil
             overrides[clipID]?.visuals = nil
             overrides[clipID]?.shape = nil
             overrides[clipID]?.text = nil
@@ -681,6 +691,10 @@ extension RenderClipDescriptor {
         }
         if override.isHidden {
             transform.opacity = AnimatableProperty(baseValue: 0)
+        }
+        var temporalSource = temporalSource
+        if let speedMap = override.speedMap {
+            temporalSource?.speedMap = speedMap
         }
         var result = RenderClipDescriptor(
             trackID: trackID,

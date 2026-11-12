@@ -926,6 +926,22 @@ final class MetalFrameRenderer: @unchecked Sendable {
             return SourceResult(image: image, textAnimationSample: nil,
                 rasterScaleCorrection: CGSize(width: 1, height: 1))
         }
+        if let source = clip.temporalSource, source.speedMap.timeRemap != nil {
+            guard let decoded = try source.remappedImage(at: localTime, quality: plan.quality) else {
+                throw MetalRenderingError.sourceFrameUnavailable
+            }
+            var image = decoded.transformed(by: clip.sourceTransform)
+            if let settings = clip.backgroundRemoval {
+                let matte = settings.requiresForegroundMatte
+                    ? try source.remappedImage(at: localTime, quality: plan.quality, matte: true)?
+                        .transformed(by: clip.backgroundMaskSourceTransform)
+                    : nil
+                image = BackgroundRemovalImageRenderer.apply(settings, matte: matte, to: image,
+                    renderScale: plan.renderScale)
+            }
+            return SourceResult(image: image, textAnimationSample: nil,
+                rasterScaleCorrection: CGSize(width: 1, height: 1))
+        }
         guard clip.trackID != kCMPersistentTrackID_Invalid else {
             return SourceResult(
                 image: nil,

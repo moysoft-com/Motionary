@@ -69,7 +69,7 @@ struct Keyframe<Value: Codable & Equatable>: Identifiable, Codable, Equatable {
 }
 
 /// Normalized control point used by a cubic Bézier keyframe segment.
-struct KeyframeControlPoint: Codable, Equatable, Sendable {
+struct KeyframeControlPoint: Codable, Hashable, Sendable {
     var x: Double
     var y: Double
 
@@ -93,7 +93,7 @@ struct KeyframeControlPoint: Codable, Equatable, Sendable {
 }
 
 /// Interpolation used from one keyframe to the following keyframe.
-enum KeyframeInterpolation: Codable, Equatable, Sendable {
+enum KeyframeInterpolation: Codable, Hashable, Sendable {
     case linear
     case hold
     case spring(start: Double, end: Double, damping: Double, frequency: Double)

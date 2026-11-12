@@ -8,13 +8,22 @@ struct EffectTemporalSource: Sendable {
     let url: URL
     let sourceStart: Double
     let sourceDuration: Double
-    let speedMap: SpeedMap
+    var speedMap: SpeedMap
     var adjustments = AdjustmentSettings()
     var backgroundRemoval: BackgroundRemovalSettings? = nil
     var backgroundMatteURL: URL? = nil
     var sourceOrientation = CGAffineTransform.identity
     var matteOrientation = CGAffineTransform.identity
     var depthSourceRevision: String?
+    var remapVideo: RemapVideoSource? = nil
+    var remapMatte: RemapVideoSource? = nil
+
+    func remappedImage(at clipTime: Double, quality: RenderQualityProfile,
+                       matte: Bool = false) throws -> CIImage? {
+        guard let source = matte ? remapMatte : remapVideo else { return nil }
+        let sourceTime = sourceStart + speedMap.sourceTime(at: clipTime, sourceDuration: sourceDuration)
+        return try source.image(at: sourceTime, quality: quality)
+    }
 
     func image(at clipTime: Double, fitting extent: CGRect, quality: RenderQualityProfile,
                adjustmentTime: Double? = nil, applyCutout: Bool = false,
@@ -53,6 +62,41 @@ struct EffectTemporalSource: Sendable {
                 matte: matte.map { fit($0, orientation: matteOrientation) }, to: fitted, renderScale: renderScale)
         }
         return EffectColorAdjustments.apply(adjustments, to: fitted, at: adjustmentTime ?? clipTime)
+    }
+}
+
+/// The display decoder can read an all-intra proxy while temporal effects
+/// continue to address the original source. Both share the authored time map.
+struct RemapVideoSource: Sendable {
+    let url: URL
+    let rawSize: CGSize
+    let timeRange: CMTimeRange
+    let decoder: RemapFrameDecoder
+    var sourceOffset = 0.0
+
+    func image(at sourceTime: Double, quality: RenderQualityProfile) throws -> CIImage {
+        guard rawSize.width > 0, rawSize.height > 0 else {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
+        let requested = CMTime(seconds: sourceTime - sourceOffset, preferredTimescale: 60_000)
+        let last = max(timeRange.start, timeRange.end - CMTime(value: 1, timescale: 60_000))
+        let target = min(max(requested, timeRange.start), last)
+        if let buffer = try? decoder.frame(at: target) {
+            return VideoSourceGeometry.engineImage(CIImage(cvPixelBuffer: buffer))
+        }
+        let limit: CGFloat = switch quality {
+        case .interactive: 960
+        case .balanced: 1920
+        case .export: max(rawSize.width, rawSize.height)
+        }
+        let scale = min(1, limit / max(rawSize.width, rawSize.height, 1))
+        let image = try EffectTemporalFrameStore.shared.image(
+            url: url, time: sourceTime - sourceOffset,
+            size: CGSize(width: rawSize.width * scale, height: rawSize.height * scale),
+            quality: quality, videoSampleRanges: [timeRange])
+        return image.transformed(by: CGAffineTransform(
+            scaleX: rawSize.width / image.extent.width,
+            y: rawSize.height / image.extent.height))
     }
 }
 

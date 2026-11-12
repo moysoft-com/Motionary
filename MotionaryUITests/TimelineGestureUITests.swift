@@ -101,6 +101,16 @@ final class TimelineGestureUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["test-selection"].label, firstID)
     }
 
+    func testTimelineScrubsToTheVisibleEndAndBack() {
+        let timeline = app.descendants(matching: .any)["editor-timeline"].firstMatch
+        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        timeline.swipeLeft()
+        timeline.swipeLeft()
+        XCTAssertEqual(app.staticTexts["test-time"].label, "2.500")
+        timeline.swipeRight()
+        XCTAssertLessThan(Double(app.staticTexts["test-time"].label) ?? 2.5, 2.25)
+    }
+
     private func itemPoint(row: Int) -> XCUICoordinate {
         // Use the actual item geometry: row padding, safe-area insets and
         // device size must not move a test gesture onto empty timeline space.

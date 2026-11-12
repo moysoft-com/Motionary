@@ -15,21 +15,20 @@ struct SetRenderSettingsCommand: EditorCommand {
 }
 
 struct ReplaceClipMediaCommand: EditorCommand {
-    let clipID: UUID
-    let beforeClip: TimelineClip
+    let beforeItem: TimelineItem
     let beforeMedia: MediaAsset?
-    let afterClip: TimelineClip
+    let afterItem: TimelineItem
     let afterMedia: MediaAsset
     let invalidation: EditorInvalidation
 
     func apply(to project: inout EditorProject) {
-        project.replaceClip(id: clipID, with: afterClip)
+        project.replaceItem(id: afterItem.id, with: afterItem)
         project.mediaLibrary[afterMedia.id] = afterMedia
         project.synchronizeMediaLibrary()
     }
 
     func undo(on project: inout EditorProject) {
-        project.replaceClip(id: clipID, with: beforeClip)
+        project.replaceItem(id: beforeItem.id, with: beforeItem)
         if let beforeMedia {
             project.mediaLibrary[beforeMedia.id] = beforeMedia
         } else {

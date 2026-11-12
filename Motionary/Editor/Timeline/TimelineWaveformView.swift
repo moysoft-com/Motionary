@@ -274,8 +274,10 @@ enum TimelineAudioWaveformLoader {
 
         return sourceSamples.indices.map { index in
             let progress = Double(index) / Double(sourceSamples.count - 1)
+            let time = progress * timelineDuration
+            if speedMap.timeRemap?.holdsSource(at: time) == true { return 0.015 }
             let sourceTime = speedMap.sourceTime(
-                at: progress * timelineDuration,
+                at: time,
                 sourceDuration: sourceDuration
             )
             let sourcePosition = min(

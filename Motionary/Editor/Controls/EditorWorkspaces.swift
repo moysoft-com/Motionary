@@ -1181,7 +1181,9 @@ private extension View {
     func effectPagerOpacity(pageWidth: CGFloat) -> some View {
         modifier(EffectPagerOpacityModifier(pageWidth: pageWidth))
     }
+}
 
+extension View {
     func workspaceHeaderAccessoryFrame() -> some View {
         self
             .frame(width: 16, height: 16)
@@ -2410,7 +2412,7 @@ struct SectionKeyframeButton: View {
         .buttonStyle(.plain)
         .disabled(!isEnabled || availableTargetCount == 0)
         .opacity(availableTargetCount == 0 ? 0.3 : 1)
-        .accessibilityLabel("\(section.rawValue) keyframe")
+        .accessibilityLabel(section == .speed ? "Time Remapping keyframe" : "\(section.rawValue) keyframe")
         .accessibilityValue(isCurrent ? "At playhead" : (hasAny ? "Active" : "Inactive"))
         .accessibilityHint(
             isCurrent ? "Removes the keyframe at the playhead." : "Adds a keyframe at the playhead."
@@ -2423,6 +2425,9 @@ struct SectionKeyframeButton: View {
 
     private var availableTargetCount: Int {
         guard let item else { return 0 }
+        if section == .speed, case .media(let media) = item {
+            return media.speedMap.timeRemap == nil ? 0 : 1
+        }
         if let clip = item.visualEditingClip() {
             return clip.keyframeTargets(in: section).count
         }
@@ -2435,6 +2440,11 @@ struct SectionKeyframeButton: View {
     private var hasKeyframeAtCurrentTime: Bool {
         guard let item else { return false }
         switch item {
+        case .media(let media) where section == .speed:
+            return media.speedMap.timeRemap?.keyframeIndex(
+                at: playbackState.currentTime - item.timelineStart,
+                tolerance: viewModel.keyframeTimeTolerance
+            ) != nil
         case .text(let text):
             let time = viewModel.snappedTextKeyframeTime(
                 playbackState.currentTime - text.timelineStart,

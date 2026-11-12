@@ -253,7 +253,7 @@ struct TimelineBeatMarker: Equatable, Identifiable {
     let localTimelineTime: Double
     let strength: Double
 
-    var id: Int64 { Int64((sourceTime * 1_000_000).rounded()) }
+    var id: Int64 { Int64((localTimelineTime * 1_000_000).rounded()) }
 }
 
 extension MediaTimelineItem {
@@ -265,16 +265,13 @@ extension MediaTimelineItem {
             let included = division > 0 && (event.division == division || (division == 4 && event.division == 2))
             return included ? (event.sourceTime, 0.35) : nil
         }
-        return (beatEvents + subdivisionEvents).compactMap { event in
+        return (beatEvents + subdivisionEvents).flatMap { event -> [TimelineBeatMarker] in
             guard event.time >= sourceRange.start - 0.000_001,
-                event.time <= sourceRange.end + 0.000_001 else { return nil }
+                event.time <= sourceRange.end + 0.000_001 else { return [] }
             let localSourceTime = min(max(event.time - sourceRange.start, 0), sourceRange.duration)
-            let localTimelineTime = speedMap.timelineTime(at: localSourceTime, sourceDuration: sourceRange.duration)
-            let edgeExclusion = 0.16
-            guard localTimelineTime >= edgeExclusion,
-                localTimelineTime <= timelineDuration - edgeExclusion else { return nil }
-            return TimelineBeatMarker(sourceTime: event.time, localTimelineTime: localTimelineTime,
-                                      strength: event.strength)
+            return speedMap.timelineTimes(at: localSourceTime, sourceDuration: sourceRange.duration)
+                .filter { $0 >= 0.16 && $0 <= timelineDuration - 0.16 }
+                .map { TimelineBeatMarker(sourceTime: event.time, localTimelineTime: $0, strength: event.strength) }
         }.sorted { $0.sourceTime < $1.sourceTime }
     }
 }

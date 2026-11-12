@@ -780,6 +780,7 @@ private struct RenderDescriptorCompilationInput: @unchecked Sendable {
     let backgroundMaskTrackIDs: [UUID: CMPersistentTrackID]
     let backgroundMaskTransforms: [UUID: CGAffineTransform]
     let stillImageValidationCache: StillImageValidationCache
+    let temporalSources: [UUID: EffectTemporalSource]
 }
 
 /// The render-facing projection of a typed timeline item. Keeping this value
@@ -1051,7 +1052,10 @@ final class CompositionRenderService {
                 visualTrackIDs: graph.rendered.visualTrackIDs,
                 sourceTransforms: graph.rendered.sourceTransforms,
                 backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
-                backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
+                backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms,
+                temporalSources: Dictionary(uniqueKeysWithValues: graph.renderDescriptors.compactMap { clip in
+                    clip.temporalSource.map { (clip.clipID, $0) }
+                })
             )
             descriptors = try await DepthBakeStore.prepare(
                 compiled, projectDirectory: depthCacheDirectory, progressOwnerID: depthProgressOwnerID
@@ -1410,15 +1414,18 @@ final class CompositionRenderService {
                     }
                     continue
                 }
-                audioTrackIDs[mediaItem.id] = compositionAudioTrack.trackID
-
-                try insertRetimedTrack(
+                guard try await insertRetimedTrack(
                     sourceTrack: sourceAudioTrack,
+                    sourceURL: metadata.asset.url,
                     compositionTrack: compositionAudioTrack,
                     sourceRange: mediaItem.sourceRange,
                     timelineStart: mediaItem.timelineStart,
                     speedMap: mediaItem.speedMap
-                )
+                ) else {
+                    composition.removeTrack(compositionAudioTrack)
+                    continue
+                }
+                audioTrackIDs[mediaItem.id] = compositionAudioTrack.trackID
                 audioParameters.append(
                     makeAudioParameters(
                         track: compositionAudioTrack,
@@ -1436,7 +1443,7 @@ final class CompositionRenderService {
         let duration = max(project.duration, 0)
         // A clip is never a reliable project clock: it can end before audio,
         // another layer, or a gap. Keep frame requests running to project end.
-        if duration > 0, !renderClips.isEmpty {
+        if duration > 0, !renderClips.isEmpty || composition.duration < cmTime(duration) {
             videoClockTrackID = try await insertGeneratedVideoClock(
                 duration: duration,
                 frameRate: renderSettings.frameRate,
@@ -1873,47 +1880,62 @@ final class CompositionRenderService {
             return
         }
 
-        let destination: AVMutableCompositionTrack?
+        let samplesSourceTime = source.mediaType == .video && source.speedMap.timeRemap != nil
         let usesSharedTrack = previewVideoTracks != nil && source.mediaType == .video
-            && !source.speedMap.hasVariableSpeed && source.speedMap.speed(at: 0) == 1
-        if usesSharedTrack {
-            destination = try previewVideoTracks?.insert(
+            && !samplesSourceTime && source.speedMap.constantSpeed == 1
+        let compositionVideoTrack: AVMutableCompositionTrack?
+        if samplesSourceTime {
+            compositionVideoTrack = nil
+        } else if usesSharedTrack {
+            compositionVideoTrack = try previewVideoTracks?.insert(
                 CMTimeRange(start: cmTime(source.sourceRange.start), duration: cmTime(source.sourceRange.duration)),
                 from: sourceVideoTrack, url: videoMetadata.asset.url, at: cmTime(source.timelineStart),
                 prerollGap: CMTime(value: 1, timescale: max(frameRate, 1)), into: composition
             )
         } else {
-            destination = composition.addMutableTrack(
-                withMediaType: .video,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            )
+            compositionVideoTrack = composition.addMutableTrack(
+                withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
         }
-        guard let compositionVideoTrack = destination else {
+        guard samplesSourceTime || compositionVideoTrack != nil else {
             if sourceAvailabilityPolicy == .required {
                 throw CompositionRenderError.visualTrackUnavailable(source.name)
             }
             return
         }
-        visualTrackIDs[source.id] = compositionVideoTrack.trackID
+        let videoTrackID = compositionVideoTrack?.trackID ?? kCMPersistentTrackID_Invalid
+        visualTrackIDs[source.id] = videoTrackID
 
-        if source.mediaType == .image {
-            try insertLoopedLegacyStillVideo(
-                sourceRange: source.sourceRange,
-                timelineStart: source.timelineStart,
-                originalDuration: mediaAsset.originalDuration,
-                assetDuration: metadata.duration,
-                sourceVideoTrack: sourceVideoTrack,
-                compositionVideoTrack: compositionVideoTrack,
-                frameRate: frameRate
-            )
-        } else if !usesSharedTrack {
-            try insertRetimedTrack(
-                sourceTrack: sourceVideoTrack,
-                compositionTrack: compositionVideoTrack,
-                sourceRange: source.sourceRange,
-                timelineStart: source.timelineStart,
-                speedMap: source.speedMap
-            )
+        if let compositionVideoTrack {
+            if source.mediaType == .image {
+                try insertLoopedLegacyStillVideo(
+                    sourceRange: source.sourceRange, timelineStart: source.timelineStart,
+                    originalDuration: mediaAsset.originalDuration, assetDuration: metadata.duration,
+                    sourceVideoTrack: sourceVideoTrack, compositionVideoTrack: compositionVideoTrack,
+                    frameRate: frameRate)
+            } else if !usesSharedTrack {
+                try await insertRetimedTrack(
+                    sourceTrack: sourceVideoTrack, sourceURL: videoMetadata.asset.url,
+                    compositionTrack: compositionVideoTrack, sourceRange: source.sourceRange,
+                    timelineStart: source.timelineStart, speedMap: source.speedMap)
+            }
+        }
+        var temporalSource: EffectTemporalSource?
+        if source.mediaType == .video {
+            let trackRange = try await sourceVideoTrack.load(.timeRange)
+            let requestedRange = CMTimeRange(start: retimingTime(source.sourceRange.start),
+                                             end: retimingTime(source.sourceRange.end))
+            let intersection = trackRange.intersection(requestedRange)
+            let videoRange = intersection.isEmpty ? trackRange : intersection
+            let rawSize = videoMetadata.naturalSize ?? .zero
+            let nominalFrameRate = try await sourceVideoTrack.load(.nominalFrameRate)
+            temporalSource = EffectTemporalSource(
+                url: mediaAsset.url, sourceStart: source.sourceRange.start,
+                sourceDuration: source.sourceRange.duration, speedMap: source.speedMap,
+                backgroundMatteURL: mediaAsset.backgroundRemovalArtifact?.url,
+                remapVideo: RemapVideoSource(
+                    url: videoMetadata.asset.url, rawSize: rawSize, timeRange: videoRange,
+                    decoder: RemapFrameDecoder(asset: videoMetadata.asset, track: sourceVideoTrack,
+                        range: trackRange, rawSize: rawSize, frameRate: nominalFrameRate)))
         }
 
         let sourceTransform = sourcePixelTransform.concatenating(VideoSourceGeometry.normalizedTransform(
@@ -1940,23 +1962,32 @@ final class CompositionRenderService {
                 do {
                     let maskMetadata = try await mediaLookup.metadata(for: artifact.url)
                     try Task.checkCancellation()
-                    guard let maskSourceTrack = maskMetadata.videoTrack,
-                        let maskCompositionTrack = composition.addMutableTrack(
-                            withMediaType: .video,
-                            preferredTrackID: kCMPersistentTrackID_Invalid
-                        )
-                    else {
+                    guard let maskSourceTrack = maskMetadata.videoTrack else {
                         throw CompositionRenderError.backgroundRemovalUnavailable(source.name)
                     }
                     let maskSourceRange = TimeRangeValue(
                         start: max(source.sourceRange.start - artifact.sourceRange.start, 0),
                         duration: source.sourceRange.duration
                     )
-                    try insertRetimedTrack(sourceTrack: maskSourceTrack,
-                        compositionTrack: maskCompositionTrack, sourceRange: maskSourceRange,
-                        timelineStart: source.timelineStart, speedMap: source.speedMap)
-                    backgroundMaskTrackID = maskCompositionTrack.trackID
-                    backgroundMaskTrackIDs[source.id] = maskCompositionTrack.trackID
+                    let maskVideoRange = try await maskSourceTrack.load(.timeRange)
+                    let rawSize = maskMetadata.naturalSize ?? .zero
+                    let nominalFrameRate = try await maskSourceTrack.load(.nominalFrameRate)
+                    temporalSource?.remapMatte = RemapVideoSource(
+                        url: artifact.url, rawSize: rawSize, timeRange: maskVideoRange,
+                        decoder: RemapFrameDecoder(asset: maskMetadata.asset, track: maskSourceTrack,
+                            range: maskVideoRange, rawSize: rawSize, frameRate: nominalFrameRate),
+                        sourceOffset: artifact.sourceRange.start)
+                    if !samplesSourceTime {
+                        guard let maskCompositionTrack = composition.addMutableTrack(
+                            withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+                        else { throw CompositionRenderError.backgroundRemovalUnavailable(source.name) }
+                        try await insertRetimedTrack(
+                            sourceTrack: maskSourceTrack, sourceURL: maskMetadata.asset.url,
+                            compositionTrack: maskCompositionTrack, sourceRange: maskSourceRange,
+                            timelineStart: source.timelineStart, speedMap: source.speedMap)
+                        backgroundMaskTrackID = maskCompositionTrack.trackID
+                        backgroundMaskTrackIDs[source.id] = maskCompositionTrack.trackID
+                    }
                     backgroundMaskSourceTransform = VideoSourceGeometry.normalizedTransform(
                         naturalSize: maskMetadata.naturalSize ?? .zero,
                         transform: maskMetadata.preferredTransform
@@ -1977,16 +2008,16 @@ final class CompositionRenderService {
         // Double range, which otherwise schedules a source lookup with no
         // decoded buffer.
         let renderRange: CMTimeRange
-        if usesSharedTrack {
+        if usesSharedTrack || samplesSourceTime {
             renderRange = CMTimeRange(
                 start: cmTime(source.timelineStart),
-                duration: cmTime(source.timelineDuration)
+                end: cmTime(source.timelineStart + source.timelineDuration)
             )
         } else {
             // A composition track includes the empty edit preceding a clip
             // inserted after time zero. Its timeRange therefore describes the
             // whole track, not the interval containing decoded video.
-            let populatedSegments = compositionVideoTrack.segments.filter { !$0.isEmpty }
+            let populatedSegments = compositionVideoTrack?.segments.filter { !$0.isEmpty } ?? []
             if let first = populatedSegments.first, let last = populatedSegments.last {
                 renderRange = CMTimeRange(
                     start: first.timeMapping.target.start,
@@ -1998,7 +2029,7 @@ final class CompositionRenderService {
         }
         renderClips.append(
             RenderClipDescriptor(
-                trackID: compositionVideoTrack.trackID,
+                trackID: videoTrackID,
                 backgroundMaskTrackID: backgroundMaskTrackID,
                 clipID: source.id,
                 timelineStart: renderRange.start.seconds,
@@ -2015,15 +2046,7 @@ final class CompositionRenderService {
                 shape: source.shape,
                 text: nil,
                 renderOrder: renderOrder,
-                temporalSource: source.mediaType == .video
-                    ? EffectTemporalSource(
-                        url: mediaAsset.url,
-                        sourceStart: source.sourceRange.start,
-                        sourceDuration: source.sourceRange.duration,
-                        speedMap: source.speedMap,
-                        backgroundMatteURL: mediaAsset.backgroundRemovalArtifact?.url
-                    )
-                    : nil
+                temporalSource: temporalSource
             )
         )
         renderOrder += 1
@@ -2037,14 +2060,18 @@ final class CompositionRenderService {
                 preferredTrackID: kCMPersistentTrackID_Invalid
             )
         {
-            audioTrackIDs[source.id] = compositionAudioTrack.trackID
-            try insertRetimedTrack(
+            guard try await insertRetimedTrack(
                 sourceTrack: sourceAudioTrack,
+                sourceURL: metadata.asset.url,
                 compositionTrack: compositionAudioTrack,
                 sourceRange: source.sourceRange,
                 timelineStart: source.timelineStart,
                 speedMap: source.speedMap
-            )
+            ) else {
+                composition.removeTrack(compositionAudioTrack)
+                return
+            }
+            audioTrackIDs[source.id] = compositionAudioTrack.trackID
             audioParameters.append(
                 makeAudioParameters(
                     track: compositionAudioTrack,
@@ -2058,14 +2085,16 @@ final class CompositionRenderService {
         }
     }
 
+    @discardableResult
     private func insertRetimedTrack(
         sourceTrack: AVAssetTrack,
+        sourceURL: URL,
         compositionTrack: AVMutableCompositionTrack,
         sourceRange: TimeRangeValue,
         timelineStart: Double,
         speedMap: SpeedMap
-    ) throws {
-        if !speedMap.hasVariableSpeed {
+    ) async throws -> Bool {
+        guard let remap = speedMap.timeRemap, remap.hasVariableSpeed else {
             let sourceTimeRange = CMTimeRange(
                 start: cmTime(sourceRange.start),
                 duration: cmTime(sourceRange.duration)
@@ -2087,33 +2116,87 @@ final class CompositionRenderService {
                     toDuration: cmTime(timelineDuration)
                 )
             }
-            return
+            return true
         }
 
-        let sourceTimeRange = CMTimeRange(
-            start: retimingTime(sourceRange.start),
-            duration: retimingTime(sourceRange.duration)
-        )
-        try compositionTrack.insertTimeRange(
-            sourceTimeRange,
-            of: sourceTrack,
-            at: retimingTime(timelineStart)
-        )
-
-        // Scale an already contiguous edit from the end towards the start. Inserting
-        // separately scaled source ranges can leave sub-frame gaps at their joins;
-        // the custom compositor then receives no source frame and renders black.
-        for segment in speedMap.renderSegments(sourceDuration: sourceRange.duration).reversed() {
-            if abs(segment.sourceDuration - segment.timelineDuration) > 0.000_5 {
-                compositionTrack.scaleTimeRange(
-                    CMTimeRange(
-                        start: retimingTime(timelineStart + segment.sourceStart),
-                        duration: retimingTime(segment.sourceDuration)
-                    ),
-                    toDuration: retimingTime(segment.timelineDuration)
-                )
+        let mediaRange = try await sourceTrack.load(.timeRange)
+        let reversed: (url: URL, track: AVAssetTrack, duration: Double)?
+        if remap.hasReverse {
+            let url = try await ReversedAudioStore.shared.reversedURL(for: sourceURL, track: sourceTrack, range: mediaRange)
+            try Task.checkCancellation()
+            let asset = AVURLAsset(url: url)
+            guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
+                throw CocoaError(.fileReadCorruptFile)
             }
+            reversed = (url, track, try await track.load(.timeRange).duration.seconds)
+        } else {
+            reversed = nil
         }
+
+        var edits: [AVCompositionTrackSegment] = []
+        var targetCursor = CMTime.zero
+        var elapsed = 0.0
+        var previousSourceEnd: CMTime?
+        var previousURL: URL?
+        let tick = CMTime(value: 1, timescale: retimingTimescale)
+        for segment in remap.renderSegments() {
+            let segmentStart = elapsed
+            elapsed += segment.timelineDuration
+            let sourceA = sourceRange.start + segment.sourceStart
+            let sourceB = sourceA + segment.sourceDuration
+            let lower = max(min(sourceA, sourceB), mediaRange.start.seconds)
+            let upper = min(max(sourceA, sourceB), mediaRange.end.seconds)
+            guard upper > lower else { continue }
+
+            let backwards = sourceB < sourceA
+            let first = backwards ? upper : lower
+            let last = backwards ? lower : upper
+            let targetA = retimingTime(timelineStart + segmentStart
+                + (first - sourceA) / segment.sourceDuration * segment.timelineDuration)
+            let targetB = retimingTime(timelineStart + segmentStart
+                + (last - sourceA) / segment.sourceDuration * segment.timelineDuration)
+            var start: CMTime
+            let end: CMTime
+            let trackID: CMPersistentTrackID
+            let url: URL
+            if backwards, let reversed {
+                start = retimingTime(max(0, reversed.duration - (upper - mediaRange.start.seconds)))
+                end = retimingTime(min(reversed.duration, reversed.duration - (lower - mediaRange.start.seconds)))
+                trackID = reversed.track.trackID
+                url = reversed.url
+            } else {
+                start = retimingTime(lower)
+                end = retimingTime(upper)
+                trackID = sourceTrack.trackID
+                url = sourceURL
+            }
+            let adjacent = targetA - targetCursor <= tick
+            let targetStart = adjacent ? targetCursor : targetA
+            if adjacent, let previousSourceEnd, previousURL == url,
+                abs((previousSourceEnd - start).seconds) <= tick.seconds
+            {
+                start = previousSourceEnd
+            }
+            guard end > start, targetB > targetStart else { continue }
+            if targetStart > targetCursor {
+                edits.append(AVCompositionTrackSegment(timeRange: CMTimeRange(start: targetCursor, end: targetStart)))
+            }
+            edits.append(AVCompositionTrackSegment(
+                url: url, trackID: trackID,
+                sourceTimeRange: CMTimeRange(start: start, end: end),
+                targetTimeRange: CMTimeRange(start: targetStart, end: targetB)))
+            targetCursor = targetB
+            previousSourceEnd = end
+            previousURL = url
+        }
+        guard !edits.isEmpty else { return false }
+        let targetEnd = retimingTime(timelineStart + remap.duration)
+        if targetCursor < targetEnd {
+            edits.append(AVCompositionTrackSegment(timeRange: CMTimeRange(start: targetCursor, end: targetEnd)))
+        }
+        try compositionTrack.validateSegments(edits)
+        compositionTrack.segments = edits
+        return true
     }
 
     /// Schema-10 image assets were stored as one-frame JPEG movies. Keep that
@@ -2228,7 +2311,8 @@ final class CompositionRenderService {
         visualTrackIDs: [UUID: CMPersistentTrackID],
         sourceTransforms: [UUID: CGAffineTransform],
         backgroundMaskTrackIDs: [UUID: CMPersistentTrackID],
-        backgroundMaskTransforms: [UUID: CGAffineTransform]
+        backgroundMaskTransforms: [UUID: CGAffineTransform],
+        temporalSources: [UUID: EffectTemporalSource]
     ) async throws -> [RenderClipDescriptor] {
         let input = RenderDescriptorCompilationInput(
             project: project,
@@ -2236,7 +2320,8 @@ final class CompositionRenderService {
             sourceTransforms: sourceTransforms,
             backgroundMaskTrackIDs: backgroundMaskTrackIDs,
             backgroundMaskTransforms: backgroundMaskTransforms,
-            stillImageValidationCache: stillImageValidationCache
+            stillImageValidationCache: stillImageValidationCache,
+            temporalSources: temporalSources
         )
         let compilationTask = Task.detached(priority: .userInitiated) {
             let signpostID = OSSignpostID(log: compositionMetricsLog)
@@ -2324,12 +2409,7 @@ final class CompositionRenderService {
                             shape: nil,
                             text: nil,
                             renderOrder: renderOrder,
-                            temporalSource: mediaItem.mediaType == .video
-                                ? project.mediaLibrary[mediaItem.mediaID].map {
-                                    EffectTemporalSource(url: $0.url, sourceStart: mediaItem.sourceRange.start,
-                                        sourceDuration: mediaItem.sourceRange.duration, speedMap: mediaItem.speedMap,
-                                        backgroundMatteURL: $0.backgroundRemovalArtifact?.url)
-                                } : nil
+                            temporalSource: input.temporalSources[mediaItem.id]
                         )
                     )
                     renderOrder += 1

@@ -150,7 +150,8 @@ extension EditorViewModel {
         effectID: UUID? = nil
     ) -> KeyframeSegment? {
         if section == .speed {
-            return nil
+            guard case .media(let item) = selectedTimelineItem else { return nil }
+            return timeRemapGraphSegment(for: item)
         }
         if let item = selectedTextItem {
             guard currentTime >= item.timelineStart, currentTime < item.timelineEnd else { return nil }
@@ -231,6 +232,11 @@ extension EditorViewModel {
 
     func refreshGraphSegment() {
         guard let segment = graphSegment else { return }
+        if segment.section == .speed {
+            graphSegment = candidateGraphSegment(in: .speed)
+            if let graphSegment { displayedGraphSegment = graphSegment }
+            return
+        }
         if case .text(let item) = project.item(id: segment.clipID) {
             graphSegment = textGraphSegmentCandidate(
                 in: segment.section,
@@ -372,6 +378,10 @@ extension EditorViewModel {
     }
 
     func toggleKeyframeSection(_ section: KeyframeSection) {
+        if section == .speed {
+            toggleSelectedTimeRemapKeyframe()
+            return
+        }
         if selectedTextItem != nil {
             toggleTextKeyframeSection(section)
             return
@@ -505,7 +515,10 @@ extension EditorViewModel {
         startTime: Double,
         interactive: Bool = false
     ) {
-        guard section != .speed else { return }
+        if section == .speed {
+            setSelectedTimeRemapInterpolation(interpolation, startTime: startTime, interactive: interactive)
+            return
+        }
         if selectedTextItem != nil {
             setTextInterpolation(
                 interpolation,

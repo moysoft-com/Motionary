@@ -337,10 +337,11 @@ extension EditorViewModel {
         let maxForward = max(referenceDuration - 0.1, 0)
         let availableBefore = referenceStart - previousEnd
         let maxBackward: Double
-        switch currentItem {
+        switch baseline ?? currentItem {
         case .media(let media):
             maxBackward = -min(
-                referenceRange.start / media.speedMap.speed(at: 0),
+                media.speedMap.timeRemap == nil
+                    ? referenceRange.start / media.speedMap.constantSpeed : availableBefore,
                 availableBefore
             )
         case .shape:
@@ -418,10 +419,11 @@ extension EditorViewModel {
         let maxForward = max(referenceDuration - 0.1, 0)
         let availableBefore = referenceStart - previousEnd
         let maxBackward: Double
-        switch item {
+        switch baseline ?? item {
         case .media(let media):
             maxBackward = -min(
-                referenceRange.start / media.speedMap.speed(at: 0),
+                media.speedMap.timeRemap == nil
+                    ? referenceRange.start / media.speedMap.constantSpeed : availableBefore,
                 availableBefore
             )
         case .shape:
@@ -478,7 +480,7 @@ extension EditorViewModel {
         let referenceEnd = baseline?.timelineEnd ?? currentItem.timelineEnd
         let referenceDuration = baseline?.placementDuration ?? currentItem.placementDuration
         let nextStart = project.neighborBounds(for: currentItem.id, in: location.track).nextStart
-        let sourceForwardLimit = sourceForwardTrimLimit(for: currentItem, range: referenceRange)
+        let sourceForwardLimit = sourceForwardTrimLimit(for: baseline ?? currentItem, range: referenceRange)
         let maxForward = min(sourceForwardLimit, max(nextStart - referenceEnd, 0))
         let maxBackward = -max(referenceDuration - 0.1, 0)
         var applied = min(max(seconds, maxBackward), maxForward)
@@ -545,7 +547,7 @@ extension EditorViewModel {
         let referenceEnd = baseline?.timelineEnd ?? item.timelineEnd
         let referenceDuration = baseline?.placementDuration ?? item.placementDuration
         let nextStart = project.neighborBounds(for: item.id, in: location.track).nextStart
-        let sourceForwardLimit = sourceForwardTrimLimit(for: item, range: referenceRange)
+        let sourceForwardLimit = sourceForwardTrimLimit(for: baseline ?? item, range: referenceRange)
         let maxForward = min(sourceForwardLimit, max(nextStart - referenceEnd, 0))
         let maxBackward = -max(referenceDuration - 0.1, 0)
         var applied = min(max(seconds, maxBackward), maxForward)
@@ -580,7 +582,7 @@ extension EditorViewModel {
     private func sourceForwardTrimLimit(for item: TimelineItem, range: TimeRangeValue) -> Double {
         switch item {
         case .media(let media):
-            if media.mediaType == .image { return Double.greatestFiniteMagnitude / 4 }
+            if media.mediaType == .image || media.speedMap.timeRemap != nil { return Double.greatestFiniteMagnitude / 4 }
             let sourceDuration = max(
                 (project.mediaLibrary[media.mediaID]?.originalDuration ?? range.end) - range.end,
                 0

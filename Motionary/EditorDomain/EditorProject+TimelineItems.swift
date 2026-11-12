@@ -1,4 +1,4 @@
-// Typed timeline item helpers for compound sequences, text, and static speed.
+// Typed timeline item helpers for compound sequences, text, and speed.
 
 import Foundation
 
@@ -131,7 +131,7 @@ extension EditorProject {
     mutating func setSpeedMap(for itemID: UUID, speedMap: SpeedMap) {
         guard let location = itemLocation(id: itemID) else { return }
         guard case .media(var item) = tracks[location.track].items[location.item] else { return }
-        item.speedMap = .constant(speed: speedMap.speed(at: 0))
+        item.speedMap = speedMap.rebased(from: 0, duration: item.sourceRange.duration)
         tracks[location.track].items[location.item] = .media(item)
     }
 
