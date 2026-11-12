@@ -141,38 +141,45 @@ struct EditorProject: Identifiable, Codable, Equatable {
         separateAdjustmentTracks()
 
         var referencedIDs = Set<MediaID>()
-        for trackIndex in tracks.indices {
-            let migrationSources = tracks[trackIndex].consumePendingMigrationSources()
-            for itemIndex in tracks[trackIndex].items.indices {
-                guard var clip = tracks[trackIndex].items[itemIndex].legacyClip() else { continue }
-                let mediaID = clip.mediaID
-                var shouldRewriteItem = false
+        func synchronizeTracks(_ tracks: inout [TimelineTrack], library: inout [MediaID: MediaAsset]) {
+            for trackIndex in tracks.indices {
+                let migrationSources = tracks[trackIndex].consumePendingMigrationSources()
+                for itemIndex in tracks[trackIndex].items.indices {
+                    guard var clip = tracks[trackIndex].items[itemIndex].legacyClip() else { continue }
+                    let mediaID = clip.mediaID
+                    var shouldRewriteItem = false
 
-                if let migrationSource = migrationSources[mediaID] {
-                    mediaLibrary[mediaID] = MediaAsset(id: mediaID, source: migrationSource)
-                    clip.mediaType = migrationSource.mediaType
-                    shouldRewriteItem = true
-                } else if mediaLibrary[mediaID] == nil {
-                    mediaLibrary[mediaID] = MediaAsset(
-                        id: mediaID,
-                        source: ClipSource(
-                            url: URL(fileURLWithPath: clip.name),
-                            mediaType: clip.mediaType,
-                            originalDuration: clip.sourceRange.duration
+                    if let migrationSource = migrationSources[mediaID] {
+                        library[mediaID] = MediaAsset(id: mediaID, source: migrationSource)
+                        clip.mediaType = migrationSource.mediaType
+                        shouldRewriteItem = true
+                    } else if library[mediaID] == nil {
+                        library[mediaID] = MediaAsset(
+                            id: mediaID,
+                            source: ClipSource(
+                                url: URL(fileURLWithPath: clip.name),
+                                mediaType: clip.mediaType,
+                                originalDuration: clip.sourceRange.duration
+                            )
                         )
-                    )
-                }
+                    }
 
-                if let asset = mediaLibrary[mediaID], clip.mediaType != asset.mediaType {
-                    clip.mediaType = asset.mediaType
-                    shouldRewriteItem = true
+                    if let asset = library[mediaID], clip.mediaType != asset.mediaType {
+                        clip.mediaType = asset.mediaType
+                        shouldRewriteItem = true
+                    }
+                    if shouldRewriteItem {
+                        tracks[trackIndex].items[itemIndex] = TimelineItem.fromLegacyClip(clip)
+                    }
+                    referencedIDs.insert(mediaID)
                 }
-
-                if shouldRewriteItem {
-                    tracks[trackIndex].items[itemIndex] = TimelineItem.fromLegacyClip(clip)
-                }
-                referencedIDs.insert(mediaID)
             }
+        }
+        synchronizeTracks(&tracks, library: &mediaLibrary)
+        for sequenceID in Array(sequences.keys) {
+            guard var sequence = sequences[sequenceID] else { continue }
+            synchronizeTracks(&sequence.tracks, library: &mediaLibrary)
+            sequences[sequenceID] = sequence
         }
 
         let prunedLibrary = mediaLibrary.filter { referencedIDs.contains($0.key) }

@@ -49,6 +49,7 @@ final class EditorViewModel: ObservableObject {
     var projectItemLookupIndex = ProjectItemLookupIndex()
     @Published var depthPreparationProgress: Double?
     @Published var depthPreparationIndeterminate = false
+    let depthProgressOwnerID: UUID
     var depthPreparationID: UUID?
     var depthPreparationEffectID: UUID?
     var cancelledDepthPreparationID: UUID?
@@ -365,8 +366,12 @@ final class EditorViewModel: ObservableObject {
         self.projectID = projectID
         self.projectStore = projectStore
         let depthDirectory = DepthBakeStore.projectDirectory(in: projectStore.projectFolderURL(for: projectID))
-        self.renderService = CompositionRenderService(previewProxyStore: nil, depthCacheDirectory: depthDirectory)
-        self.exportService = VideoExportService(depthCacheDirectory: depthDirectory)
+        let ownerID = UUID()
+        self.depthProgressOwnerID = ownerID
+        self.renderService = CompositionRenderService(
+            previewProxyStore: nil, depthCacheDirectory: depthDirectory, depthProgressOwnerID: ownerID
+        )
+        self.exportService = VideoExportService(depthCacheDirectory: depthDirectory, depthProgressOwnerID: ownerID)
         self.project = initialContent.editorProject
         self.selectionState.trackID =
             initialContent.editorProject.tracks.first(where: { $0.kind == .visual })?.id

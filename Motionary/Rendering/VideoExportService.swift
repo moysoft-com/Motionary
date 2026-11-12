@@ -104,8 +104,10 @@ struct VideoExportService {
     private static let coordinator = VideoExportCoordinator()
     private let renderService: CompositionRenderService
 
-    init(depthCacheDirectory: URL? = nil) {
-        renderService = CompositionRenderService(depthCacheDirectory: depthCacheDirectory)
+    init(depthCacheDirectory: URL? = nil, depthProgressOwnerID: UUID? = nil) {
+        renderService = CompositionRenderService(
+            depthCacheDirectory: depthCacheDirectory, depthProgressOwnerID: depthProgressOwnerID
+        )
     }
 
     func export(

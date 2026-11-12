@@ -901,6 +901,7 @@ final class CompositionRenderService {
     private let previewProxyStore: PreviewProxyStore?
     private let reusesPreviewVideoTracks: Bool
     private let depthCacheDirectory: URL?
+    private let depthProgressOwnerID: UUID?
     private let stillImageValidationCache = StillImageValidationCache()
     private let previewAudioEnvelopePreparer = PreviewAudioEnvelopePreparer()
     let livePreviewState = LivePreviewRenderState()
@@ -913,12 +914,14 @@ final class CompositionRenderService {
         assetCache: MediaAssetCache = .shared,
         previewProxyStore: PreviewProxyStore? = .shared,
         reusesPreviewVideoTracks: Bool = true,
-        depthCacheDirectory: URL? = nil
+        depthCacheDirectory: URL? = nil,
+        depthProgressOwnerID: UUID? = nil
     ) {
         self.assetCache = assetCache
         self.previewProxyStore = previewProxyStore
         self.reusesPreviewVideoTracks = reusesPreviewVideoTracks
         self.depthCacheDirectory = depthCacheDirectory
+        self.depthProgressOwnerID = depthProgressOwnerID
     }
 
     private static func prepareTopology(_ project: EditorProject) async -> PreviewTopology {
@@ -996,6 +999,7 @@ final class CompositionRenderService {
                 backgroundRemovalPolicy: .omitUnavailable,
                 qualityProfile: quality.renderQualityProfile,
                 failurePolicy: .skipUnavailableEffects,
+                reportsDepthProgress: true,
                 livePreviewState: livePreviewState,
                 renderSessionID: renderSessionID,
                 usesPreviewProxies: true,
@@ -1049,7 +1053,9 @@ final class CompositionRenderService {
                 backgroundMaskTrackIDs: graph.rendered.backgroundMaskTrackIDs,
                 backgroundMaskTransforms: graph.rendered.backgroundMaskTransforms
             )
-            descriptors = try await DepthBakeStore.prepare(compiled, projectDirectory: depthCacheDirectory)
+            descriptors = try await DepthBakeStore.prepare(
+                compiled, projectDirectory: depthCacheDirectory, progressOwnerID: depthProgressOwnerID
+            )
         } else {
             descriptors = graph.renderDescriptors
         }
@@ -1132,7 +1138,8 @@ final class CompositionRenderService {
             renderSettings: renderSettings ?? project.renderSettings,
             backgroundRemovalPolicy: .required,
             qualityProfile: .export,
-            failurePolicy: .failOnUnavailableEffects
+            failurePolicy: .failOnUnavailableEffects,
+            reportsDepthProgress: true
         )
     }
 
@@ -1214,6 +1221,7 @@ final class CompositionRenderService {
         backgroundRemovalPolicy: BackgroundRemovalAvailabilityPolicy,
         qualityProfile: RenderQualityProfile,
         failurePolicy: RenderFailurePolicy,
+        reportsDepthProgress: Bool = false,
         livePreviewState: LivePreviewRenderState? = nil,
         renderSessionID: UUID = UUID(),
         usesPreviewProxies: Bool = false,
@@ -1440,7 +1448,8 @@ final class CompositionRenderService {
             videoClockTrackID: videoClockTrackID
         )
         renderClips = try await DepthBakeStore.prepare(
-            renderClips, projectDirectory: depthCacheDirectory ?? self.depthCacheDirectory
+            renderClips, projectDirectory: depthCacheDirectory ?? self.depthCacheDirectory,
+            progressOwnerID: reportsDepthProgress ? depthProgressOwnerID : nil
         )
         try Task.checkCancellation()
         let videoComposition = makeVideoComposition(

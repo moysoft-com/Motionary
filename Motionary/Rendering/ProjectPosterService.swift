@@ -48,7 +48,6 @@ final class ProjectPosterService: @unchecked Sendable {
         for project: EditorProject,
         outputURL: URL
     ) async throws {
-        let posterTime = try firstVisibleTime(in: project)
         let renderSettings = posterRenderSettings(for: project.renderSettings)
         let rendered = try await renderService.makePosterComposition(
             for: project,
@@ -62,9 +61,10 @@ final class ProjectPosterService: @unchecked Sendable {
         let data = try renderFramePNG(
             from: rendered,
             videoComposition: videoComposition,
-            at: posterTime,
+            at: 0,
             frameRate: renderSettings.frameRate
         )
+        try Task.checkCancellation()
         try FileManager.default.createDirectory(
             at: outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -145,24 +145,4 @@ final class ProjectPosterService: @unchecked Sendable {
         )
     }
 
-    private func firstVisibleTime(in project: EditorProject) throws -> Double {
-        let candidates = project.tracks
-            .filter { !$0.isMuted && ($0.kind == .visual || $0.kind == .shape || $0.kind == .text) }
-            .flatMap(\.items)
-            .compactMap { item -> Double? in
-                switch item {
-                case .media(let media) where media.mediaType != .audio && media.timelineDuration > 0:
-                    media.timelineStart
-                case .shape(let shape) where shape.sourceRange.duration > 0:
-                    shape.timelineStart
-                case .text(let text) where text.duration > 0:
-                    text.timelineStart
-                case .media, .shape, .text, .caption, .adjustment, .compound:
-                    nil
-                }
-            }
-        guard let first = candidates.min() else { throw ProjectPosterError.noVisualContent }
-        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
-        return min(first + frameDuration * 0.5, max(project.duration - frameDuration * 0.5, first))
-    }
 }

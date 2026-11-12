@@ -1129,64 +1129,23 @@ extension EditorViewModel {
                 guard !Task.isCancelled, let self, let signature,
                     signature != self.lastProjectPosterSignature
                 else { return }
-                try await ProjectPosterService.shared.renderPoster(
-                    for: snapshot,
-                    outputURL: projectStore.posterURL(for: projectID)
-                )
-                guard !Task.isCancelled else { return }
+                projectStore.schedulePosterRender(for: snapshot, projectID: projectID)
                 self.lastProjectPosterSignature = signature
-                projectStore.notePosterChanged()
             } catch is CancellationError {
                 return
-            } catch ProjectPosterError.noVisualContent {
-                await MainActor.run {
-                    projectStore.removePoster(for: projectID)
-                }
             } catch {
                 AppLogger.rendering.warning(
-                    "Failed to render project poster: \(error.localizedDescription, privacy: .public)"
+                    "Failed to schedule project poster: \(error.localizedDescription, privacy: .public)"
                 )
             }
         }
     }
 }
 
-private struct ProjectPosterSignature: Codable {
-    struct Track: Codable {
-        let id: UUID
-        let kind: TrackKind
-        let isMuted: Bool
-        let items: [TimelineItem]
-    }
-
-    let renderSettings: RenderSettings
-    let tracks: [Track]
-}
-
 private extension EditorProject {
     var projectPosterSignatureData: Data? {
-        let signature = ProjectPosterSignature(
-            renderSettings: renderSettings,
-            tracks: tracks
-                .filter { $0.kind == .visual || $0.kind == .shape || $0.kind == .text }
-                .map {
-                    ProjectPosterSignature.Track(
-                        id: $0.id,
-                        kind: $0.kind,
-                        isMuted: $0.isMuted,
-                        items: $0.items.filter { item in
-                            switch item {
-                            case .media(let media):
-                                media.mediaType != .audio
-                            case .shape, .text:
-                                true
-                            case .caption, .adjustment, .compound:
-                                false
-                            }
-                        }
-                    )
-                }
-        )
-        return try? JSONEncoder().encode(signature)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try? encoder.encode(ProjectContent(editorProject: self))
     }
 }

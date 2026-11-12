@@ -30,7 +30,7 @@ extension EditorViewModel {
         wasPlayingBeforeScrub = false
         previewState.status = .cancelled
         previewProgress = 0
-        depthPreparationProgress = nil
+        clearDepthPreparationProgress()
     }
 
     func resumePreview() {
@@ -78,6 +78,7 @@ extension EditorViewModel {
         autosaveTask?.cancel()
         projectPosterTask?.cancel()
         projectPosterTask = nil
+        clearDepthPreparationProgress()
         interactivePreviewThrottleTask?.cancel()
         interactivePreviewThrottleTask = nil
         livePreviewFrameRefreshTask?.cancel()
@@ -91,7 +92,15 @@ extension EditorViewModel {
         renderService.livePreviewState.removeAll()
         pendingLiveVisualOverrideItemIDs.removeAll(keepingCapacity: true)
         autosaveTask = Task { [projectStore, projectID] in
-            try? await projectStore.repository.save(content, projectID: projectID)
+            do {
+                try await projectStore.repository.save(content, projectID: projectID)
+                projectStore.recordSavedContent(content, projectID: projectID)
+                projectStore.schedulePosterRender(for: content.editorProject, projectID: projectID)
+            } catch {
+                AppLogger.persistence.warning(
+                    "Failed to save project on close: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
         rebuildTask?.cancel()
         rebuildTask = nil
@@ -135,24 +144,41 @@ extension EditorViewModel {
         isPlaying = false
     }
 
+    func clearDepthPreparationProgress() {
+        depthPreparationID = nil
+        depthPreparationEffectID = nil
+        depthPreparationProgress = nil
+        depthPreparationIndeterminate = false
+    }
+
     func handleDepthPreparationProgress(_ notification: Notification) {
-        guard let id = notification.userInfo?["id"] as? UUID else { return }
+        guard notification.userInfo?["ownerID"] as? UUID == depthProgressOwnerID,
+              let id = notification.userInfo?["id"] as? UUID else { return }
         let progress = notification.userInfo?["progress"] as? Double
         if cancelledDepthPreparationID == id {
             if progress == nil { cancelledDepthPreparationID = nil }
             return
         }
-        if let progress {
-            depthPreparationID = id
-            depthPreparationEffectID = notification.userInfo?["effectID"] as? UUID
-            depthPreparationIndeterminate = notification.userInfo?["indeterminate"] as? Bool ?? false
-            depthPreparationProgress = progress
-        } else if depthPreparationID == id {
-            depthPreparationID = nil
-            depthPreparationEffectID = nil
-            depthPreparationProgress = nil
-            depthPreparationIndeterminate = false
+        guard let progress else {
+            if depthPreparationID == id { clearDepthPreparationProgress() }
+            return
         }
+        guard (isRenderingPreview || isExporting), !previewIsSuspended,
+              let effectID = notification.userInfo?["effectID"] as? UUID,
+              project.tracks.contains(where: { track in
+                  !track.isMuted && track.items.contains { item in
+                      item.editableVisuals?.effectStack.effects.contains {
+                          $0.id == effectID && $0.moduleID == .depthMap && $0.isEnabled
+                      } == true
+                  }
+              }) else {
+            if depthPreparationID == id { clearDepthPreparationProgress() }
+            return
+        }
+        depthPreparationID = id
+        depthPreparationEffectID = effectID
+        depthPreparationIndeterminate = notification.userInfo?["indeterminate"] as? Bool ?? false
+        depthPreparationProgress = progress
     }
 
     func cancelLongRunningTask() {

@@ -116,6 +116,11 @@ struct SettingsView: View {
                         Text(versionDescription)
                             .foregroundStyle(.secondary)
                     }
+                    NavigationLink {
+                        OpenSourceLicensesView()
+                    } label:  {
+                        SettingsLabel("Open Source Licenses", systemImage: "wrench.and.screwdriver.fill", colors: [.gray])
+                    }
                     HStack {
                         Link(destination: URL(string: "https://moysoft.com/privacy")!) {
                             SettingsLabel("Privacy", systemImage: "hand.raised.fill", colors: [.blue])
@@ -152,12 +157,6 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("About")
-                }
-
-                Section {
-                    NavigationLink("Open Source Licenses") {
-                        OpenSourceLicensesView()
-                    }
                 }
 
                 Section {

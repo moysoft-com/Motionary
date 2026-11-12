@@ -10,6 +10,7 @@ struct ProjectCard: View {
     let onRename: () -> Void
     let onRenameCommit: () -> Void
     let onDelete: () -> Void
+    let onExport: () -> Void
     @ObservedObject var projectStore: ProjectStore
 
     @State private var coverImage: UIImage?
@@ -23,6 +24,7 @@ struct ProjectCard: View {
                         .frame(maxWidth: .infinity)
                         .frame(height: 100)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                     if isRenaming {
                         HStack(spacing: 8) {
@@ -56,12 +58,15 @@ struct ProjectCard: View {
                                 .multilineTextAlignment(.leading)
                             Spacer()
                             Menu {
-                                Button("Rename", action: onRename)
-                                Button("Delete", role: .destructive, action: onDelete)
+                                Button("Share Project", systemImage: "square.and.arrow.up", action: onExport)
+                                Button("Rename", systemImage: "pencil", action: onRename)
+                                Button("Delete", systemImage: "trash", role: .destructive, action: onDelete)
                             } label: {
                                 Image(systemName: "ellipsis")
                                     .font(.system(size: 16, weight: .bold))
                                     .foregroundStyle(.primary)
+                                    .frame(width: 16, height: 16)
+                                    .clipShape(Rectangle())
                             }
                         }
                     }
@@ -89,7 +94,8 @@ struct ProjectCard: View {
                     Image(uiImage: coverImage)
                         .resizable()
                         .scaledToFill()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(width: geo.size.width, height: geo.size.height, alignment: .center)
+                        .clipped()
                 } else {
                     ZStack {
                         LinearGradient(
@@ -103,7 +109,6 @@ struct ProjectCard: View {
                     }
                 }
             }
-            .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: 6, style: .continuous))
 
         }
         .frame(maxWidth: .infinity)

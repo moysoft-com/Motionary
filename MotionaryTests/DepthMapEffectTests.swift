@@ -4,6 +4,15 @@ import Testing
 import UIKit
 @testable import Motionary
 
+private final class DepthProgressEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [(UUID?, Bool)] = []
+    func append(owner: UUID?, isComplete: Bool) {
+        lock.withLock { recorded.append((owner, isComplete)) }
+    }
+    var events: [(UUID?, Bool)] { lock.withLock { recorded } }
+}
+
 @Suite(.serialized)
 struct DepthMapEffectTests {
     @Test func rendersBundledModelAsGrayscale() throws {
@@ -39,18 +48,77 @@ struct DepthMapEffectTests {
     }
 
     @MainActor
-    @Test func completedDepthPreparationClearsProgressDuringPreviewRebuild() {
-        let model = EditorViewModel(projectID: UUID(), projectStore: ProjectStore(),
-            initialContent: ProjectContent(editorProject: EditorProject(title: "Depth progress")))
-        defer { model.stop() }
-        let id = UUID()
+    @Test func depthProgressOnlyAcceptsActiveEffectsInItsOwnEditor() throws {
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .depthMap))
+        var shape = ShapeTimelineItem(
+            name: "Shape", mediaID: MediaID(), shape: ClipShape(kind: .rectangle),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2)
+        )
+        shape.visuals.effectStack.effects.append(effect)
+        let project = EditorProject(title: "Depth progress", tracks: [
+            TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])
+        ])
+        let store = ProjectStore()
+        let model = EditorViewModel(projectID: UUID(), projectStore: store,
+            initialContent: ProjectContent(editorProject: project))
+        let otherEditor = EditorViewModel(projectID: UUID(), projectStore: store,
+            initialContent: ProjectContent(editorProject: project))
+        let emptyEditor = EditorViewModel(projectID: UUID(), projectStore: store,
+            initialContent: ProjectContent(editorProject: EditorProject(title: "Empty")))
         model.isRenderingPreview = true
-        model.handleDepthPreparationProgress(Notification(name: DepthBakeStore.preparationProgress,
-            userInfo: ["id": id, "progress": 1.0]))
-        model.handleDepthPreparationProgress(Notification(name: DepthBakeStore.preparationProgress,
-            userInfo: ["id": id]))
+        otherEditor.isRenderingPreview = true
+        emptyEditor.isRenderingPreview = true
+        let id = UUID()
+        func notification(owner: UUID?, effectID: UUID?, progress: Double?) -> Notification {
+            var info: [String: Any] = ["id": id]
+            info["ownerID"] = owner
+            info["effectID"] = effectID
+            info["progress"] = progress
+            return Notification(name: DepthBakeStore.preparationProgress, userInfo: info)
+        }
+        let update = notification(owner: model.depthProgressOwnerID, effectID: effect.id, progress: 0.3)
+        otherEditor.handleDepthPreparationProgress(update)
+        emptyEditor.handleDepthPreparationProgress(notification(owner: emptyEditor.depthProgressOwnerID, effectID: effect.id, progress: 0.3))
+        model.handleDepthPreparationProgress(notification(owner: nil, effectID: effect.id, progress: 0.3))
+        model.handleDepthPreparationProgress(notification(owner: model.depthProgressOwnerID, effectID: UUID(), progress: 0.3))
+        #expect(otherEditor.depthPreparationProgress == nil)
+        #expect(emptyEditor.depthPreparationProgress == nil)
+        #expect(model.depthPreparationProgress == nil)
+
+        model.handleDepthPreparationProgress(update)
+        #expect(model.depthPreparationProgress == 0.3)
+        model.handleDepthPreparationProgress(notification(owner: otherEditor.depthProgressOwnerID, effectID: effect.id, progress: nil))
+        #expect(model.depthPreparationProgress == 0.3)
+        model.handleDepthPreparationProgress(notification(owner: model.depthProgressOwnerID, effectID: effect.id, progress: nil))
         #expect(model.depthPreparationProgress == nil)
         #expect(model.depthPreparationID == nil)
+        model.isRenderingPreview = false
+        model.handleDepthPreparationProgress(update)
+        #expect(model.depthPreparationProgress == nil)
+    }
+
+    @MainActor
+    @Test func depthProgressIgnoresDisabledOrMutedEffects() throws {
+        var effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .depthMap))
+        effect.isEnabled = false
+        var shape = ShapeTimelineItem(name: "Shape", mediaID: MediaID(), shape: ClipShape(kind: .rectangle),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 2))
+        shape.visuals.effectStack.effects.append(effect)
+        let model = EditorViewModel(projectID: UUID(), projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: EditorProject(title: "Depth", tracks: [
+                TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])
+            ])))
+        model.isRenderingPreview = true
+        let update = Notification(name: DepthBakeStore.preparationProgress,
+            userInfo: ["id": UUID(), "ownerID": model.depthProgressOwnerID, "effectID": effect.id, "progress": 0.4])
+        model.handleDepthPreparationProgress(update)
+        #expect(model.depthPreparationProgress == nil)
+        effect.isEnabled = true
+        shape.visuals.effectStack.effects = [effect]
+        model.project.tracks[0].items = [.shape(shape)]
+        model.project.tracks[0].isMuted = true
+        model.handleDepthPreparationProgress(update)
+        #expect(model.depthPreparationProgress == nil)
     }
 
     @Test func storedStillDepthPreservesModelCoordinates() throws {
@@ -150,6 +218,39 @@ struct DepthMapEffectTests {
         await writer.finishWriting()
         try #require(writer.status == .completed)
         return (url, fitted)
+    }
+
+    @Test func backgroundDepthPreparationIsSilentAndEditorPreparationIsScoped() async throws {
+        let (url, _) = try await makeDepthVideo()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let effect = try #require(EffectRegistry.shared.makeEffect(moduleID: .depthMap))
+        let descriptor = RenderClipDescriptor(trackID: 42, backgroundMaskTrackID: nil, clipID: UUID(),
+            timelineStart: 0, duration: 1.0 / 24, sourceTransform: .identity, backgroundMaskSourceTransform: .identity,
+            transform: ClipTransform(), adjustments: AdjustmentSettings(), effectStack: EffectStack(effects: [effect]),
+            mask: nil, backgroundRemoval: nil, blendMode: .normal, blendIntensity: 1, shape: nil, text: nil,
+            renderOrder: 0, temporalSource: EffectTemporalSource(
+                url: url, sourceStart: 0, sourceDuration: 1.0 / 24, speedMap: .constant(speed: 1)
+            ))
+        let events = DepthProgressEvents()
+        let observer = NotificationCenter.default.addObserver(
+            forName: DepthBakeStore.preparationProgress, object: nil, queue: nil
+        ) { notification in
+            guard notification.userInfo?["effectID"] as? UUID == effect.id else { return }
+            events.append(owner: notification.userInfo?["ownerID"] as? UUID,
+                          isComplete: notification.userInfo?["progress"] as? Double == nil)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        _ = try await DepthBakeStore.prepare([descriptor], projectDirectory: root.appendingPathComponent("background"))
+        #expect(events.events.isEmpty)
+        let owner = UUID()
+        _ = try await DepthBakeStore.prepare([descriptor], projectDirectory: root.appendingPathComponent("editor"), progressOwnerID: owner)
+        #expect(events.events.count >= 2)
+        #expect(events.events.allSatisfy { $0.0 == owner })
+        #expect(events.events.last?.1 == true)
     }
 
     @Test func depthPreparationAcceptsATrimExtendingPastTheVideoTrack() async throws {

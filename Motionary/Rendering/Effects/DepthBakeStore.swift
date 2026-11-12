@@ -48,7 +48,9 @@ final class DepthBakeStore: @unchecked Sendable {
         projectFolder.appendingPathComponent("DepthMaps-v7", isDirectory: true)
     }
 
-    static func prepare(_ clips: [RenderClipDescriptor], projectDirectory: URL?) async throws -> [RenderClipDescriptor] {
+    static func prepare(
+        _ clips: [RenderClipDescriptor], projectDirectory: URL?, progressOwnerID: UUID? = nil
+    ) async throws -> [RenderClipDescriptor] {
         var prepared = clips
         var rangesByURL: [URL: [CMTimeRange]] = [:]
         var identityByURL: [URL: String] = [:]
@@ -71,7 +73,7 @@ final class DepthBakeStore: @unchecked Sendable {
                     track = try shared.makeTrack(source: source, effect: effect, directory: directory,
                                                  sampleRanges: ranges, sourceIdentity: identity)
                     if let track {
-                        try await prepareTrack(track, effectID: effect.id)
+                        try await prepareTrack(track, effectID: effect.id, progressOwnerID: progressOwnerID)
                     }
                 } else {
                     track = nil
@@ -195,7 +197,9 @@ final class DepthBakeStore: @unchecked Sendable {
         _ = try await prepare(clips, projectDirectory: nil)
     }
 
-    private static func prepareTrack(_ track: VideoTrack, effectID: UUID) async throws {
+    private static func prepareTrack(
+        _ track: VideoTrack, effectID: UUID, progressOwnerID: UUID? = nil
+    ) async throws {
         let work = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
             let last = Int(ceil(track.duration * rate))
@@ -205,8 +209,9 @@ final class DepthBakeStore: @unchecked Sendable {
             guard !missing.isEmpty else { return }
             let id = UUID()
             func report(_ progress: Double?) {
+                guard let progressOwnerID else { return }
                 NotificationCenter.default.post(name: preparationProgress, object: nil,
-                    userInfo: ["id": id, "effectID": effectID, "progress": progress as Any])
+                    userInfo: ["id": id, "effectID": effectID, "ownerID": progressOwnerID, "progress": progress as Any])
             }
             report(0)
             defer { report(nil) }

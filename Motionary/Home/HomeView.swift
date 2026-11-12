@@ -2,6 +2,7 @@
 
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 private struct ProjectEditorSelection: Identifiable, Equatable {
     let project: Project
@@ -31,6 +32,10 @@ struct HomeView: View {
     @State private var lastPresentedNewProjectRequest: UUID?
     @State private var isCreatingProject = false
     @State private var errorMessage: String?
+    @State private var isProjectImporterPresented = false
+    @State private var sharedProject: SharedProject?
+    @State private var sharedProjectDirectory: URL?
+    @State private var isTransferringProject = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 156), spacing: 12)
@@ -84,11 +89,13 @@ struct HomeView: View {
                                             onDelete: {
                                                 projectStore.deleteProject(with: project.id)
                                             },
+                                            onExport: { exportProject(project) },
                                             projectStore: projectStore
                                         )
                                         .accessibilityIdentifier("home-project-card-\(project.id)")
                                         .onAppear {
                                             projectStore.warmContent(for: project)
+                                            projectStore.preparePosterIfNeeded(for: project)
                                         }
                                     }
                                 }
@@ -104,12 +111,12 @@ struct HomeView: View {
                     .padding(18)
             }
             .overlay {
-                if isCreatingProject {
+                if isCreatingProject || isTransferringProject {
                     VStack(spacing: 12) {
                         ProgressView()
                             .tint(MotionaryTheme.accent)
                             .motionaryLoadingShimmer()
-                        Text("Importing")
+                        Text(isTransferringProject ? "Preparing project" : "Importing")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(MotionaryTheme.textPrimary)
                             .motionaryLoadingShimmer()
@@ -163,6 +170,16 @@ struct HomeView: View {
                 isSearchFocused = false
             }
             showsSearchHeader = presented
+        }
+        .sheet(item: $sharedProject, onDismiss: {
+            if let directory = sharedProjectDirectory { try? FileManager.default.removeItem(at: directory) }
+            sharedProjectDirectory = nil
+        }) { item in
+            ActivityView(activityItems: [item.url])
+        }
+        .fileImporter(isPresented: $isProjectImporterPresented, allowedContentTypes: [UTType(exportedAs: "com.moysoft.motionary.project")]) { result in
+            if case .success(let url) = result { importProject(url) }
+            else if case .failure(let error) = result { errorMessage = error.localizedDescription }
         }
         .photosPicker(
             isPresented: $isMediaPickerPresented,
@@ -250,7 +267,7 @@ struct HomeView: View {
 
             Spacer()
 
-            PhotosPicker(selection: $newProjectMediaItems, matching: .any(of: [.images, .videos])) {
+            Button { isMediaPickerPresented = true } label: {
                 Label("New", systemImage: "plus")
                     .font(.subheadline.weight(.semibold))
                     .padding(.horizontal, 14)
@@ -261,9 +278,14 @@ struct HomeView: View {
                             .fill(MotionaryTheme.accent)
                             .motionaryGlassEffect(in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
-                    .labelStyle(.titleAndIcon)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("home-new-project")
+            .contextMenu {
+                Button("Empty Project", systemImage: "doc.badge.plus") { createEmptyProject() }
+                Button("Import Project", systemImage: "square.and.arrow.down") { isProjectImporterPresented = true }
+                Button("Choose from Library", systemImage: "photo.on.rectangle") { isMediaPickerPresented = true }
+            }
         }
     }
 
@@ -319,6 +341,74 @@ struct HomeView: View {
         .frame(maxWidth: .infinity, minHeight: 260)
     }
 
+    private struct SharedProject: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
+
+    private func exportProject(_ project: Project) {
+        Task {
+            isTransferringProject = true
+            defer { isTransferringProject = false }
+            do {
+                let content: ProjectContent
+                do {
+                    content = try await projectStore.repository.load(projectID: project.id, preferredTitle: project.title).content
+                } catch ProjectRepositoryError.missingContent {
+                    content = ProjectContent(editorProject: EditorProject.empty(title: project.title))
+                }
+                let folder = projectStore.projectFolderURL(for: project.id)
+                let url = try await Task.detached(priority: .userInitiated) {
+                    try ProjectArchive.export(project: project, content: content, folder: folder)
+                }.value
+                sharedProjectDirectory = url.deletingLastPathComponent()
+                sharedProject = SharedProject(url: url)
+            } catch { errorMessage = error.localizedDescription }
+        }
+    }
+
+    private func importProject(_ url: URL) {
+        Task {
+            isTransferringProject = true
+            defer { isTransferringProject = false }
+            let accessible = url.startAccessingSecurityScopedResource()
+            defer { if accessible { url.stopAccessingSecurityScopedResource() } }
+            let id = UUID()
+            let folder = projectStore.projectFolderURL(for: id)
+            do {
+                let imported = try await Task.detached(priority: .userInitiated) {
+                    try ProjectArchive.extract(url: url, to: folder, projectID: id)
+                }.value
+                try await projectStore.repository.save(imported, projectID: id)
+                projectStore.recordSavedContent(imported, projectID: id)
+                projectStore.notePosterChanged()
+                projectStore.schedulePosterRender(for: imported.editorProject, projectID: id)
+            } catch {
+                try? FileManager.default.removeItem(at: folder)
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func createEmptyProject() {
+        Task {
+            isCreatingProject = true
+            defer { isCreatingProject = false }
+            let project = projectStore.addProject()
+            var editorProject = EditorProject.empty(title: project.title)
+            editorProject.renderSettings.frameRate = Int32(newProjectFrameRate)
+            let content = ProjectContent(editorProject: editorProject)
+            do {
+                try await projectStore.repository.save(content, projectID: project.id)
+                projectStore.recordSavedContent(content, projectID: project.id)
+                selectedProject = ProjectEditorSelection(project: project, initialContent: content)
+            } catch {
+                projectStore.deleteProject(with: project.id)
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func createProject(from items: [PhotosPickerItem]) {
         Task {
             isCreatingProject = true
@@ -368,7 +458,7 @@ struct HomeView: View {
                 let content = ProjectContent(editorProject: editorProject)
                 try await projectStore.repository.save(content, projectID: project.id)
                 projectStore.recordSavedContent(content, projectID: project.id)
-                schedulePosterRender(for: editorProject, projectID: project.id)
+                projectStore.schedulePosterRender(for: editorProject, projectID: project.id)
                 let savedProject = projectStore.projects.first(where: { $0.id == project.id }) ?? project
                 selectedProject = ProjectEditorSelection(
                     project: savedProject,
@@ -377,26 +467,6 @@ struct HomeView: View {
             } catch {
                 projectStore.deleteProject(with: project.id)
                 errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func schedulePosterRender(for project: EditorProject, projectID: UUID) {
-        let outputURL = projectStore.posterURL(for: projectID)
-        Task(priority: .utility) {
-            do {
-                try await ProjectPosterService.shared.renderPoster(
-                    for: project,
-                    outputURL: outputURL
-                )
-                guard !Task.isCancelled else { return }
-                projectStore.notePosterChanged()
-            } catch ProjectPosterError.noVisualContent {
-                projectStore.removePoster(for: projectID)
-            } catch {
-                AppLogger.rendering.warning(
-                    "Failed to render project poster: \(error.localizedDescription, privacy: .public)"
-                )
             }
         }
     }

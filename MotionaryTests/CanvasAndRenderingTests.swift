@@ -3114,7 +3114,7 @@ struct CanvasAndRenderingTests {
         #expect(normalPixel[2] > multiplyPixel[2] + 10)
     }
 
-    @Test func projectPosterRendersPersistedCompositedFirstVisibleFrame() async throws {
+    @Test func projectPosterRendersPersistedCompositedFirstFrame() async throws {
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString)-poster.png")
         defer { try? FileManager.default.removeItem(at: outputURL) }
@@ -3128,7 +3128,7 @@ struct CanvasAndRenderingTests {
                 width: 80,
                 height: 80
             ),
-            timelineStart: 1,
+            timelineStart: 0,
             sourceRange: TimeRangeValue(start: 0, duration: 1)
         )
         let project = EditorProject(
@@ -3155,6 +3155,61 @@ struct CanvasAndRenderingTests {
         #expect(center[0] > 80)
         #expect(center[1] < 40)
         #expect(center[2] < 40)
+    }
+
+    @Test func projectPosterUsesActualFirstFrameBeforeLaterContent() async throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-poster.png")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let shape = ShapeTimelineItem(
+            name: "Later", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1), width: 80, height: 80),
+            timelineStart: 1, sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        let project = EditorProject(title: "Gap", renderSettings: RenderSettings(width: 100, height: 100, frameRate: 30),
+            tracks: [TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])])
+        try await ProjectPosterService(maximumDimension: 100).renderPoster(for: project, outputURL: outputURL)
+        let image = try #require(UIImage(data: Data(contentsOf: outputURL))?.cgImage)
+        let center = try rgbaPixel(in: image, x: image.width / 2, y: image.height / 2)
+        #expect(center[0] < 40)
+    }
+
+    @Test func projectPosterCompositesOverlaysOnFirstFrame() async throws {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-poster.png")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let background = ShapeTimelineItem(name: "Background", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: RGBAColor(red: 0, green: 0, blue: 1, alpha: 1), width: 100, height: 100),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1))
+        let overlay = ShapeTimelineItem(name: "Overlay", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1), width: 40, height: 40),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1))
+        let project = EditorProject(title: "Layers", renderSettings: RenderSettings(width: 100, height: 100, frameRate: 30), tracks: [
+            TimelineTrack(name: "Overlay", kind: .shape, items: [.shape(overlay)]),
+            TimelineTrack(name: "Background", kind: .shape, items: [.shape(background)])
+        ])
+        try await ProjectPosterService(maximumDimension: 100).renderPoster(for: project, outputURL: outputURL)
+        let image = try #require(UIImage(data: Data(contentsOf: outputURL))?.cgImage)
+        let center = try rgbaPixel(in: image, x: 50, y: 50)
+        let corner = try rgbaPixel(in: image, x: 8, y: 8)
+        #expect(center[0] > center[2] + 60)
+        #expect(corner[2] > corner[0] + 60)
+    }
+
+    @Test func projectPosterScalesLayerGeometryWithCanvas() async throws {
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString)-poster.png")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let shape = ShapeTimelineItem(name: "Scaled", mediaID: MediaID(),
+            shape: ClipShape(kind: .rectangle, color: RGBAColor(red: 1, green: 0, blue: 0, alpha: 1), width: 400, height: 400),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1))
+        let project = EditorProject(title: "Scale", renderSettings: RenderSettings(width: 1000, height: 1000, frameRate: 30),
+            tracks: [TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])])
+        try await ProjectPosterService(maximumDimension: 100).renderPoster(for: project, outputURL: outputURL)
+        let image = try #require(UIImage(data: Data(contentsOf: outputURL))?.cgImage)
+        let center = try rgbaPixel(in: image, x: 50, y: 50)
+        let corner = try rgbaPixel(in: image, x: 8, y: 8)
+        #expect(center[0] > 80)
+        #expect(corner[0] < 40)
     }
 
     @MainActor

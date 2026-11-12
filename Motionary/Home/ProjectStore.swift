@@ -26,6 +26,10 @@ final class ProjectStore: ObservableObject {
     let repository: ProjectRepository
     private var contentCache: [UUID: ProjectContent] = [:]
     private var contentWarmupTasks: [UUID: Task<Void, Never>] = [:]
+    private var posterTasks: [UUID: Task<Void, Never>] = [:]
+    private var posterGenerations: [UUID: UUID] = [:]
+    private var posterPreparationIDs: Set<UUID> = []
+    private let posterVersion = "2"
     private var isLoading = false
     private let fileManager = FileManager.default
 
@@ -198,11 +202,76 @@ final class ProjectStore: ObservableObject {
         notePosterChanged()
     }
 
+    @MainActor
+    func preparePosterIfNeeded(for project: Project) {
+        let folder = projectFolderURL(for: project.id)
+        let versionURL = folder.appendingPathComponent("poster.version")
+        guard (try? String(contentsOf: versionURL, encoding: .utf8)) != posterVersion,
+              posterTasks[project.id] == nil,
+              posterPreparationIDs.insert(project.id).inserted else { return }
+        Task { [weak self, repository] in
+            guard let self else { return }
+            defer { self.posterPreparationIDs.remove(project.id) }
+            do {
+                let content = try await repository.load(projectID: project.id, preferredTitle: project.title).content
+                guard self.projects.contains(where: { $0.id == project.id }),
+                      self.posterTasks[project.id] == nil else { return }
+                self.schedulePosterRender(for: content.editorProject, projectID: project.id)
+            } catch ProjectRepositoryError.missingContent {
+                return
+            } catch {
+                AppLogger.persistence.warning("Failed to prepare project poster: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    @MainActor
+    func schedulePosterRender(for project: EditorProject, projectID: UUID) {
+        posterTasks[projectID]?.cancel()
+        let outputURL = posterURL(for: projectID)
+        try? fileManager.removeItem(at: outputURL.deletingLastPathComponent().appendingPathComponent("poster.version"))
+        let generation = UUID()
+        posterGenerations[projectID] = generation
+        posterTasks[projectID] = Task(priority: .utility) { [weak self] in
+            defer {
+                if self?.posterGenerations[projectID] == generation {
+                    self?.posterTasks[projectID] = nil
+                    self?.posterGenerations[projectID] = nil
+                }
+            }
+            do {
+                try await ProjectPosterService.shared.renderPoster(for: project, outputURL: outputURL)
+                guard !Task.isCancelled, let self,
+                    self.projects.contains(where: { $0.id == projectID }) else { return }
+                try? self.posterVersion.data(using: .utf8)?.write(
+                    to: outputURL.deletingLastPathComponent().appendingPathComponent("poster.version"), options: .atomic
+                )
+                self.notePosterChanged()
+            } catch is CancellationError {
+                return
+            } catch ProjectPosterError.noVisualContent {
+                guard !Task.isCancelled else { return }
+                guard let self, self.projects.contains(where: { $0.id == projectID }) else { return }
+                self.removePoster(for: projectID)
+                try? self.posterVersion.data(using: .utf8)?.write(
+                    to: outputURL.deletingLastPathComponent().appendingPathComponent("poster.version"), options: .atomic
+                )
+            } catch {
+                AppLogger.rendering.warning(
+                    "Failed to render project poster: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+    }
+
     func notePosterChanged() {
         posterRevision &+= 1
     }
 
     private func deleteContent(for projectID: UUID) {
+        posterTasks[projectID]?.cancel()
+        posterTasks[projectID] = nil
+        posterGenerations[projectID] = nil
         contentCache[projectID] = nil
         contentWarmupTasks[projectID]?.cancel()
         contentWarmupTasks[projectID] = nil
