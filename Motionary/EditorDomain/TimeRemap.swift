@@ -56,6 +56,19 @@ struct TimeRemap: Codable, Equatable, Sendable {
         }
     }
 
+    mutating func moveKeyframe(from: Double, to: Double) {
+        guard to >= 0, to <= duration else { return }
+        var frames = keyframes
+        moveKeyframeFrames(&frames, from: from, to: to)
+        guard frames.allSatisfy({ $0.time <= duration }),
+              zip(frames, frames.dropFirst()).allSatisfy({ $0.time < $1.time }) else { return }
+        keyframes = frames
+    }
+
+    private func moveKeyframeFrames(_ frames: inout [Keyframe<Double>], from: Double, to: Double) {
+        moveTimelineKeyframe(&frames, from: from, to: to)
+    }
+
     var averageSpeed: Double { sourceDuration / duration }
 
     var hasReverse: Bool {

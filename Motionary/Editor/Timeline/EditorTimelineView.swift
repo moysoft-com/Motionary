@@ -11,6 +11,13 @@ struct TimelineWorkspaceContext: Equatable {
     let activeEffectID: UUID?
     let graphSegment: KeyframeSegment?
     var showsOnlySelectedTrack = false
+    var viewModel: EditorViewModel? = nil
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.itemID == rhs.itemID && lhs.activeSection == rhs.activeSection
+            && lhs.activeEffectID == rhs.activeEffectID && lhs.graphSegment == rhs.graphSegment
+            && lhs.showsOnlySelectedTrack == rhs.showsOnlySelectedTrack
+    }
 
     func track(in tracks: [TimelineTrack]) -> TimelineTrack? {
         tracks.first { $0.items.contains { $0.id == itemID } }

@@ -2,6 +2,7 @@
 
 @preconcurrency import AVFoundation
 import Foundation
+import CoreImage
 import Photos
 import UIKit
 
@@ -32,6 +33,7 @@ struct VideoExportSettings: Codable, Equatable {
     var audioBitrate: Int
     var codec: ExportVideoCodec
     var container: ExportContainer
+    var watermarkEnabled: Bool = true
 
     static func recommended(for project: EditorProject) -> VideoExportSettings {
         recommended(for: project.renderSettings)
@@ -62,6 +64,24 @@ struct VideoExportSettings: Codable, Equatable {
         copy.videoBitrate = min(max(copy.videoBitrate, 500_000), 120_000_000)
         copy.audioBitrate = min(max(copy.audioBitrate, 64_000), 320_000)
         return copy
+    }
+}
+
+extension VideoExportSettings {
+    private enum CodingKeys: String, CodingKey {
+        case width, height, frameRate, videoBitrate, audioBitrate, codec, container, watermarkEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        width = try values.decode(Int.self, forKey: .width)
+        height = try values.decode(Int.self, forKey: .height)
+        frameRate = try values.decode(Int32.self, forKey: .frameRate)
+        videoBitrate = try values.decode(Int.self, forKey: .videoBitrate)
+        audioBitrate = try values.decode(Int.self, forKey: .audioBitrate)
+        codec = try values.decode(ExportVideoCodec.self, forKey: .codec)
+        container = try values.decode(ExportContainer.self, forKey: .container)
+        watermarkEnabled = try values.decodeIfPresent(Bool.self, forKey: .watermarkEnabled) ?? true
     }
 }
 
@@ -329,6 +349,7 @@ struct VideoExportService {
             audioOutput: audioOutput,
             audioInput: audioInput,
             duration: rendered.duration,
+            watermark: settings.watermarkEnabled ? try ExportWatermark(width: settings.width, height: settings.height) : nil,
             progress: progress
         )
     }
@@ -341,6 +362,7 @@ struct VideoExportService {
         audioOutput: AVAssetReaderAudioMixOutput?,
         audioInput: AVAssetWriterInput?,
         duration: Double,
+        watermark: ExportWatermark?,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
         let pipeline = ExportPipelineState(
@@ -351,6 +373,7 @@ struct VideoExportService {
             audioOutput: audioOutput,
             audioInput: audioInput,
             duration: duration,
+            watermark: watermark,
             progress: progress
         )
         let queue = DispatchQueue(label: "com.motionary.video-export", qos: .userInitiated)
@@ -386,7 +409,7 @@ struct VideoExportService {
         // strongly here can keep the entire reader/compositor graph alive.
         pipeline.videoInput.requestMediaDataWhenReady(on: queue) { [weak pipeline] in
             guard let pipeline else { return }
-            drainVideo(pipeline)
+            drainVideo(pipeline, on: queue)
         }
         if let audioInput = pipeline.audioInput {
             audioInput.requestMediaDataWhenReady(on: queue) { [weak pipeline] in
@@ -396,35 +419,94 @@ struct VideoExportService {
         }
     }
 
-    private static func drainVideo(_ pipeline: ExportPipelineState) {
-        guard pipeline.canContinue else { return }
+    private static func drainVideo(_ pipeline: ExportPipelineState, on queue: DispatchQueue) {
+        guard pipeline.canContinue, !pipeline.videoFrameInFlight else { return }
+        if let watermark = pipeline.watermark {
+            processWatermarkedFrame(pipeline, watermark: watermark, on: queue)
+            return
+        }
         while pipeline.videoInput.isReadyForMoreMediaData, pipeline.canContinue {
+            // Core Image and AVFoundation create autoreleased objects for every frame.
+            // Drain them before processing the next frame, including at 4K.
+            let shouldContinue = autoreleasepool {
+                processVideoFrame(pipeline)
+            }
+            if !shouldContinue { return }
+        }
+    }
+
+    private static func processVideoFrame(_ pipeline: ExportPipelineState) -> Bool {
+        if let error = pipelineError(pipeline) {
+            pipeline.fail(error)
+            return false
+        }
+        guard let sample = pipeline.videoOutput.copyNextSampleBuffer() else {
             if let error = pipelineError(pipeline) {
                 pipeline.fail(error)
-                return
+            } else {
+                pipeline.videoInput.markAsFinished()
+                finishIfReady(pipeline, videoFinished: true)
             }
-            guard let sample = pipeline.videoOutput.copyNextSampleBuffer() else {
-                if let error = pipelineError(pipeline) {
-                    pipeline.fail(error)
-                } else {
-                    pipeline.videoInput.markAsFinished()
-                    finishIfReady(pipeline, videoFinished: true)
-                }
-                return
-            }
-            guard pipeline.videoInput.append(sample) else {
-                pipeline.fail(
-                    pipeline.writer.error
-                        ?? VideoExportError.exportFailed("A video frame could not be encoded.")
-                )
-                return
-            }
+            return false
+        }
+        guard pipeline.videoInput.append(sample) else {
+            pipeline.fail(pipeline.writer.error
+                ?? VideoExportError.exportFailed("A video frame could not be encoded."))
+            return false
+        }
+        let seconds = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+        if seconds.isFinite {
+            pipeline.progress(min(max(seconds / max(pipeline.duration, 0.001), 0), 0.995))
+        }
+        return true
+    }
 
-            let seconds = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-            if seconds.isFinite {
-                pipeline.progress(
-                    min(max(seconds / max(pipeline.duration, 0.001), 0), 0.995)
-                )
+    private static func processWatermarkedFrame(
+        _ pipeline: ExportPipelineState, watermark: ExportWatermark, on queue: DispatchQueue
+    ) {
+        guard pipeline.videoInput.isReadyForMoreMediaData, pipeline.canContinue else { return }
+        if let error = pipelineError(pipeline) {
+            pipeline.fail(error)
+            return
+        }
+        guard let sample = pipeline.videoOutput.copyNextSampleBuffer() else {
+            if let error = pipelineError(pipeline) {
+                pipeline.fail(error)
+            } else {
+                pipeline.videoInput.markAsFinished()
+                finishIfReady(pipeline, videoFinished: true)
+            }
+            return
+        }
+        pipeline.videoFrameInFlight = true
+        let frameSample = ExportFrameSample(sample: sample)
+        let time = CMSampleBufferGetPresentationTimeStamp(sample)
+        Task { [weak pipeline] in
+            do {
+                let frame = try await watermark.frame(at: time)
+                queue.async { [weak pipeline] in
+                    guard let pipeline, pipeline.canContinue else { return }
+                    pipeline.videoFrameInFlight = false
+                    autoreleasepool {
+                        do {
+                            let output = try watermark.apply(to: frameSample.sample, frame: frame)
+                            guard pipeline.videoInput.append(output) else {
+                                pipeline.fail(pipeline.writer.error
+                                    ?? VideoExportError.exportFailed("A video frame could not be encoded."))
+                                return
+                            }
+                            let seconds = CMTimeGetSeconds(time)
+                            if seconds.isFinite {
+                                pipeline.progress(min(max(seconds / max(pipeline.duration, 0.001), 0), 0.995))
+                            }
+                        } catch {
+                            pipeline.fail(error)
+                        }
+                    }
+                    drainVideo(pipeline, on: queue)
+                }
+            } catch {
+                queue.async { [weak pipeline] in pipeline?.fail(error) }
             }
         }
     }
@@ -508,7 +590,10 @@ private final class ExportPipelineState: @unchecked Sendable {
     let audioOutput: AVAssetReaderAudioMixOutput?
     let audioInput: AVAssetWriterInput?
     let duration: Double
+    let watermark: ExportWatermark?
     let progress: @Sendable (Double) -> Void
+    // Accessed only on the export queue.
+    var videoFrameInFlight = false
     private let stateLock = NSLock()
     private var cancellationRequested = false
     private var readerWasStarted = false
@@ -539,6 +624,7 @@ private final class ExportPipelineState: @unchecked Sendable {
         audioOutput: AVAssetReaderAudioMixOutput?,
         audioInput: AVAssetWriterInput?,
         duration: Double,
+        watermark: ExportWatermark?,
         progress: @escaping @Sendable (Double) -> Void
     ) {
         self.reader = reader
@@ -548,6 +634,7 @@ private final class ExportPipelineState: @unchecked Sendable {
         self.audioOutput = audioOutput
         self.audioInput = audioInput
         self.duration = duration
+        self.watermark = watermark
         self.progress = progress
         self.audioFinished = audioOutput == nil || audioInput == nil
     }
@@ -755,5 +842,81 @@ enum PhotoLibraryExportService {
         let destination = folder.appendingPathComponent(url.lastPathComponent)
         try FileManager.default.copyItem(at: url, to: destination)
         return destination
+    }
+}
+
+
+// Applied only to final export frames, after the editor composition has rendered.
+private struct ExportFrameSample: @unchecked Sendable {
+    let sample: CMSampleBuffer
+}
+
+private final class ExportWatermark: @unchecked Sendable {
+    private let generator: AVAssetImageGenerator
+    private let context = CIContext(options: [.cacheIntermediates: false])
+    private var lastFrame: CGImage?
+
+    init(width: Int, height: Int) throws {
+        guard let url = Bundle.main.url(forResource: "MotionaryWatermark", withExtension: "mov") else {
+            throw VideoExportError.exportFailed("The watermark video is missing from the app.")
+        }
+        generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        // Decode only as many pixels as the small on-screen watermark needs.
+        let targetWidth = min(CGFloat(width), CGFloat(height)) * 0.40 / 0.566
+        generator.maximumSize = CGSize(width: max(targetWidth, 2), height: max(targetWidth * 2 / 3, 2))
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+    }
+
+    func frame(at time: CMTime) async throws -> CGImage {
+        let timestamp = CMTimeGetSeconds(time)
+        let seconds = timestamp.isFinite ? max(0, timestamp) : 0
+        if seconds >= 4.98, let lastFrame { return lastFrame }
+        let frame = try await generator.image(
+            at: CMTime(seconds: min(seconds, 4.98), preferredTimescale: 600)
+        ).image
+        if seconds >= 4.98 { lastFrame = frame }
+        return frame
+    }
+
+    func apply(to sample: CMSampleBuffer, frame: CGImage) throws -> CMSampleBuffer {
+        guard let source = CMSampleBufferGetImageBuffer(sample) else {
+            throw VideoExportError.exportFailed("A video frame could not be read.")
+        }
+        let width = CVPixelBufferGetWidth(source)
+        let height = CVPixelBufferGetHeight(source)
+        var destination: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA,
+                                         [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &destination)
+        guard status == kCVReturnSuccess, let destination else {
+            throw VideoExportError.exportFailed("A watermarked frame could not be created.")
+        }
+        // Bounds of the visible animation across all frames, normalized to the
+        // source video. Its transparent canvas is substantially larger than the logo.
+        let visibleTop: CGFloat = 1 - 0.425
+        let visibleWidth: CGFloat = 0.566
+        let shortEdge = CGFloat(min(width, height))
+        // Use the short edge for consistent, balanced margins in any aspect ratio.
+        let inset = shortEdge * 0.03
+        let scale = shortEdge * 0.40 / (CGFloat(frame.width) * visibleWidth)
+        let overlay = CIImage(cgImage: frame)
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.75)
+            ])
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(
+                translationX: (CGFloat(width) - CGFloat(frame.width) * scale) * 0.5,
+                y: CGFloat(height) - inset - CGFloat(frame.height) * visibleTop * scale
+            ))
+        let result = overlay.composited(over: CIImage(cvPixelBuffer: source))
+        context.render(result, to: destination, bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: CGColorSpaceCreateDeviceRGB())
+        var format: CMVideoFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: destination, formatDescriptionOut: &format)
+        guard let format else { throw VideoExportError.exportFailed("A watermarked frame could not be formatted.") }
+        var timing = CMSampleTimingInfo(duration: CMSampleBufferGetDuration(sample), presentationTimeStamp: CMSampleBufferGetPresentationTimeStamp(sample), decodeTimeStamp: .invalid)
+        var output: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault, imageBuffer: destination, formatDescription: format, sampleTiming: &timing, sampleBufferOut: &output)
+        guard let output else { throw VideoExportError.exportFailed("A watermarked frame could not be prepared.") }
+        return output
     }
 }

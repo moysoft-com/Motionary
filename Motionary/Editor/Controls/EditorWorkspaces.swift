@@ -2581,11 +2581,14 @@ struct EditorValueScrubber: View {
     private func beginScrub() {
         momentumTask?.cancel()
         momentumTask = nil
-        if isEditing { onEnded() }
-        tickPosition = position(for: value)
         isDragging = true
-        isEditing = true
-        onBegan()
+        if !isEditing {
+            tickPosition = position(for: value)
+            isEditing = true
+            onBegan()
+        }
+        // A new touch during momentum continues the same edit from the
+        // visible ruler position, even if the model value is still catching up.
         EditorHaptics.scrubStart()
     }
 
@@ -2829,7 +2832,7 @@ struct SelectedLayerMiniTimeline: View {
                 workspaceContext: TimelineWorkspaceContext(
                     itemID: contextClipID, activeSection: activeSection,
                     activeEffectID: activeEffectID, graphSegment: graphSegment,
-                    showsOnlySelectedTrack: true
+                    showsOnlySelectedTrack: true, viewModel: viewModel
                 )
             )
         }
@@ -2845,6 +2848,13 @@ struct TimelineContextKeyframes: View {
     let activeEffectID: UUID?
     let graphSegment: KeyframeSegment?
     var height: CGFloat = 38
+    var onMove: ((KeyframeSection, Double, Double) -> Bool)? = nil
+    var onEndMove: (() -> Void)? = nil
+    @State private var draggedTime: Double?
+    @State private var draggedSection: KeyframeSection?
+    @State private var currentDragTime: Double?
+    @State private var isSnapped = false
+    @State private var didMove = false
 
     var body: some View {
         ZStack {
@@ -2865,17 +2875,17 @@ struct TimelineContextKeyframes: View {
     @ViewBuilder
     private func marker(time: Double, section: KeyframeSection) -> some View {
         let isActiveSection = section == activeSection
-        let isCurrent =
-            isActiveSection
-            && abs((item.timelineStart + time) - currentTime) <= tolerance
+        let isDragging = draggedSection == section && draggedTime == time
+        let displayedTime = isDragging ? (currentDragTime ?? time) : time
+        let isCurrent = isActiveSection && abs((item.timelineStart + displayedTime) - currentTime) <= tolerance
         let isGraphEndpoint =
             graphSegment?.clipID == item.id
             && graphSegment?.section == section
-            && (abs((graphSegment?.startTime ?? -.infinity) - time) <= tolerance
-                || abs((graphSegment?.endTime ?? -.infinity) - time) <= tolerance)
-        let size: CGFloat = isActiveSection ? 12 : 9
+            && (abs((graphSegment?.startTime ?? -.infinity) - displayedTime) <= tolerance
+                || abs((graphSegment?.endTime ?? -.infinity) - displayedTime) <= tolerance)
+        let size: CGFloat = isDragging ? 18 : (isActiveSection ? 12 : 9)
         KeyframeDiamondShape()
-            .fill(isCurrent || isGraphEndpoint ? MotionaryTheme.control : Color.clear)
+            .fill(isCurrent || isGraphEndpoint || isDragging ? MotionaryTheme.control : Color.clear)
             .overlay {
                 KeyframeDiamondShape()
                     .stroke(
@@ -2884,8 +2894,63 @@ struct TimelineContextKeyframes: View {
                     )
             }
             .frame(width: size, height: size)
-            .position(x: markerX(for: time), y: height * 0.5)
-            .zIndex(isActiveSection ? 2 : 1)
+            .animation(.easeOut(duration: 0.16), value: isDragging)
+            .frame(width: 32, height: height)
+            .overlay {
+                if isActiveSection, onMove != nil {
+                    TimelineLongPressInteractionTarget(
+                        minimumPressDuration: 0.3, allowableMovement: 6,
+                        accessibilityIdentifier: "timeline-keyframe-\(section.rawValue)-\(time)",
+                        accessibilityLabel: "Keyframe",
+                        onTap: {},
+                        onLongPressBegan: {
+                            guard draggedTime == nil else { return }
+                            draggedSection = section
+                            draggedTime = time
+                            currentDragTime = time
+                            isSnapped = false
+                            didMove = false
+                            EditorHaptics.dragStart()
+                        },
+                        onLongPressChanged: { value in
+                            guard draggedSection == section, draggedTime == time,
+                                  let previous = currentDragTime else { return }
+                            let proposed = min(max(time + Double(value.translation.width / max(width, 1)) * item.placementDuration, 0), item.placementDuration)
+                            let playhead = currentTime - item.timelineStart
+                            let threshold = 10 / max(width, 1) * item.placementDuration
+                            let snapped = (0...item.placementDuration).contains(playhead) && abs(proposed - playhead) <= threshold
+                            let destination = snapped ? playhead : proposed
+                            if abs(destination - previous) > 0.0000001,
+                               onMove?(section, previous, destination) == true {
+                                currentDragTime = destination
+                                didMove = true
+                            }
+                            if snapped && !isSnapped && abs((currentDragTime ?? time) - playhead) < 0.000001 {
+                                EditorHaptics.snap()
+                            }
+                            isSnapped = snapped
+                        },
+                        onLongPressEnded: { commit in
+                            guard draggedSection == section, draggedTime == time else { return }
+                            if !commit, let currentDragTime, abs(currentDragTime - time) > 0.0000001 {
+                                _ = onMove?(section, currentDragTime, time)
+                            }
+                            if didMove {
+                                onEndMove?()
+                                if commit { EditorHaptics.editCommit() }
+                            }
+                            draggedTime = nil
+                            draggedSection = nil
+                            currentDragTime = nil
+                            isSnapped = false
+                            didMove = false
+                        }
+                    )
+                }
+            }
+            .allowsHitTesting(isActiveSection && onMove != nil)
+            .position(x: markerX(for: displayedTime), y: height * 0.5)
+            .zIndex(isDragging ? 3 : (isActiveSection ? 2 : 1))
     }
 
     private func graphSegmentIndicator(_ segment: KeyframeSegment) -> some View {
@@ -2896,6 +2961,7 @@ struct TimelineContextKeyframes: View {
             .frame(width: max(endX - startX, 2), height: 2)
             .position(x: (startX + endX) * 0.5, y: height * 0.5)
             .shadow(color: MotionaryTheme.accent.opacity(0.55), radius: 2)
+            .allowsHitTesting(false)
             .zIndex(0)
     }
 
@@ -2904,9 +2970,13 @@ struct TimelineContextKeyframes: View {
     }
 
     private func keyframeTimes(in section: KeyframeSection) -> [Double] {
-        if section == .effects {
-            return item.keyframeTimes(in: section, effectID: activeEffectID)
+        var times = item.keyframeTimes(in: section, effectID: section == .effects ? activeEffectID : nil)
+        if section == draggedSection, let original = draggedTime, let current = currentDragTime,
+           !times.contains(where: { abs($0 - original) < 0.000001 }),
+           let index = times.firstIndex(where: { abs($0 - current) < 0.000001 }) {
+            // Keep the gesture's view identity stable if a fresh timeline snapshot arrives.
+            times[index] = original
         }
-        return item.keyframeTimes(in: section)
+        return times
     }
 }

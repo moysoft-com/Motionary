@@ -6,6 +6,26 @@ import Testing
 @testable import Motionary
 
 struct KeyframeEditingTests {
+    @Test func movingKeyframesAcrossEachOtherPreservesFramesAndReversesCurve() {
+        let curve = KeyframeInterpolation.cubicBezier(
+            control1: KeyframeControlPoint(x: 0.2, y: 0.1),
+            control2: KeyframeControlPoint(x: 0.6, y: 0.8)
+        )
+        let first = Keyframe(time: 1, value: 10.0, interpolation: curve)
+        let second = Keyframe(time: 2, value: 20.0)
+        var frames = [first, second]
+        moveTimelineKeyframe(&frames, from: 1, to: 3)
+        #expect(frames.map(\.id) == [second.id, first.id])
+        #expect(frames.map(\.value) == [20, 10])
+        for position in [0.2, 0.5, 0.8] {
+            #expect(abs(frames[0].interpolation.progress(at: position) - (1 - curve.progress(at: 1 - position))) < 0.0001)
+        }
+        moveTimelineKeyframe(&frames, from: 3, to: 2)
+        #expect(frames.map(\.time) == [2, 3])
+        moveTimelineKeyframe(&frames, from: 3, to: 1)
+        #expect(frames.map(\.id) == [first.id, second.id])
+    }
+
     @Test func springPresetOscillatesRoundTripsAndSurvivesSplitting() throws {
         let spring = KeyframeCurvePreset.spring.interpolation
         #expect(spring.progress(at: 0) == 0)
@@ -295,6 +315,34 @@ struct KeyframeEditingTests {
         for time in stride(from: 4.0, through: 10.0, by: 0.25) {
             #expect(abs(split.right.value(at: time - 4) - property.value(at: time)) < 0.0005)
         }
+    }
+
+    @MainActor
+    @Test func interactiveKeyframeDragUpdatesGraphAndCreatesOneUndoStep() throws {
+        let clipID = UUID()
+        let curve = KeyframeCurvePreset.easeIn.interpolation
+        let clip = TimelineClip(
+            id: clipID, name: "Animated",
+            source: ClipSource(url: URL(fileURLWithPath: "/tmp/drag.mov"), mediaType: .video, originalDuration: 4),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4),
+            transform: ClipTransform(positionX: AnimatableProperty(baseValue: 0, keyframes: [
+                Keyframe(time: 1, value: 0.0, interpolation: curve),
+                Keyframe(time: 2, value: 1.0)
+            ]))
+        )
+        let viewModel = makeViewModel(clip: clip)
+        defer { viewModel.stop() }
+        viewModel.selectClip(clipID, trackID: viewModel.project.tracks[0].id)
+        viewModel.graphSegment = KeyframeSegment(clipID: clipID, section: .transform, startTime: 1, endTime: 2, interpolation: curve)
+        #expect(viewModel.moveTimelineKeyframes(itemID: clipID, section: .transform, effectID: nil, from: 1, to: 1.5, interactive: true))
+        #expect(viewModel.graphSegment?.startTime == 1.5)
+        #expect(viewModel.moveTimelineKeyframes(itemID: clipID, section: .transform, effectID: nil, from: 1.5, to: 3, interactive: true))
+        #expect(viewModel.graphSegment?.startTime == 2)
+        #expect(viewModel.graphSegment?.endTime == 3)
+        #expect(viewModel.selectedClip?.transform.positionX.keyframes.map(\.time) == [2, 3])
+        viewModel.finishInteractiveEdit()
+        viewModel.undo()
+        #expect(viewModel.selectedClip?.transform.positionX.keyframes.map(\.time) == [1, 2])
     }
 
     @MainActor

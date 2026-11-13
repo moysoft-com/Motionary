@@ -636,3 +636,45 @@ private func normalizedPoint(
                 : 1)
     )
 }
+
+// Reorder frames without losing their identity or overwriting a neighbour.
+func moveTimelineKeyframe<Value>(_ frames: inout [Keyframe<Value>], from: Double, to: Double)
+where Value: Codable & Equatable {
+    guard let index = frames.firstIndex(where: { abs($0.time - from) < 0.000001 }),
+          !frames.enumerated().contains(where: { $0.offset != index && abs($0.element.time - to) < 0.000001 })
+    else { return }
+    let id = frames[index].id
+    frames[index].time = to
+    var current = index
+    while current + 1 < frames.count && frames[current].time > frames[current + 1].time {
+        let curve = frames[current].interpolation
+        frames[current].interpolation = frames[current + 1].interpolation
+        frames[current + 1].interpolation = curve.reversedForTimeline()
+        frames.swapAt(current, current + 1)
+        current += 1
+    }
+    while current > 0 && frames[current].time < frames[current - 1].time {
+        let curve = frames[current - 1].interpolation
+        frames[current - 1].interpolation = frames[current].interpolation
+        frames[current].interpolation = curve.reversedForTimeline()
+        frames.swapAt(current - 1, current)
+        current -= 1
+    }
+    assert(frames[current].id == id)
+}
+
+private extension KeyframeInterpolation {
+    func reversedForTimeline() -> Self {
+        switch self {
+        case .linear: return .linear
+        case .hold: return .hold
+        case .spring(let start, let end, let damping, let frequency):
+            return .spring(start: end, end: start, damping: damping, frequency: frequency)
+        case .cubicBezier(let a, let b):
+            return .cubicBezier(
+                control1: KeyframeControlPoint(x: 1 - b.x, y: 1 - b.y),
+                control2: KeyframeControlPoint(x: 1 - a.x, y: 1 - a.y)
+            )
+        }
+    }
+}

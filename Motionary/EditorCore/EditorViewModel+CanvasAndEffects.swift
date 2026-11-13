@@ -229,6 +229,7 @@ extension EditorViewModel {
 
     func beginInteractiveEdit() {
         if interactiveEditSnapshot == nil {
+            pausePlaybackForEditing()
             interactiveEditSnapshot = project
         }
     }

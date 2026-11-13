@@ -414,6 +414,7 @@ extension EditorViewModel {
     }
 
     func selectClip(_ clipID: UUID?, trackID: UUID? = nil, revealInPreview: Bool = false) {
+        if clipID != selectedClipID { pausePlaybackForEditing() }
         let resolvedTrackID: UUID?
         if let trackID {
             resolvedTrackID = trackID

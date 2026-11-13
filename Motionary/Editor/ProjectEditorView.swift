@@ -90,6 +90,7 @@ struct ProjectEditorView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
                     EditorHaptics.tap()
+                    viewModel.pausePlaybackForEditing()
                     isExportSettingsPresented = true
                 } label: {
                     Label("Export", systemImage: "square.and.arrow.down")
@@ -109,6 +110,7 @@ struct ProjectEditorView: View {
             viewModel.stop()
         }
         .onChange(of: scenePhase) { _, phase in
+            if phase == .inactive { viewModel.pausePlaybackForEditing() }
             if phase == .background { viewModel.suspendPreview() }
             if phase == .active { viewModel.resumePreview() }
         }
@@ -616,7 +618,8 @@ struct ProjectEditorView: View {
             activeSection: activePanel == .graph ? graphReturnPanel.keyframeSection : activeTimelineKeyframeSection,
             activeEffectID: activePanel == .graph && graphReturnPanel == .effects
                 ? viewModel.graphSegment?.effectID : activeEffectWorkspaceID,
-            graphSegment: activePanel == .graph ? viewModel.graphSegment : nil
+            graphSegment: activePanel == .graph ? viewModel.graphSegment : nil,
+            viewModel: viewModel
         )
     }
 

@@ -361,6 +361,20 @@ extension EditorViewModel {
         startPlaybackWatchdog()
     }
 
+    func pausePlaybackForEditing() {
+        guard isPlaying || playbackState.isStartingPlayback || pendingPlaybackResumeAfterPreviewRebuild else { return }
+        pendingPlaybackResumeAfterPreviewRebuild = false
+        guard let player else {
+            playbackCommandGeneration &+= 1
+            playbackState.isStartingPlayback = false
+            isPlaying = false
+            stopPlaybackWatchdog()
+            return
+        }
+        player.cancelPendingPrerolls()
+        pausePlaybackForUserCommand(player)
+    }
+
     private func pausePlaybackForUserCommand(_ player: AVPlayer) {
         let wasSeeking = isPreviewSeekInFlight
         previewSeekGeneration &+= 1
@@ -503,6 +517,7 @@ extension EditorViewModel {
             finishInteractiveEdit(rebuild: false, delayRebuild: false)
         }
         guard let command = undoStack.popLast() else { return }
+        pausePlaybackForEditing()
         let retainedClipID = selectedClipID
         let previousTracks = project.tracks
         publishProjectChange()
@@ -540,6 +555,7 @@ extension EditorViewModel {
             finishInteractiveEdit(rebuild: true, delayRebuild: false)
         }
         guard let command = redoStack.popLast() else { return }
+        pausePlaybackForEditing()
         let retainedClipID = selectedClipID
         let previousTracks = project.tracks
         publishProjectChange()
@@ -571,6 +587,7 @@ extension EditorViewModel {
     }
 
     func seek(to time: Double, exact: Bool = true) {
+        pausePlaybackForEditing()
         playbackState.isStartingPlayback = false
         scratchAudio.end()
         invalidateLivePreviewPresentation()

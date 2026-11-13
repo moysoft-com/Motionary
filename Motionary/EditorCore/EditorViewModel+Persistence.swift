@@ -143,6 +143,7 @@ extension EditorViewModel {
         refreshTimeline: Bool = true,
         seekTo time: Double? = nil
     ) {
+        pausePlaybackForEditing()
         perform(
             command,
             recordHistory: recordHistory,

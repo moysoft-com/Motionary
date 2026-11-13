@@ -135,8 +135,7 @@ struct TimelineItemBlock: View {
                             playbackState: playbackState, item: previewItem, context: context,
                             tolerance: keyframeTolerance, width: displayWidth, height: height
                         )
-                        .allowsHitTesting(false)
-                        .zIndex(2)
+                        .zIndex(4)
                     }
                 } else {
                     TimelineKeyframeMarkers(
@@ -722,7 +721,11 @@ private struct TimelinePlayheadKeyframes: View {
         TimelineContextKeyframes(
             item: item, currentTime: playbackState.currentTime, tolerance: tolerance, width: width,
             activeSection: context.activeSection, activeEffectID: context.activeEffectID,
-            graphSegment: context.graphSegment, height: height
+            graphSegment: context.graphSegment, height: height,
+            onMove: context.itemID == item.id ? { section, from, to in
+                context.viewModel?.moveTimelineKeyframes(itemID: item.id, section: section, effectID: context.activeEffectID, from: from, to: to, interactive: true) ?? false
+            } : nil,
+            onEndMove: { context.viewModel?.finishInteractiveEdit() }
         )
     }
 }

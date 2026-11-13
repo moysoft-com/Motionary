@@ -878,3 +878,112 @@ extension EditorViewModel {
         return min(max(proposed, lower), upper)
     }
 }
+
+
+extension EditorViewModel {
+    @discardableResult
+    func moveTimelineKeyframes(itemID: UUID, section: KeyframeSection, effectID: UUID?, from: Double, to: Double, interactive: Bool = false) -> Bool {
+        guard selectedTimelineItemID == itemID, let item = project.item(id: itemID),
+              from.isFinite, to.isFinite, abs(from - to) > 0.0000001 else { return false }
+        let destination = min(max(to, 0), item.placementDuration)
+        guard !item.keyframeTimes(in: section, effectID: effectID).contains(where: {
+            abs($0 - from) >= 0.000001 && abs($0 - destination) < 0.000001
+        }), let location = project.itemLocation(id: itemID), !project.tracks[location.track].isLocked else { return false }
+        if interactive { beginInteractiveEdit() }
+        if section == .speed {
+            mutateProject(rebuild: !interactive, recordHistory: !interactive, persistChanges: !interactive, touchUpdatedAt: !interactive) { project in
+                guard let location = project.itemLocation(id: itemID),
+                      !project.tracks[location.track].isLocked,
+                      case .media(var media) = project.tracks[location.track].items[location.item] else { return }
+                media.speedMap.timeRemap?.moveKeyframe(from: from, to: destination)
+                project.tracks[location.track].items[location.item] = .media(media)
+            }
+        } else if selectedTextItem != nil {
+            updateSelectedText(interactive: interactive) { text in
+                if section == .effects {
+                    moveEffectKeyframes(&text.visuals.effectStack, effectID: effectID, from: from, to: destination)
+                }
+                let targets = text.keyframeTargets(in: section, includingInactiveEffects: true)
+                if targets.contains(where: \.isScaleTarget) {
+                    moveTimelineKeyframe(&text.visuals.transform.scale.keyframes, from: from, to: destination)
+                }
+                if section == .textStyle {
+                    moveTimelineKeyframe(&text.propertyAnimations.fillColor.keyframes, from: from, to: destination)
+                    moveTimelineKeyframe(&text.propertyAnimations.strokeColor.keyframes, from: from, to: destination)
+                    moveTimelineKeyframe(&text.propertyAnimations.shadowColor.keyframes, from: from, to: destination)
+                    moveTimelineKeyframe(&text.propertyAnimations.backgroundColor.keyframes, from: from, to: destination)
+                }
+                for target in targets where !target.isScaleTarget {
+                    switch target {
+                    case .textFill, .textStroke, .textShadow, .textBackground: continue
+                    default: break
+                    }
+                    guard var property = text.animatableProperty(for: target) else { continue }
+                    moveTimelineKeyframe(&property.keyframes, from: from, to: destination)
+                    text.setAnimatableProperty(property, for: target)
+                }
+            }
+        } else {
+            updateSelectedClip(rebuild: !interactive, recordHistory: !interactive, persistChanges: !interactive, touchUpdatedAt: !interactive) { clip in
+                if section == .effects {
+                    moveEffectKeyframes(&clip.effectStack, effectID: effectID, from: from, to: destination)
+                    return
+                }
+                let targets = clip.keyframeTargets(in: section, effectID: effectID)
+                if targets.contains(where: \.isScaleTarget) {
+                    moveTimelineKeyframe(&clip.transform.scale.keyframes, from: from, to: destination)
+                }
+                for target in targets where !target.isScaleTarget {
+                    guard var property = clip.animatableProperty(for: target) else { continue }
+                    moveTimelineKeyframe(&property.keyframes, from: from, to: destination)
+                    clip.setAnimatableProperty(property, for: target)
+                }
+            }
+        }
+        refreshGraphSegmentAfterKeyframeMove(itemID: itemID, section: section, from: from, to: destination)
+        if interactive {
+            scheduleInteractivePreviewRebuild(invalidation: section == .speed ? [.previewFrame, .compositionTopology, .audioMix] : (section == .audio ? [.audioMix] : [.previewFrame]))
+        }
+        return true
+    }
+
+    private func refreshGraphSegmentAfterKeyframeMove(itemID: UUID, section: KeyframeSection, from: Double, to: Double) {
+        guard let old = graphSegment, old.clipID == itemID, old.section == section,
+              let item = project.item(id: itemID) else { return }
+        let movingStart = abs(old.startTime - from) < 0.000001
+        let movingEnd = abs(old.endTime - from) < 0.000001
+        guard movingStart || movingEnd else { refreshGraphSegment(); return }
+        let other = movingStart ? old.endTime : old.startTime
+        let times = item.keyframeTimes(in: section, effectID: old.effectID).sorted()
+        guard let index = times.firstIndex(where: { abs($0 - to) < 0.000001 }) else { return }
+        let neighbour = other > to ? index + 1 : index - 1
+        guard times.indices.contains(neighbour) else { refreshGraphSegment(); return }
+        let start = min(times[index], times[neighbour])
+        let end = max(times[index], times[neighbour])
+        let candidate: KeyframeSegment?
+        if section == .speed, case .media(let media) = item,
+           let frames = media.speedMap.timeRemap?.keyframes,
+           let left = frames.first(where: { abs($0.time - start) < 0.000001 }) {
+            candidate = KeyframeSegment(clipID: itemID, section: section, startTime: start, endTime: end, interpolation: left.interpolation)
+        } else if case .text(let text) = item {
+            candidate = textGraphSegmentCandidate(in: section, item: text, localTime: (start + end) / 2)
+        } else if let clip = item.visualEditingClip() {
+            candidate = graphSegmentCandidate(in: section, clip: clip, localTime: (start + end) / 2, effectID: old.effectID)
+        } else {
+            candidate = nil
+        }
+        graphSegment = candidate
+        if let candidate { displayedGraphSegment = candidate }
+    }
+}
+
+private func moveEffectKeyframes(_ stack: inout EffectStack, effectID: UUID?, from: Double, to: Double) {
+    for index in stack.effects.indices where effectID == nil || stack.effects[index].id == effectID {
+        moveTimelineKeyframe(&stack.effects[index].mix.keyframes, from: from, to: to)
+        for key in Array(stack.effects[index].parameters.keys) {
+            guard var parameter = stack.effects[index].parameters[key] else { continue }
+            moveTimelineKeyframe(&parameter.keyframes, from: from, to: to)
+            stack.effects[index].parameters[key] = parameter
+        }
+    }
+}
