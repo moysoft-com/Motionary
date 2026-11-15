@@ -10,6 +10,40 @@
 	<string>Motionary</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>MotionaryWBFallback</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>MotionaryWBFallback60x60</string>
+					<string>MotionaryWBFallback76x76</string>
+					<string>MotionaryWBFallback83.5x83.5</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
+	<key>CFBundleIcons~ipad</key>
+	<dict>
+		<key>CFBundleAlternateIcons</key>
+		<dict>
+			<key>MotionaryWBFallback</key>
+			<dict>
+				<key>CFBundleIconFiles</key>
+				<array>
+					<string>MotionaryWBFallback60x60</string>
+					<string>MotionaryWBFallback76x76</string>
+					<string>MotionaryWBFallback83.5x83.5</string>
+				</array>
+				<key>UIPrerenderedIcon</key>
+				<true/>
+			</dict>
+		</dict>
+	</dict>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -22,13 +56,6 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>UTExportedTypeDeclarations</key>
-    <array><dict>
-        <key>UTTypeIdentifier</key><string>com.moysoft.motionary.project</string>
-        <key>UTTypeDescription</key><string>Motionary Project</string>
-        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
-        <key>UTTypeTagSpecification</key><dict><key>public.filename-extension</key><array><string>mpj</string></array></dict>
-    </dict></array>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
@@ -79,39 +106,25 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
-	<key>CFBundleIcons</key>
-	<dict>
-		<key>CFBundleAlternateIcons</key>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
 		<dict>
-			<key>MotionaryWBFallback</key>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Motionary Project</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.moysoft.motionary.project</string>
+			<key>UTTypeTagSpecification</key>
 			<dict>
-				<key>CFBundleIconFiles</key>
+				<key>public.filename-extension</key>
 				<array>
-					<string>MotionaryWBFallback60x60</string>
-					<string>MotionaryWBFallback76x76</string>
-					<string>MotionaryWBFallback83.5x83.5</string>
+					<string>mpj</string>
 				</array>
-				<key>UIPrerenderedIcon</key>
-				<true/>
 			</dict>
 		</dict>
-	</dict>
-	<key>CFBundleIcons~ipad</key>
-	<dict>
-		<key>CFBundleAlternateIcons</key>
-		<dict>
-			<key>MotionaryWBFallback</key>
-			<dict>
-				<key>CFBundleIconFiles</key>
-				<array>
-					<string>MotionaryWBFallback60x60</string>
-					<string>MotionaryWBFallback76x76</string>
-					<string>MotionaryWBFallback83.5x83.5</string>
-				</array>
-				<key>UIPrerenderedIcon</key>
-				<true/>
-			</dict>
-		</dict>
-	</dict>
+	</array>
 </dict>
 </plist>

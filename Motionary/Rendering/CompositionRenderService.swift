@@ -1414,14 +1414,21 @@ final class CompositionRenderService {
                     }
                     continue
                 }
-                guard try await insertRetimedTrack(
-                    sourceTrack: sourceAudioTrack,
-                    sourceURL: metadata.asset.url,
-                    compositionTrack: compositionAudioTrack,
-                    sourceRange: mediaItem.sourceRange,
-                    timelineStart: mediaItem.timelineStart,
-                    speedMap: mediaItem.speedMap
-                ) else {
+                let inserted: Bool
+                do {
+                    inserted = try await insertRetimedTrack(
+                        sourceTrack: sourceAudioTrack, sourceURL: metadata.asset.url,
+                        compositionTrack: compositionAudioTrack, sourceRange: mediaItem.sourceRange,
+                        timelineStart: mediaItem.timelineStart, speedMap: mediaItem.speedMap)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    composition.removeTrack(compositionAudioTrack)
+                    if failurePolicy == .failOnUnavailableEffects { throw error }
+                    AppLogger.rendering.warning("Preview audio unavailable for \(mediaItem.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    continue
+                }
+                guard inserted else {
                     composition.removeTrack(compositionAudioTrack)
                     continue
                 }
@@ -2060,14 +2067,21 @@ final class CompositionRenderService {
                 preferredTrackID: kCMPersistentTrackID_Invalid
             )
         {
-            guard try await insertRetimedTrack(
-                sourceTrack: sourceAudioTrack,
-                sourceURL: metadata.asset.url,
-                compositionTrack: compositionAudioTrack,
-                sourceRange: source.sourceRange,
-                timelineStart: source.timelineStart,
-                speedMap: source.speedMap
-            ) else {
+            let inserted: Bool
+            do {
+                inserted = try await insertRetimedTrack(
+                    sourceTrack: sourceAudioTrack, sourceURL: metadata.asset.url,
+                    compositionTrack: compositionAudioTrack, sourceRange: source.sourceRange,
+                    timelineStart: source.timelineStart, speedMap: source.speedMap)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                composition.removeTrack(compositionAudioTrack)
+                if sourceAvailabilityPolicy == .required { throw error }
+                AppLogger.rendering.warning("Preview audio unavailable for \(source.name, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard inserted else {
                 composition.removeTrack(compositionAudioTrack)
                 return
             }
@@ -2115,6 +2129,9 @@ final class CompositionRenderService {
                     ),
                     toDuration: cmTime(timelineDuration)
                 )
+            }
+            if sourceTrack.mediaType == .audio {
+                trimTrackEnd(compositionTrack, to: cmTime(timelineStart + timelineDuration))
             }
             return true
         }
@@ -2196,7 +2213,20 @@ final class CompositionRenderService {
         }
         try compositionTrack.validateSegments(edits)
         compositionTrack.segments = edits
+        // The video clock and composition instructions use the project
+        // timescale. A finer-grained audio edit can otherwise extend a
+        // fraction of a millisecond beyond them, causing AVPlayer to reject
+        // the entire video composition. Trim, rather than rescale, so the
+        // authored source mapping remains unchanged up to the shared end.
+        trimTrackEnd(compositionTrack, to: cmTime(timelineStart + remap.duration))
         return true
+    }
+
+    private func trimTrackEnd(_ track: AVMutableCompositionTrack, to end: CMTime) {
+        let trackEnd = track.timeRange.end
+        if trackEnd > end {
+            track.removeTimeRange(CMTimeRange(start: end, end: trackEnd))
+        }
     }
 
     /// Schema-10 image assets were stored as one-frame JPEG movies. Keep that

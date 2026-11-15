@@ -4,6 +4,40 @@ import Testing
 @testable import Motionary
 
 struct TimeRemapTests {
+    @Test func manyRedundantAnchorsProduceOnlyTheNecessaryAudioEdits() throws {
+        var remap = try #require(TimeRemap(sourceDuration: 8, timelineDuration: 4))
+        remap.setSourceTime(6, at: 2, tolerance: 0.000_001)
+        for index in 1..<400 {
+            if index == 200 { continue }
+            remap.toggleKeyframe(at: Double(index) / 100, tolerance: 0.000_001)
+        }
+        #expect(remap.keyframes.count == 401)
+        #expect(remap.hasVariableSpeed)
+        let segments = remap.renderSegments()
+        #expect(segments.count == 2)
+        let first = try #require(segments.first)
+        let last = try #require(segments.last)
+        #expect(abs(first.sourceDuration - 6) < 0.000_001)
+        #expect(abs(last.sourceDuration - 2) < 0.000_001)
+        #expect(abs(first.timelineDuration - 2) < 0.000_001)
+        #expect(abs(last.timelineDuration - 2) < 0.000_001)
+        for time in stride(from: 0.0, through: 4.0, by: 0.031) {
+            let expected = time <= 2 ? 3 * time : 6 + (time - 2)
+            #expect(abs(remap.sourceTime(at: time) - expected) < 0.000_001)
+        }
+    }
+
+    @Test func shiftedAnchorsIncludeHeldEdgesInAudioMapping() throws {
+        var remap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        remap.moveKeyframe(from: 0, to: 0.5)
+        remap.moveKeyframe(from: 4, to: 3.5)
+        #expect(remap.hasVariableSpeed)
+        let segments = remap.renderSegments()
+        #expect(segments.count == 3)
+        #expect(segments.first?.sourceDuration == 0)
+        #expect(segments.last?.sourceDuration == 0)
+    }
+
     @Test func addingAnAnchorAndSlicingPreserveAnEasedCurve() throws {
         var remap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 2))
         remap.setInterpolation(KeyframeCurvePreset.easeInOut.interpolation, at: 0)

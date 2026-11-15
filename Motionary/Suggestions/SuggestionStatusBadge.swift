@@ -17,6 +17,7 @@ struct SuggestionStatusBadge: View {
         case .normal: MotionaryTheme.textSecondary
         case .marked: .orange
         case .inProgress: MotionaryTheme.accent
+        case .later: .blue
         case .done: .green
         case .hidden: .secondary
         }

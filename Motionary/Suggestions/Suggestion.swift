@@ -28,6 +28,7 @@ enum SuggestionStatus: String, CaseIterable, Identifiable {
     case normal
     case marked
     case inProgress
+    case later
     case done
     case hidden
 
@@ -37,6 +38,7 @@ enum SuggestionStatus: String, CaseIterable, Identifiable {
         switch firestoreValue {
         case "marked": self = .marked
         case "inProgress": self = .inProgress
+        case "later": self = .later
         case "done": self = .done
         case "hidden", "rejected": self = .hidden
         default: self = .normal
@@ -48,6 +50,7 @@ enum SuggestionStatus: String, CaseIterable, Identifiable {
         case .normal: "Normal"
         case .marked: "Marked"
         case .inProgress: "In Progress"
+        case .later: "Later"
         case .done: "Done"
         case .hidden: "Hidden"
         }
@@ -58,6 +61,7 @@ enum SuggestionStatus: String, CaseIterable, Identifiable {
         case .normal: "circle"
         case .marked: "bookmark.fill"
         case .inProgress: "hammer.fill"
+        case .later: "clock.fill"
         case .done: "checkmark.circle.fill"
         case .hidden: "eye.slash.fill"
         }
@@ -68,8 +72,9 @@ enum SuggestionStatus: String, CaseIterable, Identifiable {
         case .inProgress: 0
         case .marked: 1
         case .normal: 2
-        case .done: 3
-        case .hidden: 4
+        case .later: 3
+        case .done: 4
+        case .hidden: 5
         }
     }
 }

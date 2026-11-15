@@ -106,7 +106,7 @@ struct SettingsView: View {
                         SettingsLabel("Suggestions", systemImage: "sparkles", colors: [.yellow, .orange])
                     }
                 } header: {
-                    Text("Other")
+                    Text("Feedback")
                 }
 
                 Section {

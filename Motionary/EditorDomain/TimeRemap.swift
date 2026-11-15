@@ -78,7 +78,8 @@ struct TimeRemap: Codable, Equatable, Sendable {
     }
 
     var hasVariableSpeed: Bool {
-        guard keyframes.first?.value == 0, keyframes.last?.value == sourceDuration else { return true }
+        guard keyframes.first?.time == 0, keyframes.last?.time == duration,
+            keyframes.first?.value == 0, keyframes.last?.value == sourceDuration else { return true }
         let speed = averageSpeed
         return zip(keyframes, keyframes.dropFirst()).contains { left, right in
             left.interpolation != .linear
@@ -271,7 +272,24 @@ struct TimeRemap: Codable, Equatable, Sendable {
             segments.append(SpeedMapSegment(sourceStart: keyframes.last?.value ?? baseValue,
                                             sourceDuration: 0, timelineDuration: duration - trailingStart))
         }
-        return segments
+        // Keyframes inserted on a straight line do not change the mapping.
+        // Avoid handing AVFoundation a separate audio edit for each one.
+        var merged: [SpeedMapSegment] = []
+        for segment in segments {
+            if let previous = merged.last,
+                abs(previous.sourceStart + previous.sourceDuration - segment.sourceStart) < 0.000_000_001,
+                abs(previous.sourceDuration / previous.timelineDuration
+                    - segment.sourceDuration / segment.timelineDuration) < 0.000_000_001
+            {
+                merged[merged.count - 1] = SpeedMapSegment(
+                    sourceStart: previous.sourceStart,
+                    sourceDuration: previous.sourceDuration + segment.sourceDuration,
+                    timelineDuration: previous.timelineDuration + segment.timelineDuration)
+            } else {
+                merged.append(segment)
+            }
+        }
+        return merged
     }
 
     static func supportedInterpolation(_ interpolation: KeyframeInterpolation) -> KeyframeInterpolation {

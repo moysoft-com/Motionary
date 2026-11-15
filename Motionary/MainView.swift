@@ -128,6 +128,24 @@ struct MainView: App {
     }
 
     private var tabView: some View {
+        Group {
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                iPadTabs
+            } else {
+                phoneTabs
+                    .ignoresSafeArea(.container)
+            }
+        }
+        .sensoryFeedback(.selection, trigger: selectedTab)
+        .onChange(of: selectedTab) { _, tab in
+            if tab == 1 {
+                isProjectSearchPresented = false
+                projectSearchText = ""
+            }
+        }
+    }
+
+    private var phoneTabs: some View {
         ProjectTabController(selection: $selectedTab, isSearching: isProjectSearchPresented, isEditorPresented: isEditorPresented, homeRevision: newProjectRequest, onSearch: {
             selectedTab = 0
             isProjectSearchPresented.toggle()
@@ -146,16 +164,75 @@ struct MainView: App {
         } settings: {
             SettingsView()
         }
-        // The UIKit container owns the system-bar insets for its hosted screens.
-        // Give it the full window instead of insetting it again in SwiftUI.
-        .ignoresSafeArea(.container)
-        .sensoryFeedback(.selection, trigger: selectedTab)
-        .onChange(of: selectedTab) { _, tab in
-            if tab == 1 {
+    }
+
+    private var iPadTabs: some View {
+        ZStack {
+            HomeView(
+                projectStore: projectStore,
+                newProjectRequest: newProjectRequest,
+                searchText: $projectSearchText,
+                isSearchPresented: $isProjectSearchPresented,
+                onEditorPresentationChange: { isEditorPresented = $0 }
+            )
+            .opacity(selectedTab == 0 ? 1 : 0)
+            .allowsHitTesting(selectedTab == 0)
+            .accessibilityHidden(selectedTab != 0)
+
+            SettingsView()
+                .opacity(selectedTab == 1 ? 1 : 0)
+                .allowsHitTesting(selectedTab == 1)
+                .accessibilityHidden(selectedTab != 1)
+        }
+        .tint(.primary)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !isEditorPresented {
+                iPadTabBar
+            }
+        }
+    }
+
+    private var iPadTabBar: some View {
+        HStack(spacing: 8) {
+            iPadTabButton("Motionary", image: Image("MotionarySF"), selected: selectedTab == 0) {
+                selectedTab = 0
                 isProjectSearchPresented = false
                 projectSearchText = ""
             }
+            iPadTabButton("Settings", image: Image(systemName: "gearshape.fill"), selected: selectedTab == 1) {
+                selectedTab = 1
+            }
+            Divider().frame(height: 24).padding(.horizontal, 4)
+            iPadTabButton(isProjectSearchPresented ? "Close search" : "Search",
+                          image: Image(systemName: isProjectSearchPresented ? "keyboard.chevron.compact.down" : "magnifyingglass"),
+                          selected: false) {
+                if isProjectSearchPresented { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
+                selectedTab = 0
+                isProjectSearchPresented.toggle()
+                if !isProjectSearchPresented { projectSearchText = "" }
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            }
         }
+        .padding(8)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(.primary.opacity(0.08), lineWidth: 0.5))
+        .padding(.top, 8)
+        .padding(.bottom, 8)
+    }
+
+    private func iPadTabButton(_ label: String, image: Image, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            image
+                .renderingMode(.template)
+                .font(.system(size: 20, weight: .semibold))
+                .frame(width: 56, height: 44)
+                .foregroundStyle(selected ? MotionaryTheme.accent : Color.secondary)
+                .background(selected ? Color.primary.opacity(0.08) : .clear, in: Capsule())
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func handlePendingAction() {

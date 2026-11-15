@@ -244,6 +244,7 @@ private enum SuggestionFeedFilter: String, CaseIterable, Identifiable {
     case active
     case marked
     case inProgress
+    case later
     case done
     case mine
 
@@ -254,6 +255,7 @@ private enum SuggestionFeedFilter: String, CaseIterable, Identifiable {
         case .active: "All"
         case .marked: "Marked"
         case .inProgress: "In Progress"
+        case .later: "Later"
         case .done: "Done"
         case .mine: "Mine"
         }
@@ -264,6 +266,7 @@ private enum SuggestionFeedFilter: String, CaseIterable, Identifiable {
         case .active: "rectangle.stack"
         case .marked: SuggestionStatus.marked.systemImage
         case .inProgress: SuggestionStatus.inProgress.systemImage
+        case .later: SuggestionStatus.later.systemImage
         case .done: SuggestionStatus.done.systemImage
         case .mine: "person.fill"
         }
@@ -272,11 +275,13 @@ private enum SuggestionFeedFilter: String, CaseIterable, Identifiable {
     func includes(_ suggestion: Suggestion, currentUserID: String) -> Bool {
         switch self {
         case .active:
-            [.normal, .marked, .inProgress].contains(suggestion.resolvedStatus)
+            [.normal, .marked, .inProgress, .later].contains(suggestion.resolvedStatus)
         case .marked:
             suggestion.resolvedStatus == .marked
         case .inProgress:
             suggestion.resolvedStatus == .inProgress
+        case .later:
+            suggestion.resolvedStatus == .later
         case .done:
             suggestion.resolvedStatus == .done
         case .mine:
