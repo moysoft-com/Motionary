@@ -58,57 +58,15 @@ final class ProjectPosterService: @unchecked Sendable {
         guard rendered.hasVideo, let videoComposition = rendered.videoComposition else {
             throw ProjectPosterError.noVisualContent
         }
-        let data = try renderFramePNG(
-            from: rendered,
-            videoComposition: videoComposition,
-            at: 0,
-            frameRate: renderSettings.frameRate
-        )
+        let frame = try await CompositionVideoFrameReader.read(from: rendered.composition,
+            videoComposition: videoComposition, at: 0, frameRate: renderSettings.frameRate)
+        let data = try pngData(from: frame)
         try Task.checkCancellation()
         try FileManager.default.createDirectory(
             at: outputURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
         try data.write(to: outputURL, options: [.atomic])
-    }
-
-    private func renderFramePNG(
-        from rendered: RenderedComposition,
-        videoComposition: AVVideoComposition,
-        at time: Double,
-        frameRate: Int32
-    ) throws -> Data {
-        let videoTracks = rendered.composition.tracks(withMediaType: .video)
-        guard !videoTracks.isEmpty else { throw ProjectPosterError.noVisualContent }
-
-        let reader = try AVAssetReader(asset: rendered.composition)
-        reader.timeRange = CMTimeRange(
-            start: CMTime(seconds: max(time, 0), preferredTimescale: 600),
-            duration: CMTime(value: 1, timescale: max(frameRate, 1))
-        )
-        let output = AVAssetReaderVideoCompositionOutput(
-            videoTracks: videoTracks,
-            videoSettings: [
-                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
-            ]
-        )
-        output.videoComposition = videoComposition
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { throw ProjectPosterError.readerUnavailable }
-        reader.add(output)
-        guard reader.startReading() else {
-            throw ProjectPosterError.readerFailed(reader.error?.localizedDescription ?? "Unknown error")
-        }
-        defer { reader.cancelReading() }
-        guard let sampleBuffer = output.copyNextSampleBuffer(),
-            let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
-        else {
-            if let error = reader.error {
-                throw ProjectPosterError.readerFailed(error.localizedDescription)
-            }
-            throw ProjectPosterError.noVideoFrame
-        }
-        return try pngData(from: pixelBuffer)
     }
 
     private func pngData(from pixelBuffer: CVPixelBuffer) throws -> Data {
@@ -145,4 +103,50 @@ final class ProjectPosterService: @unchecked Sendable {
         )
     }
 
+}
+
+private enum CompositionVideoFrameReader {
+    static func read(
+        from composition: AVAsset,
+        videoComposition: AVVideoComposition,
+        at time: Double,
+        frameRate: Int32
+    ) async throws -> CVPixelBuffer {
+        let videoTracks = try await composition.loadTracks(withMediaType: .video)
+        guard !videoTracks.isEmpty else { throw ProjectPosterError.noVisualContent }
+
+        let reader = try AVAssetReader(asset: composition)
+        reader.timeRange = CMTimeRange(
+            start: CMTime(seconds: max(time, 0), preferredTimescale: 600),
+            duration: CMTime(value: 1, timescale: max(frameRate, 1))
+        )
+        let output = AVAssetReaderVideoCompositionOutput(
+            videoTracks: videoTracks,
+            videoSettings: [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+            ]
+        )
+        output.videoComposition = videoComposition
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { throw ProjectPosterError.readerUnavailable }
+        reader.add(output)
+        // This reader only requests one frame. Keep start, read and cancel on
+        // the same executor: cancelling during startReading can race inside
+        // AVFoundation's custom-compositor setup.
+        try Task.checkCancellation()
+        guard reader.startReading() else {
+            throw ProjectPosterError.readerFailed(reader.error?.localizedDescription ?? "Unknown error")
+        }
+        defer { reader.cancelReading() }
+        guard let sampleBuffer = output.copyNextSampleBuffer(),
+            let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer)
+        else {
+            if let error = reader.error {
+                throw ProjectPosterError.readerFailed(error.localizedDescription)
+            }
+            throw ProjectPosterError.noVideoFrame
+        }
+        try Task.checkCancellation()
+        return pixelBuffer
+    }
 }

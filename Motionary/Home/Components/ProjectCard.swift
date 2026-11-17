@@ -59,7 +59,7 @@ struct ProjectCard: View {
                             Menu {
                                 Button("Share Project", systemImage: "square.and.arrow.up", action: onExport)
                                 Button("Rename", systemImage: "pencil", action: onRename)
-                                Button("Delete", systemImage: "trash", role: .destructive, action: onDelete)
+                                DeleteMenuButton(action: onDelete)
                             } label: {
                                 Image(systemName: "ellipsis")
                                     .font(.system(size: 16, weight: .bold))

@@ -457,13 +457,25 @@ extension EditorViewModel {
             renderService.livePreviewState.clearPausedFrameRenderer()
             invalidateLivePreviewPresentation(preservingFrame: true)
         }
+        let audioInvalidation: EditorInvalidation = [.audioMix, .compositionTopology]
+        if !invalidation.intersection(audioInvalidation).isEmpty {
+            scratchAudio.invalidate()
+        }
+        let updatesAudio = !effectiveInvalidation.intersection(audioInvalidation).isEmpty
         pendingPreviewInvalidation.formUnion(effectiveInvalidation)
         guard !previewIsSuspended, workspaceScrollOwners.isEmpty else { return }
-        if isScrubbing, !effectiveInvalidation.contains(.compositionTopology) {
+        if isScrubbing, !updatesAudio {
             deferredPreviewInvalidation.formUnion(effectiveInvalidation)
             return
         }
-
+        if playbackState.isStartingPlayback, !pendingPlaybackResumeAfterPreviewRebuild {
+            // An edit can arrive while the Play command is waiting for a seek
+            // or audio-session activation. Transfer it to the new graph.
+            playbackCommandGeneration &+= 1
+            pendingPlaybackResumeAfterPreviewRebuild = true
+            cancelPreviewPreroll()
+            player?.currentItem?.cancelPendingSeeks()
+        }
         if rebuildTask != nil, effectiveInvalidation.contains(.previewFrame) {
             os_signpost(.event, log: previewRenderMetricsLog, name: "Dropped Preview Frame")
         }
@@ -478,11 +490,10 @@ extension EditorViewModel {
                     self.rebuildTask = nil
                 }
             }
-            if delay {
+            if delay && !updatesAudio {
                 try? await Task.sleep(nanoseconds: 160_000_000)
             }
-            guard !Task.isCancelled,
-                !self.isScrubbing || effectiveInvalidation.contains(.compositionTopology) else { return }
+            guard !Task.isCancelled, !self.isScrubbing || updatesAudio else { return }
             await self.rebuildPreview(
                 seekTo: time,
                 invalidation: effectiveInvalidation,
@@ -565,7 +576,8 @@ extension EditorViewModel {
                 visuals,
                 shape: shape,
                 text: text,
-                for: itemID
+                for: itemID,
+                affecting: livePreviewCacheRange(for: itemID)
             )
             pendingLiveVisualOverrideItemIDs.insert(itemID)
             scheduleLivePreviewFrameRefresh()
@@ -652,7 +664,16 @@ extension EditorViewModel {
                 currentMediaItem.visuals.volume == prepared.volume,
                 self.renderService.installInteractiveAudioMix(prepared)
             {
+                self.cancelPreviewPreroll()
                 self.player?.currentItem?.audioMix = prepared.audioMix
+                if !self.isPlaying { self.playbackNeedsSeekAfterMixUpdate = true }
+                self.scratchAudio.invalidate()
+                if self.isScrubbing,
+                    self.pendingPreviewInvalidation.intersection([.compositionTopology, .audioMix]).isEmpty
+                {
+                    self.scratchAudio.prepare(item: self.player?.currentItem,
+                        duration: self.duration, at: self.currentTime)
+                }
                 self.lastLiveAudioPreviewRefresh = CFAbsoluteTimeGetCurrent()
                 installed = true
             }
@@ -712,8 +733,26 @@ extension EditorViewModel {
         let itemIDs = pendingLiveVisualOverrideItemIDs
         pendingLiveVisualOverrideItemIDs.removeAll(keepingCapacity: true)
         for itemID in itemIDs {
-            renderService.livePreviewState.clearVisuals(for: itemID)
+            renderService.livePreviewState.clearVisuals(
+                for: itemID, affecting: livePreviewCacheRange(for: itemID)
+            )
         }
+    }
+
+    func livePreviewCacheRange(for itemID: UUID) -> ClosedRange<Double>? {
+        guard !pendingPreviewInvalidation.contains(.compositionTopology),
+            let instruction = player?.currentItem?.videoComposition?.instructions.first
+                as? MotionaryVideoCompositionInstruction,
+            instruction.renderSessionID == previewRenderSessionID,
+            let clip = instruction.clips.first(where: { $0.clipID == itemID })
+        else { return nil }
+        // Use the installed descriptor rather than the proposed edit. Text
+        // can already contribute to the preceding frame when it crosses the
+        // frame's end. Include one frame at both boundaries for rounding.
+        let lowerBound = max(0, clip.timelineStart - instruction.frameDuration)
+        let upperBound = clip.timelineStart + clip.duration + instruction.frameDuration
+        guard lowerBound.isFinite, upperBound.isFinite, upperBound >= lowerBound else { return nil }
+        return lowerBound...upperBound
     }
 
     func beginLivePreviewInteraction() {
@@ -732,10 +771,15 @@ extension EditorViewModel {
         immediate: Bool = false
     ) {
         setPreviewQualityForInteraction(true)
+        let affectedTimeRange = livePreviewCacheRange(for: itemID)
         if let hidden {
-            renderService.livePreviewState.setTransform(transform, hidden: hidden, for: itemID)
+            renderService.livePreviewState.setTransform(
+                transform, hidden: hidden, for: itemID, affecting: affectedTimeRange
+            )
         } else {
-            renderService.livePreviewState.setTransform(transform, for: itemID)
+            renderService.livePreviewState.setTransform(
+                transform, for: itemID, affecting: affectedTimeRange
+            )
         }
         if immediate {
             livePreviewFrameRefreshTask?.cancel()
@@ -757,13 +801,17 @@ extension EditorViewModel {
     }
 
     func hideLivePreviewSource(for itemID: UUID) {
-        renderService.livePreviewState.setHidden(true, for: itemID)
+        renderService.livePreviewState.setHidden(
+            true, for: itemID, affecting: livePreviewCacheRange(for: itemID)
+        )
         scheduleLivePreviewFrameRefresh()
     }
 
     func showLivePreviewSource(for itemID: UUID?, refresh: Bool = true) {
         if let itemID {
-            renderService.livePreviewState.clearOverride(for: itemID)
+            renderService.livePreviewState.clearOverride(
+                for: itemID, affecting: livePreviewCacheRange(for: itemID)
+            )
             pendingLiveVisualOverrideItemIDs.remove(itemID)
         } else {
             renderService.livePreviewState.removeAll()
@@ -775,7 +823,9 @@ extension EditorViewModel {
     }
 
     func showLivePreviewSourcePreservingTransform(for itemID: UUID, refresh: Bool = true) {
-        renderService.livePreviewState.revealPreservingTransform(for: itemID)
+        renderService.livePreviewState.revealPreservingTransform(
+            for: itemID, affecting: livePreviewCacheRange(for: itemID)
+        )
         if refresh {
             scheduleLivePreviewFrameRefresh()
         }
@@ -805,7 +855,9 @@ extension EditorViewModel {
 
     func clearLivePreviewTransform(for itemID: UUID?, refresh: Bool = true) {
         if let itemID {
-            renderService.livePreviewState.clearTransform(for: itemID)
+            renderService.livePreviewState.clearTransform(
+                for: itemID, affecting: livePreviewCacheRange(for: itemID)
+            )
         } else {
             renderService.livePreviewState.removeAll()
             pendingLiveVisualOverrideItemIDs.removeAll(keepingCapacity: true)
@@ -820,7 +872,10 @@ extension EditorViewModel {
         setPreviewQualityForInteraction(true)
         guard !isScrubbing else { return }
         pendingLivePreviewFrameRefresh = true
+        enqueueLivePreviewFrameRefresh()
+    }
 
+    func enqueueLivePreviewFrameRefresh() {
         // Input and GPU completion drive this path. Project frame rate and
         // layer count must not throttle a 60/120 Hz canvas gesture. While a
         // frame is in flight, keep only the newest sample; its completion
@@ -840,16 +895,17 @@ extension EditorViewModel {
             try? await Task.sleep(for: .milliseconds(8))
             guard !Task.isCancelled, let self else { return }
             self.livePreviewFrameRefreshTask = nil
-            self.scheduleLivePreviewFrameRefresh()
+            guard !self.isScrubbing, !self.previewIsSuspended, self.workspaceScrollOwners.isEmpty else { return }
+            self.enqueueLivePreviewFrameRefresh()
         }
     }
 
-    private func issueLivePreviewFrameRefresh() {
+    private func issueLivePreviewFrameRefresh(retryingBootstrap: Bool = false) {
         guard pendingLivePreviewFrameRefresh else { return }
         guard let player else { return }
-        guard !isPlaying else { return }
+        guard !isPlaying, !playbackState.isStartingPlayback else { return }
         guard !livePreviewFrameRefreshInFlight, !isRenderingPreview else {
-            scheduleLivePreviewFrameRefresh()
+            enqueueLivePreviewFrameRefresh()
             return
         }
 
@@ -860,22 +916,23 @@ extension EditorViewModel {
         let renderSessionID = previewRenderSessionID
         livePreviewFrameRefreshInFlight = true
         lastLivePreviewFrameRefresh = CFAbsoluteTimeGetCurrent()
-        let target = clampedPlayableTime(currentTime)
+        let target = canonicalPreviewFrameTime(currentTime)
         // The exact composed frame may already be on hand under the current
         // live revision (e.g. rendered by a just-finished scrub step). Present
         // it directly instead of forcing a same-time re-seek below.
         if let fresh = renderService.livePreviewState.cachedFrame(
-            at: livePreviewPresentationTime(target), sessionID: renderSessionID)
+            at: target, sessionID: renderSessionID)
         {
             livePreviewFrameRefreshInFlight = false
-            livePreviewPresentation.setFrame(fresh, at: livePreviewPresentationTime(target))
+            livePreviewPresentation.setFrame(fresh, at: target)
+            hasRenderedInitialPreviewFrame = true
             if pendingLivePreviewFrameRefresh {
-                scheduleLivePreviewFrameRefresh()
+                enqueueLivePreviewFrameRefresh()
             }
             return
         }
         if renderService.livePreviewState.renderPausedFrame(
-            at: livePreviewPresentationTime(target), sessionID: renderSessionID,
+            at: target, sessionID: renderSessionID,
             completion: { [weak self, weak player] frame in
                 Task { @MainActor in
                     guard let self, let player, self.player === player,
@@ -891,7 +948,7 @@ extension EditorViewModel {
                         // Keep the latest refresh instead of covering the new
                         // composition with this obsolete result.
                         self.pendingLivePreviewFrameRefresh = true
-                        self.scheduleLivePreviewFrameRefresh()
+                        self.enqueueLivePreviewFrameRefresh()
                         return
                     }
                     // Frames are serialized: present completed work even when
@@ -900,14 +957,15 @@ extension EditorViewModel {
                     if let frame {
                         self.livePreviewPresentation.setFrame(
                             frame,
-                            at: self.livePreviewPresentationTime(target)
+                            at: target
                         )
+                        self.hasRenderedInitialPreviewFrame = true
                     } else {
                         self.renderService.livePreviewState.clearPausedFrameRenderer()
                         self.pendingLivePreviewFrameRefresh = true
                     }
                     if self.pendingLivePreviewFrameRefresh {
-                        self.scheduleLivePreviewFrameRefresh()
+                        self.enqueueLivePreviewFrameRefresh()
                     }
                 }
             }
@@ -922,6 +980,7 @@ extension EditorViewModel {
         // samples without it.
         if let item = player.currentItem,
             let composition = item.videoComposition?.mutableCopy() as? AVMutableVideoComposition {
+            cancelPreviewPreroll()
             item.videoComposition = composition
         }
         player.currentItem?.cancelPendingSeeks()
@@ -932,10 +991,11 @@ extension EditorViewModel {
             }
             let didSeek = await self.boundedSeek(
                 player: player,
-                to: self.livePreviewPresentationTime(target),
+                to: target,
                 toleranceBefore: .zero,
                 toleranceAfter: .zero,
-                timeoutNanoseconds: 5_000_000_000
+                timeoutNanoseconds: 5_000_000_000,
+                frameAligned: true
             )
             guard self.player === player,
                 self.livePreviewFrameRefreshGeneration == generation
@@ -947,7 +1007,7 @@ extension EditorViewModel {
                 !self.isRenderingPreview
             else {
                 self.pendingLivePreviewFrameRefresh = true
-                self.scheduleLivePreviewFrameRefresh()
+                self.enqueueLivePreviewFrameRefresh()
                 return
             }
             if didSeek == .timedOut {
@@ -958,19 +1018,29 @@ extension EditorViewModel {
                 return
             }
             if didSeek == .completed {
-                // The refreshed AVPlayerLayer now owns the canonical frame.
-                // A previously displayed direct-render frame would otherwise
-                // remain opaque above it until the user scrubs or plays.
-                self.livePreviewPresentation.frame = nil
-            } else {
-                // A cancelled seek has not satisfied the refresh request.
+                // A seek can complete before the player layer presents its
+                // frame. Replace the held image with the current composed
+                // sample instead of exposing the temporarily empty layer.
+                if let frame = self.renderService.livePreviewState.cachedFrame(
+                    at: target, sessionID: renderSessionID)
+                {
+                    self.livePreviewPresentation.setFrame(frame, at: target)
+                    self.hasRenderedInitialPreviewFrame = true
+                } else if player.currentItem?.videoComposition == nil {
+                    self.livePreviewPresentation.frame = nil
+                }
+            } else if didSeek == .interrupted, !retryingBootstrap, !self.pendingLivePreviewFrameRefresh {
+                // A single interruption can coincide with AVFoundation
+                // installing a new frame provider. Give it one retry.
                 self.pendingLivePreviewFrameRefresh = true
+                self.issueLivePreviewFrameRefresh(retryingBootstrap: true)
+                return
             }
             guard self.pendingLivePreviewFrameRefresh,
                 !self.isScrubbing,
                 !self.isPlaying
             else { return }
-            self.scheduleLivePreviewFrameRefresh()
+            self.enqueueLivePreviewFrameRefresh()
         }
     }
 
@@ -994,6 +1064,11 @@ extension EditorViewModel {
         // positions. Zero is an authored frame too: advancing it by one frame
         // changes cut/animation/source timing and can cross a short first clip.
         return CMTimeGetSeconds(CMTime(seconds: time, preferredTimescale: 600))
+    }
+
+    func canonicalPreviewFrameTime(_ time: Double) -> Double {
+        let rate = Double(max(project.renderSettings.frameRate, 1))
+        return floor(clampedPlayableTime(time) * rate + 0.000_001) / rate
     }
 
     func persist() {
@@ -1046,7 +1121,7 @@ extension EditorViewModel {
         // the player by the preview canvas, so this observer publishes at most
         // once per project frame. Frame-quantized updates skip MainActor work
         // when the 50 ms tick lands inside the same frame as the previous
-        // tick (the common case). Item-end delivery owns playback completion.
+        // tick (the common case). Check the end before quantizing the clock.
         var lastPublishedQuantizedTime = -1.0
         guard let player else { return }
         timeObserver = player.addPeriodicTimeObserver(
@@ -1059,6 +1134,7 @@ extension EditorViewModel {
                     !self.isRenderingPreview, !self.isPreviewSeekInFlight else { return }
                 let seconds = CMTimeGetSeconds(player.currentTime())
                 guard seconds.isFinite else { return }
+                if let item = player.currentItem, self.finishPreviewPlayback(for: item) { return }
                 let frameDuration = 1 / Double(max(self.project.renderSettings.frameRate, 1))
                 let quantized = floor(seconds / frameDuration) * frameDuration
                 guard quantized != lastPublishedQuantizedTime else { return }
@@ -1068,14 +1144,23 @@ extension EditorViewModel {
         }
     }
 
-    func finishPreviewPlayback(for item: AVPlayerItem) {
+    @discardableResult
+    func finishPreviewPlayback(for item: AVPlayerItem, reachedItemEnd: Bool = false) -> Bool {
         guard let player, player.currentItem === item, isPlaying, !isScrubbing,
-            !isPreviewSeekInFlight, CMTimeGetSeconds(player.currentTime()) >= lastPlayableTime
-        else { return }
+            !isPreviewSeekInFlight else { return false }
+        let end = item.duration
+        let time = player.currentTime()
+        guard reachedItemEnd || (end.isNumeric && end > .zero && time.isNumeric && time >= end)
+        else { return false }
+        isPlaying = false
+        playbackState.isStartingPlayback = false
         player.pause()
         stopPlaybackWatchdog()
-        updateCurrentTime(lastPlayableTime)
-        isPlaying = false
+        updateCurrentTime(duration)
+        if pendingPreviewInvalidation.intersection([.compositionTopology, .audioMix]).isEmpty {
+            scratchAudio.prepare(item: item, duration: duration, at: currentTime)
+        }
+        return true
     }
 
     func updateHistoryFlags() {
@@ -1135,6 +1220,14 @@ extension EditorViewModel {
             do {
                 try await Task.sleep(for: .milliseconds(900))
                 let signature = await Task.detached(priority: .utility) { snapshot.projectPosterSignatureData }.value
+                // Rendering a poster spins up another composition and decoder.
+                // Give the editor's seeks and playback priority over that work.
+                while self.map({
+                    $0.isPlaying || $0.isScrubbing || $0.isPreviewSeekInFlight
+                        || $0.playbackState.isStartingPlayback || $0.rebuildTask != nil
+                }) == true {
+                    try await Task.sleep(for: .milliseconds(350))
+                }
                 guard !Task.isCancelled, let self, let signature,
                     signature != self.lastProjectPosterSignature
                 else { return }

@@ -124,6 +124,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
     private let resources: MetalRenderResources
     private let effectRegistry: EffectRenderRegistry
     private let textLayerRenderer = TextLayerRenderer()
+    private let previewStillImages = PreviewStillImageCache()
     private let rasterizationLock = NSLock()
     private var gpuImageCacheGeneration: UInt64 = 0
     private var inFrameTextTextureUploadCount = 0
@@ -255,6 +256,11 @@ final class MetalFrameRenderer: @unchecked Sendable {
             let frameDuration = max(plan.frameDuration, 1 / 600)
             let frameIndex = Int64((safeTime / frameDuration).rounded(.toNearestOrAwayFromZero))
             let canvasRect = CGRect(origin: .zero, size: plan.renderSize)
+            let effectScale = plan.scrubEffectScale
+            let authoredCanvasSize = CGSize(
+                width: plan.renderSize.width / plan.renderScale,
+                height: plan.renderSize.height / plan.renderScale
+            )
             let backgroundColor = CIColor(
                 red: plan.backgroundColor.red,
                 green: plan.backgroundColor.green,
@@ -427,8 +433,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
                         outputScale: plan.renderScale,
                         rasterScaleCorrection: sourceResult.rasterScaleCorrection,
                         mediaSize: image.extent.size,
-                        canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
-                            height: plan.renderSize.height / plan.renderScale)
+                        canvasSize: authoredCanvasSize,
+                        effectScale: effectScale
                     )
                     var renderContext = EffectRenderContext(
                             compositionTime: safeTime,
@@ -442,8 +448,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
                             usesUnmaskedStillDepth: clip.backgroundRemoval == nil,
                             frameDuration: plan.frameDuration,
                             layerMotion: EffectLayerMotion(transform: clip.transform,
-                                canvasSize: CGSize(width: plan.renderSize.width / plan.renderScale,
-                                    height: plan.renderSize.height / plan.renderScale),
+                                canvasSize: CGSize(width: authoredCanvasSize.width * effectScale,
+                                    height: authoredCanvasSize.height * effectScale),
                                 isGenerated: isGeneratedLayer)
                         )
                     renderContext.depthSourceEffects = clip.depthEffects
@@ -610,6 +616,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
     }
 
     func purgeCaches() {
+        previewStillImages.removeAll()
         rasterizationLock.lock()
         gpuImageCacheGeneration &+= 1
         maskImageCache.removeAllObjects()
@@ -909,20 +916,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
             )
         }
         if let stillImageURL = clip.stillImageURL {
-            guard var image = try stillImage(
-                at: stillImageURL, cacheIdentity: clip.stillImageCacheIdentity,
-                resources: frameResources
-            ) else {
-                return SourceResult(image: nil, textAnimationSample: nil,
-                    rasterScaleCorrection: CGSize(width: 1, height: 1))
-            }
-            if let settings = clip.backgroundRemoval {
-                let matte: CIImage?
-                if settings.requiresForegroundMatte, let url = clip.backgroundMaskImageURL {
-                    matte = try stillImage(at: url, cacheIdentity: nil, resources: frameResources)?.applyingFilter("CIMaskToAlpha")
-                } else { matte = nil }
-                image = BackgroundRemovalImageRenderer.apply(settings, matte: matte, to: image, renderScale: plan.renderScale)
-            }
+            let image = try previewStillImage(at: stillImageURL, clip: clip, plan: plan, resources: frameResources)
+                ?? originalStillImage(at: stillImageURL, clip: clip, plan: plan, resources: frameResources)
             return SourceResult(image: image, textAnimationSample: nil,
                 rasterScaleCorrection: CGSize(width: 1, height: 1))
         }
@@ -1002,7 +997,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
         let coordinates = LayerEffectCoordinates(
             isGeneratedLayer: true,
             outputScale: plan.renderScale,
-            rasterScaleCorrection: CGSize(width: 1, height: 1)
+            rasterScaleCorrection: CGSize(width: 1, height: 1),
+            effectScale: plan.scrubEffectScale
         )
         var processed = try effectRegistry.render(
             clip.effectStack,
@@ -1135,6 +1131,69 @@ final class MetalFrameRenderer: @unchecked Sendable {
             }
         }
         return lower
+    }
+
+    func preparePreviewStillImages(_ plan: FrameRenderPlan, at time: Double, sessionID: UUID) {
+        guard plan.livePreviewState != nil, plan.quality != .export, time.isFinite else { return }
+        previewStillImages.prepare(clips: plan.clips, at: time,
+            maximumDimension: PreviewStillImageCache.maximumDimension(renderSize: plan.renderSize),
+            sessionID: sessionID)
+    }
+
+    private func previewStillImage(
+        at url: URL, clip: RenderClipDescriptor, plan: FrameRenderPlan, resources: MetalFrameResources
+    ) throws -> CIImage? {
+        guard plan.livePreviewState != nil, plan.quality != .export else { return nil }
+        let dimension = PreviewStillImageCache.maximumDimension(renderSize: plan.renderSize)
+        let source = PreviewStillImageCache.Source(url: url, identity: clip.stillImageCacheIdentity)
+        let sourceKey = source.key(maximumDimension: dimension)
+        let matteSource: PreviewStillImageCache.Source?
+        let key: NSString
+        if let cutout = clip.backgroundRemoval {
+            guard cutout.requiresForegroundMatte, let matteURL = clip.backgroundMaskImageURL else { return nil }
+            let matte = PreviewStillImageCache.Source(url: matteURL, identity: nil)
+            matteSource = matte
+            let matteKey = matte.key(maximumDimension: dimension)
+            key = "preview-cutout\u{0}\(sourceKey)\u{0}\(matteKey)\u{0}\(cutout.edgeRefinement)\u{0}\(cutout.feather)\u{0}\(cutout.isInverted)\u{0}\(plan.renderScale)" as NSString
+        } else {
+            matteSource = nil
+            key = "preview-still-\(sourceKey)" as NSString
+        }
+        if let cached = gpuImageCache.object(forKey: key) { return cached.image }
+        guard let decoded = previewStillImages.image(for: source, maximumDimension: dimension) else { return nil }
+
+        var image = decoded.image
+        let scaleX = decoded.originalSize.width / image.extent.width
+        let scaleY = decoded.originalSize.height / image.extent.height
+        if let cutout = clip.backgroundRemoval, let matteSource {
+            guard let matte = previewStillImages.image(for: matteSource, maximumDimension: dimension) else { return nil }
+            // Bake the immutable source and its mask together. Authored mask
+            // radii are expressed in the original source's coordinate space.
+            image = BackgroundRemovalImageRenderer.apply(
+                cutout, matte: matte.image.applyingFilter("CIMaskToAlpha"), to: image,
+                renderScale: plan.renderScale / max(scaleX, scaleY)
+            )
+        }
+        rasterizationLock.lock()
+        defer { rasterizationLock.unlock() }
+        return try frameCachedImageLocked(
+            image, key: key, resources: resources,
+            textureLabel: "Motionary cached preview still",
+            signpostName: "Preview Still Upload Encoded",
+            outputTransform: CGAffineTransform(scaleX: scaleX, y: scaleY)
+        )
+    }
+
+    private func originalStillImage(
+        at url: URL, clip: RenderClipDescriptor, plan: FrameRenderPlan, resources: MetalFrameResources
+    ) throws -> CIImage? {
+        let original = try stillImage(at: url, cacheIdentity: clip.stillImageCacheIdentity, resources: resources)
+        guard let image = original, let settings = clip.backgroundRemoval else { return original }
+        let matte: CIImage?
+        if settings.requiresForegroundMatte, let url = clip.backgroundMaskImageURL {
+            matte = try stillImage(at: url, cacheIdentity: nil, resources: resources)?.applyingFilter("CIMaskToAlpha")
+        } else { matte = nil }
+        return BackgroundRemovalImageRenderer.apply(settings, matte: matte, to: image, renderScale: plan.renderScale)
     }
 
     private func stillImage(
@@ -1272,7 +1331,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
         resources frameResources: MetalFrameResources,
         textureLabel: String,
         signpostName: StaticString,
-        incrementTextUploadMetric: Bool = false
+        incrementTextUploadMetric: Bool = false,
+        outputTransform: CGAffineTransform = .identity
     ) throws -> CIImage {
         if let cached = gpuImageCache.object(forKey: key) {
             os_signpost(.event, log: signpostLog, name: "Text Texture Cache Hit")
@@ -1326,6 +1386,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                 y: extent.minY
             ))
             .cropped(to: extent)
+            .transformed(by: outputTransform)
         let cachedImage = CachedGPUImage(image: image, texture: texture)
         let generation = gpuImageCacheGeneration
         frameResources.addCompletionHandler { [weak self, cachedImage] commandBuffer in

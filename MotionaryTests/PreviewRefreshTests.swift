@@ -72,7 +72,7 @@ struct PreviewRefreshTests {
         model.livePreviewPresentation.frame = previous
         var oldCompletion: ((CVPixelBuffer?) -> Void)?
         if cached {
-            model.renderService.livePreviewState.installPausedFrameRenderer { _, _, completion in
+            model.renderService.livePreviewState.installPausedFrameRenderer { _, _, _, completion in
                 oldCompletion = completion
                 return true
             }
@@ -82,7 +82,7 @@ struct PreviewRefreshTests {
         if rotatesSession { model.previewRenderSessionID = UUID() }
         else { model.previewGeneration &+= 1 }
         var freshCompletion: ((CVPixelBuffer?) -> Void)?
-        model.renderService.livePreviewState.installPausedFrameRenderer { _, _, completion in
+        model.renderService.livePreviewState.installPausedFrameRenderer { _, _, _, completion in
             freshCompletion = completion
             return true
         }
@@ -112,7 +112,7 @@ struct PreviewRefreshTests {
         model.scheduleLivePreviewFrameRefresh()
         try await waitUntil { player.pendingSeekCount == 1 }
         let latest = try makeFrame()
-        model.renderService.livePreviewState.installPausedFrameRenderer { _, _, completion in
+        model.renderService.livePreviewState.installPausedFrameRenderer { _, _, _, completion in
             completion(latest)
             return true
         }
@@ -121,6 +121,20 @@ struct PreviewRefreshTests {
         #expect(!model.livePreviewFrameRefreshInFlight)
         #expect(!model.pendingLivePreviewFrameRefresh)
         #expect(player.pendingSeekCount == 1)
+    }
+
+    @MainActor
+    @Test func repeatedBootstrapInterruptionsDoNotLoopWithoutNewInput() async throws {
+        let (model, player) = makeModel()
+        defer { model.stop() }
+        model.scheduleLivePreviewFrameRefresh()
+        try await waitUntil { player.pendingSeekCount == 1 }
+        player.completeSeek(at: 0, finished: false)
+        try await waitUntil { player.pendingSeekCount == 2 }
+        player.completeSeek(at: 1, finished: false)
+        try await waitUntil { !model.livePreviewFrameRefreshInFlight }
+        #expect(!model.pendingLivePreviewFrameRefresh)
+        #expect(player.pendingSeekCount == 2)
     }
 
     @MainActor

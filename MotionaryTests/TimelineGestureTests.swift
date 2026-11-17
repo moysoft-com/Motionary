@@ -280,7 +280,7 @@ struct TimelineGestureTests {
     }
 
     @MainActor
-    @Test func labelMovesInsideViewportWhileItsTickIsVisible() throws {
+    @Test func labelKeepsItsTickOffsetAtTheViewportEdge() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
         ruler.present(TimelineRulerSample(horizontalOffset: 120, verticalOffset: 0,
@@ -289,11 +289,13 @@ struct TimelineGestureTests {
         let label = try #require(band.sublayers?.compactMap { $0 as? CATextLayer }.first {
             !$0.isHidden && ($0.string as? NSAttributedString)?.string == "0:03"
         })
-        #expect(label.frame.maxX + band.position.x <= ruler.bounds.maxX)
+        let labelFrame = label.frame
+        #expect(labelFrame.maxX + band.position.x > ruler.bounds.maxX)
 
         ruler.present(TimelineRulerSample(horizontalOffset: 170, verticalOffset: 0,
                                           pixelsPerSecond: 88, duration: 10))
         #expect(label.frame.maxX + band.position.x < ruler.bounds.maxX)
+        #expect(label.frame == labelFrame)
     }
 
     @MainActor
@@ -319,20 +321,20 @@ struct TimelineGestureTests {
     }
 
     @MainActor
-    @Test func rulerClipsTicksAndLabelsAtTheActualEndOfAShortProject() throws {
+    @Test func rulerStopsTicksAtTheProjectEndAndLeavesRoomForLabels() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
         ruler.present(TimelineRulerSample(horizontalOffset: 84, verticalOffset: 0,
                                           pixelsPerSecond: 280, duration: 0.4))
         let band = try #require(ruler.layer.sublayers?.first)
         #expect(band.masksToBounds)
-        #expect(band.position.x + band.bounds.maxX == 178)
+        #expect(band.position.x + band.bounds.maxX == 242)
         let layers = try #require(band.sublayers)
         for label in layers.compactMap({ $0 as? CATextLayer }) where !label.isHidden {
             #expect(label.frame.maxX <= band.bounds.maxX)
         }
         for ticks in layers.compactMap({ $0 as? CAShapeLayer }) {
-            #expect((ticks.path?.boundingBox.maxX ?? 0) <= band.bounds.maxX + 0.5)
+            #expect((ticks.path?.boundingBox.maxX ?? 0) + band.position.x <= 178)
         }
     }
 

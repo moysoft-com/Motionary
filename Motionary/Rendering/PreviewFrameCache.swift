@@ -13,6 +13,7 @@ final class PreviewFrameCache: @unchecked Sendable {
     private struct Entry {
         let frame: CVPixelBuffer
         let bytes: Int
+        let isScrubFrame: Bool
     }
     private static let timeScale = 600_000.0
     private let lock = NSLock()
@@ -36,11 +37,11 @@ final class PreviewFrameCache: @unchecked Sendable {
         if let memoryWarning { NotificationCenter.default.removeObserver(memoryWarning) }
     }
 
-    func frame(at time: Double, sessionID: UUID, revision: UInt64) -> CVPixelBuffer? {
+    func frame(at time: Double, sessionID: UUID, revision: UInt64, allowsScrubFrames: Bool = false) -> CVPixelBuffer? {
         guard let key = key(at: time, sessionID: sessionID, revision: revision) else { return nil }
         lock.lock()
         defer { lock.unlock() }
-        guard let entry = frames[key] else { return nil }
+        guard let entry = frames[key], allowsScrubFrames || !entry.isScrubFrame else { return nil }
         recency.removeAll { $0 == key }
         recency.append(key)
         return entry.frame
@@ -50,7 +51,7 @@ final class PreviewFrameCache: @unchecked Sendable {
     /// the requested revision. This is a display fallback for scrubbing, not an exact-time
     /// substitute: callers must still seek to the requested time afterwards.
     /// Exact-time evaluation keeps using `frame(at:...)`.
-    func frameNear(at time: Double, sessionID: UUID, window: Double, revision: UInt64)
+    func frameNear(at time: Double, sessionID: UUID, window: Double, revision: UInt64, allowsScrubFrames: Bool = false)
         -> (frame: CVPixelBuffer, time: Double)?
     {
         guard time.isFinite, time >= 0, window >= 0, window < Double(Int64.max / 2) / Self.timeScale else { return nil }
@@ -61,7 +62,9 @@ final class PreviewFrameCache: @unchecked Sendable {
         defer { lock.unlock() }
         var bestKey: Key?
         var bestDistance = Int64.max
-        for key in frames.keys where key.sessionID == sessionID && key.revision == revision {
+        for (key, entry) in frames where key.sessionID == sessionID && key.revision == revision
+            && (allowsScrubFrames || !entry.isScrubFrame)
+        {
             let distance = abs(key.time - queryTime)
             guard distance <= windowTicks else { continue }
             if distance < bestDistance || (distance == bestDistance && key.time < (bestKey?.time ?? Int64.max))
@@ -76,12 +79,14 @@ final class PreviewFrameCache: @unchecked Sendable {
         return (entry.frame, Double(key.time) / Self.timeScale)
     }
 
-    func store(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision: UInt64) {
+    func store(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision: UInt64, isScrubFrame: Bool = false) {
         guard let key = key(at: time, sessionID: sessionID, revision: revision) else { return }
         let cost = CVPixelBufferGetBytesPerRow(frame) * CVPixelBufferGetHeight(frame)
         guard cost > 0, cost <= byteLimit else { return }
         lock.lock()
         defer { lock.unlock() }
+        // A late scrub render must not replace the full-quality result for this time.
+        if isScrubFrame, frames[key]?.isScrubFrame == false { return }
         if let previous = frames.removeValue(forKey: key) { bytes -= previous.bytes }
         recency.removeAll { $0 == key }
         // Under thermal pressure the same composed frames only evict sooner;
@@ -91,7 +96,7 @@ final class PreviewFrameCache: @unchecked Sendable {
             recency.removeFirst()
             if let removed = frames.removeValue(forKey: oldest) { bytes -= removed.bytes }
         }
-        frames[key] = Entry(frame: frame, bytes: cost)
+        frames[key] = Entry(frame: frame, bytes: cost, isScrubFrame: isScrubFrame)
         recency.append(key)
         bytes += cost
     }
@@ -102,6 +107,25 @@ final class PreviewFrameCache: @unchecked Sendable {
         recency.removeAll()
         bytes = 0
         lock.unlock()
+    }
+
+    /// Preserve the LRU order and memory accounting when an edit only
+    /// changes pixels in one timeline interval.
+    func advanceRevision(from oldRevision: UInt64, to newRevision: UInt64,
+                         invalidating affectedTimeRange: ClosedRange<Double>) {
+        lock.lock()
+        defer { lock.unlock() }
+        recency = recency.compactMap { oldKey in
+            guard let entry = frames.removeValue(forKey: oldKey) else { return nil }
+            let time = Double(oldKey.time) / Self.timeScale
+            guard oldKey.revision == oldRevision, !affectedTimeRange.contains(time) else {
+                bytes -= entry.bytes
+                return nil
+            }
+            let key = Key(sessionID: oldKey.sessionID, revision: newRevision, time: oldKey.time)
+            frames[key] = entry
+            return key
+        }
     }
 
     private func effectiveLimits() -> (byteLimit: Int, countLimit: Int) {

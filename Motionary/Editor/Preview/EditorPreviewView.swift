@@ -8,6 +8,7 @@ struct CorePreviewSection: View {
     @ObservedObject var viewModel: EditorViewModel
     @Binding var selectedMediaItems: [PhotosPickerItem]
     @Environment(\.displayScale) private var displayScale
+
     @State private var posterImage: UIImage?
 
     init(viewModel: EditorViewModel, selectedMediaItems: Binding<[PhotosPickerItem]>) {
@@ -27,24 +28,16 @@ struct CorePreviewSection: View {
                     ZStack {
                         viewModel.project.renderSettings.backgroundColor.swiftUIColor
 
-                        // Keep the AVPlayerLayer mounted behind the opening
-                        // poster while the first custom-compositor frame is
-                        // acknowledged. Gating the layer on contentRevision
-                        // deadlocks that acknowledgement because AVFoundation
-                        // has no video output surface to render into.
-                        if let player = viewModel.player {
-                            PreviewRendererView(player: player)
-                                .id(viewModel.previewRendererIdentity)
-                                .frame(width: canvasRect.width, height: canvasRect.height)
-                                .allowsHitTesting(false)
+                        if viewModel.player == nil && viewModel.previewContentRevision == 0 {
+                            openingPlaceholder
                         }
+
+                        PreviewRendererView(playerLayer: viewModel.livePreviewPresentation.playerLayer)
+                            .frame(width: canvasRect.width, height: canvasRect.height)
+                            .allowsHitTesting(false)
 
                         LivePreviewSurface(presentation: viewModel.livePreviewPresentation)
                             .frame(width: canvasRect.width, height: canvasRect.height)
-
-                        if shouldShowOpeningPlaceholder {
-                            openingPlaceholder
-                        }
 
                         Color.clear
                             .contentShape(Rectangle())
@@ -69,7 +62,7 @@ struct CorePreviewSection: View {
                         .allowsHitTesting(false)
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
-                .onChange(of: canvasRect) { _, rect in
+                .onChange(of: canvasRect, initial: true) { _, rect in
                     viewModel.setPreviewDisplayPixelSize(
                         CGSize(
                             width: rect.width * max(displayScale, 1),
@@ -81,10 +74,6 @@ struct CorePreviewSection: View {
         .task(id: viewModel.projectID) {
             posterImage = await loadPosterImage()
         }
-    }
-
-    private var shouldShowOpeningPlaceholder: Bool {
-        viewModel.previewContentRevision == 0
     }
 
     @ViewBuilder

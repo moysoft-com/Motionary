@@ -32,9 +32,9 @@ struct EffectsGestureTestScene: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            if livePreview, let player = viewModel.player {
+            if livePreview {
                 ZStack {
-                    PreviewRendererView(player: player)
+                    PreviewRendererView(playerLayer: viewModel.livePreviewPresentation.playerLayer)
                     LivePreviewSurface(presentation: viewModel.livePreviewPresentation)
                 }
                 .frame(height: 160)
@@ -117,6 +117,27 @@ private struct WorkspaceFrameProbe: UIViewRepresentable {
     func makeUIView(context: Context) -> Probe { Probe() }
     func updateUIView(_ view: Probe, context: Context) {}
 }
+struct ArchivedEditorTestScene: View {
+    let url: URL
+    let store: ProjectStore
+    @State private var projectID = UUID()
+    @State private var content: ProjectContent?
+    @State private var error: String?
+
+    var body: some View {
+        if let content {
+            ProjectEditorView(projectID: projectID, projectStore: store, initialContent: content)
+        } else {
+            Text(error ?? "Opening fixture").task {
+                do {
+                    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("archive-ui-fixture")
+                    content = try ProjectArchive.extract(url: url, to: folder, projectID: projectID)
+                } catch { self.error = error.localizedDescription }
+            }
+        }
+    }
+}
+
 /// Full production editor fixture for inspecting adjustment effects and graph navigation.
 struct AdjustmentEditorTestScene: View {
     @StateObject private var store = ProjectStore()

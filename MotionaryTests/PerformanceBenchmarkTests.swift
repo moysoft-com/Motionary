@@ -300,11 +300,12 @@ struct PerformanceBenchmarkTests {
         let host = UIViewController()
         window.rootViewController = host
         window.isHidden = false
-        let preview = PreviewPlayerContainerView(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
-        preview.playerLayer.player = player
+        let preview = PreviewRendererView.Host(frame: CGRect(x: 0, y: 0, width: 320, height: 180))
+        preview.playbackLayer = AVPlayerLayer()
+        preview.playbackLayer?.player = player
         host.view.addSubview(preview)
         defer {
-            preview.playerLayer.player = nil
+            preview.playbackLayer?.player = nil
             window.isHidden = true
             window.rootViewController = nil
         }

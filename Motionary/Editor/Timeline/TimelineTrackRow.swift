@@ -270,7 +270,7 @@ private struct TimelineTrackHeader: View {
                 Button("Copy", systemImage: "doc.on.doc", action: onCopyTrack)
                 Button("Paste", systemImage: "doc.on.clipboard", action: onPasteTrack)
                 Divider()
-                Button("Delete", systemImage: "trash", role: .destructive) {
+                DeleteMenuButton {
                     isShowingDeleteConfirmation = true
                 }
             }
@@ -281,6 +281,7 @@ private struct TimelineTrackHeader: View {
                 x: trackLabelOffset + trackLabelWidth * 0.5,
                 y: height * 0.5
             )
+            .transaction { $0.animation = nil }
     }
 
     private var trackLabelOffset: CGFloat {

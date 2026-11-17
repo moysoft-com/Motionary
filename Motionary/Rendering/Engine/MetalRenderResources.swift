@@ -2,6 +2,7 @@ import CoreImage
 import CoreVideo
 import Foundation
 import Metal
+import UIKit
 import os
 
 private struct ScratchTextureKey: Hashable {
@@ -189,6 +190,7 @@ final class MetalRenderResources: @unchecked Sendable {
     private let uniformRing: UniformBufferRing
     private let inFlightSemaphore = DispatchSemaphore(value: maximumInFlightFrames)
     private let pipelines: [String: MTLComputePipelineState]
+    private var memoryWarningObserver: NSObjectProtocol?
 
     private static let sharedResult: Result<MetalRenderResources, Error> = Result {
         try MetalRenderResources()
@@ -286,6 +288,17 @@ final class MetalRenderResources: @unchecked Sendable {
                 .allowLowPower: false
             ]
         )
+        memoryWarningObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
+        ) { [weak self] _ in
+            // In-flight command buffers retain their own textures. Drop
+            // reusable allocations without invalidating submitted work.
+            self?.purgeCaches()
+        }
+    }
+
+    deinit {
+        if let memoryWarningObserver { NotificationCenter.default.removeObserver(memoryWarningObserver) }
     }
 
     func beginFrame() throws -> MetalFrameResources {

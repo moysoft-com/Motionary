@@ -6,15 +6,9 @@ import os
 
 extension EditorViewModel {
     func updateScrub(to time: Double) {
-        guard !previewIsSuspended, !isPlaying, !playbackState.isStartingPlayback,
+        guard !previewIsSuspended, !scrubIsFinishing, !isPlaying, !playbackState.isStartingPlayback,
             !pendingPlaybackResumeAfterPreviewRebuild else { return }
         let clamped = clampedTimelineTime(time)
-        let movement = clamped - currentTime
-        if movement != 0 {
-            lastScrubDirection = movement
-            scrubPrefetchTask?.cancel()
-            scrubPrefetchTask = nil
-        }
         updateCurrentTime(clamped)
         guard isScrubbing else {
             seekPlayer(to: clamped, exact: false)
@@ -22,6 +16,10 @@ extension EditorViewModel {
         }
 
         scratchAudio.update(to: clamped)
+        updateScrubPreview()
+    }
+
+    func updateScrubPreview() {
         // A stale decoder graph cannot answer source-time requests after a
         // split, trim or ripple edit. The rebuild resumes this gesture at its
         // latest position as soon as the new graph is installed.
@@ -32,7 +30,6 @@ extension EditorViewModel {
                                                                   sessionID: previewRenderSessionID) {
             pendingScrubSeekTime = nil
             livePreviewPresentation.setFrame(frame, at: target)
-            prefetchScrubNeighbors(from: target, frameDuration: frameDuration)
             return
         }
         // Only hold a nearby frame from the current edit revision. A pre-edit
@@ -40,49 +37,10 @@ extension EditorViewModel {
         if let near = renderService.livePreviewState.cachedFrameNear(
             at: target, sessionID: previewRenderSessionID, window: frameDuration)
         {
-            livePreviewPresentation.setFrame(near.frame, at: near.time)
+            presentScrubFrame(near.frame, at: near.time)
         }
         pendingScrubSeekTime = target
         scheduleLatestScrubSeek()
-    }
-
-    /// At most one speculative GPU frame is submitted at a time. Delay it
-    /// until input settles, and try the reverse neighbor as well for turnarounds.
-    private func prefetchScrubNeighbors(from target: Double, frameDuration: Double) {
-        guard isScrubbing, !isScrubSeekInFlight, scrubSeekTask == nil,
-            scrubPrefetchTask == nil, !isRenderingPreview, !livePreviewFrameRefreshInFlight,
-            ProcessInfo.processInfo.thermalState != .serious,
-            ProcessInfo.processInfo.thermalState != .critical,
-            abs(lastScrubDirection) > 0.000_001
-        else { return }
-        let direction: Double = lastScrubDirection > 0 ? 1 : -1
-        let sessionID = previewRenderSessionID
-        let generation = scrubSessionGeneration
-        scrubPrefetchTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(25))
-            guard !Task.isCancelled, let self else { return }
-            defer { if !Task.isCancelled { self.scrubPrefetchTask = nil } }
-            for step in [direction, -direction] {
-                guard !Task.isCancelled, self.scrubSessionGeneration == generation,
-                    self.isScrubbing, !self.isScrubSeekInFlight,
-                    self.previewRenderSessionID == sessionID,
-                    self.currentScrubPresentationTime() == target
-                else { return }
-                let candidate = target + step * frameDuration
-                guard candidate >= 0, candidate <= self.lastPlayableTime + 0.000_001 else { continue }
-                let time = CMTime(seconds: candidate, preferredTimescale: max(self.project.renderSettings.frameRate, 1)).seconds
-                let state = self.renderService.livePreviewState
-                guard state.cachedFrame(at: time, sessionID: sessionID) == nil else { continue }
-                let rendered: Bool = await withCheckedContinuation { continuation in
-                    if !state.renderPausedFrame(at: time, sessionID: sessionID, completion: {
-                        continuation.resume(returning: $0 != nil)
-                    }) {
-                        continuation.resume(returning: false)
-                    }
-                }
-                if !rendered { return }
-            }
-        }
     }
 
     /// Restores the canonical preview graph with one rebuild after scrubbing.
@@ -155,7 +113,6 @@ extension EditorViewModel {
         scrubSeekGeneration &+= 1
         let seekGeneration = scrubSeekGeneration
         let sessionGeneration = scrubSessionGeneration
-        let issuedAt = CFAbsoluteTimeGetCurrent()
         let signpostID = OSSignpostID(log: TimelinePerformanceSignposts.log)
         os_signpost(
             .begin,
@@ -166,7 +123,7 @@ extension EditorViewModel {
             target
         )
         // Generated/image-only intervals need no decoder movement. Reuse the
-        // live Metal renderer at the requested time, at normal preview quality.
+        // live Metal renderer at the requested time.
         if renderService.livePreviewState.renderPausedFrame(
             at: target, sessionID: previewRenderSessionID,
             completion: { [weak self, weak player] frame in
@@ -177,7 +134,6 @@ extension EditorViewModel {
                     os_signpost(.end, log: TimelinePerformanceSignposts.log,
                                 name: "Scrub Seek", signpostID: signpostID)
                     self.isScrubSeekInFlight = false
-                    self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
                     guard self.isScrubbing else { return }
                     if let frame {
                         if self.renderService.livePreviewState.cachedFrame(
@@ -192,9 +148,6 @@ extension EditorViewModel {
                     }
                     if self.pendingScrubSeekTime != nil {
                         self.scheduleLatestScrubSeek()
-                    } else if frame != nil, self.currentScrubPresentationTime() == target {
-                        self.prefetchScrubNeighbors(
-                            from: target, frameDuration: 1 / Double(max(self.project.renderSettings.frameRate, 1)))
                     }
                 }
             }
@@ -221,19 +174,15 @@ extension EditorViewModel {
                 signpostID: signpostID
             )
             guard self.scrubSeekGeneration == seekGeneration else { return }
-            self.recordScrubSeekLatency(CFAbsoluteTimeGetCurrent() - issuedAt)
             self.isScrubSeekInFlight = false
             if didSeek != .completed { self.lastIssuedScrubSeekTime = nil }
-            guard didSeek != .timedOut else {
-                if self.player === player {
-                    self.schedulePreviewRecovery(
-                        reason: .seekTimeout,
-                        resumePlayback: false
-                    )
-                }
-                return
-            }
             guard self.isScrubbing else { return }
+            if didSeek == .completed,
+                let frame = self.renderService.livePreviewState.cachedFrame(
+                    at: target, sessionID: self.previewRenderSessionID)
+            {
+                self.presentScrubFrame(frame, at: target)
+            }
             if self.pendingScrubSeekTime != nil {
                 self.scheduleLatestScrubSeek()
             }
@@ -241,24 +190,24 @@ extension EditorViewModel {
     }
 
     func presentScrubFrame(_ frame: CVPixelBuffer, at time: Double) {
+        guard !pendingPreviewInvalidation.contains(.compositionTopology) else { return }
         let target = currentScrubPresentationTime()
         if let exact = renderService.livePreviewState.cachedFrame(at: target, sessionID: previewRenderSessionID) {
             livePreviewPresentation.setFrame(exact, at: target)
             return
         }
-        // A late completion can move the preview towards the playhead during
-        // fast scrubbing, provided it is closer than the frame already shown.
-        if livePreviewPresentation.frame != nil, let displayed = livePreviewPresentation.frameTime,
-            abs(displayed - target) <= abs(time - target)
-        {
-            return
+        guard !scrubIsFinishing else { return }
+        // Timeline distance grows with gesture speed even at constant render
+        // latency. Accept progress toward the current target, while rejecting
+        // completions that would go backwards or overshoot after a reversal.
+        if let displayed = livePreviewPresentation.frameTime {
+            guard (displayed < time && time <= target) || (target <= time && time < displayed) else { return }
         }
         livePreviewPresentation.setFrame(frame, at: time)
     }
 
     func currentScrubPresentationTime() -> Double {
-        let frameRate = Double(max(project.renderSettings.frameRate, 1))
-        return floor(clampedPlayableTime(currentTime) * frameRate + 0.000_001) / frameRate
+        canonicalPreviewFrameTime(currentTime)
     }
 
     private func scrubSeekMinimumInterval() -> CFTimeInterval {
@@ -266,15 +215,6 @@ extension EditorViewModel {
         // flight. Cached frames bypass this path entirely. Layer-count guesses
         // must not force a capable device down to 24/30/45 Hz.
         1 / Double(max(livePreviewPresentation.maximumFramesPerSecond, 1))
-    }
-
-    private func recordScrubSeekLatency(_ latency: CFTimeInterval) {
-        guard latency.isFinite, latency > 0 else { return }
-        if scrubSeekLatencyEstimate == 0 {
-            scrubSeekLatencyEstimate = latency
-        } else {
-            scrubSeekLatencyEstimate = scrubSeekLatencyEstimate * 0.75 + latency * 0.25
-        }
     }
 
 }

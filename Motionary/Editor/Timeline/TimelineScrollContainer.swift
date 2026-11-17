@@ -49,6 +49,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     let currentTime: Double
     let duration: Double
     let maximumTimelineTime: Double
+    let playbackEndTime: Double?
     let contentRevision: Int
     let contentSize: CGSize
     let isScrollDisabled: Bool
@@ -64,6 +65,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     let virtualizationConfiguration: TimelineVirtualizationConfiguration?
     let onScrubStart: () -> Void
     let onScrubChanged: (Double) -> Void
+    let onPlaybackScrubHandoff: ((Double) -> Void)?
     let onScrubEnd: (Double) -> Void
     let onPullToAddChanged: (CGFloat) -> Void
     let onPullToAddEnded: (Bool) -> Void
@@ -75,6 +77,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         currentTime: Double,
         duration: Double,
         maximumTimelineTime: Double? = nil,
+        playbackEndTime: Double? = nil,
         contentRevision: Int,
         contentSize: CGSize,
         isScrollDisabled: Bool,
@@ -90,6 +93,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         virtualizationConfiguration: TimelineVirtualizationConfiguration? = nil,
         onScrubStart: @escaping () -> Void,
         onScrubChanged: @escaping (Double) -> Void,
+        onPlaybackScrubHandoff: ((Double) -> Void)? = nil,
         onScrubEnd: @escaping (Double) -> Void,
         onPullToAddChanged: @escaping (CGFloat) -> Void,
         onPullToAddEnded: @escaping (Bool) -> Void,
@@ -100,6 +104,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         self.currentTime = currentTime
         self.duration = duration
         self.maximumTimelineTime = min(max(maximumTimelineTime ?? duration, 0), max(duration, 0))
+        self.playbackEndTime = playbackEndTime
         self.contentRevision = contentRevision
         self.contentSize = contentSize
         self.isScrollDisabled = isScrollDisabled
@@ -115,6 +120,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         self.virtualizationConfiguration = virtualizationConfiguration
         self.onScrubStart = onScrubStart
         self.onScrubChanged = onScrubChanged
+        self.onPlaybackScrubHandoff = onPlaybackScrubHandoff
         self.onScrubEnd = onScrubEnd
         self.onPullToAddChanged = onPullToAddChanged
         self.onPullToAddEnded = onPullToAddEnded
@@ -389,11 +395,14 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         func interruptScrubForPlayback() {
             guard !isPinching, let scrollView else { return }
             let hadScrub = isScrubSession
-            let time = scrubTime(in: scrollView)
+            let time = hadScrub
+                ? scrubTime(in: scrollView)
+                : clampedTime(parent.playbackState?.currentTime ?? parent.currentTime)
             cancelScrollMomentum(in: scrollView)
+            scroll(to: time, in: scrollView)
             // Flush once, before the model invalidates this scrub generation.
             // Calling onScrubEnd here would queue an obsolete exact seek.
-            if hadScrub { parent.onScrubChanged(time) }
+            if hadScrub { (parent.onPlaybackScrubHandoff ?? parent.onScrubChanged)(time) }
         }
 
         private func navigateToCurrentTime() {
@@ -432,6 +441,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private func stopPlaybackDisplayLink() {
             playbackDisplayLink?.invalidate()
             playbackDisplayLink = nil
+            if let scrollView, playbackPresentationX != nil,
+                !scrollView.isTracking, !scrollView.isDecelerating, !isOverscrolled(scrollView)
+            {
+                finishPlaybackPresentation(in: scrollView)
+            }
         }
 
         private func schedulePlaybackSynchronization(in scrollView: UIScrollView) {
@@ -490,7 +504,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             guard let sample = playerProvider()?.currentTime(), sample.isNumeric else {
                 return clampedTime(playbackPosition?.time ?? modelTime)
             }
-            let time = clampedTime(sample.seconds)
+            let time = min(clampedTime(sample.seconds), parent.playbackEndTime ?? parent.maximumTimelineTime)
             var position = playbackPosition ?? TimelinePlaybackPosition(time: time, timestamp: now)
             let accepted = position.accept(time, at: now, frameDuration: 1 / Double(parent.scrubFrameRate))
             playbackPosition = position
@@ -661,6 +675,9 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 abs(scrollView.contentOffset.x - targetX) > 0.01
                     || abs(scrollView.contentOffset.y - targetY) > 0.01
             else {
+                // UIKit may already have snapped its bounds back inside the
+                // range. Finish publishing the same offset to the headers.
+                publishHorizontalScrollOffset(targetX, immediately: true)
                 updateViewport(in: scrollView)
                 return
             }

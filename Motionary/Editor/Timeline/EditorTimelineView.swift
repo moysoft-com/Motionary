@@ -138,6 +138,14 @@ struct CoreTimelineLayout: View {
                         trackOriginY: trackOriginY
                     )
                 }
+            if !showsOnlySelectedTrack {
+                // Track headers can change the mask below the ruler. Give
+                // the native ruler only the stationary edge treatment.
+                rulerOverlay.mask(alignment: .top) {
+                    TimelineHorizontalEdgeMask()
+                        .frame(width: size.width, height: size.height)
+                }
+            }
             TimelineTrackHandlesOverlay(
                 snapshot: snapshot, viewModel: viewModel,
                 scrollState: scrollPresentationState, viewportState: viewportState,
@@ -147,14 +155,6 @@ struct CoreTimelineLayout: View {
                 trackHeight: trackHeight, rowSpacing: rowSpacing,
                 trackOriginY: trackOriginY, workspaceContext: workspaceContext
             )
-            if !showsOnlySelectedTrack {
-                // Track headers can change the mask below the ruler. Give
-                // the native ruler only the stationary edge treatment.
-                rulerOverlay.mask(alignment: .top) {
-                    TimelineHorizontalEdgeMask()
-                        .frame(width: size.width, height: size.height)
-                }
-            }
             playhead
             if !showsOnlySelectedTrack { pullToAddIndicator }
         }
@@ -185,6 +185,7 @@ struct CoreTimelineLayout: View {
             pixelsPerSecond: $pixelsPerSecond,
             currentTime: 0,
             duration: viewModel.duration,
+            playbackEndTime: viewModel.lastPlayableTime,
             contentRevision: timelineContentRevision,
             contentSize: CGSize(width: contentWidth, height: max(contentHeight, size.height)),
             isScrollDisabled: activeClipDrag != nil || activeTrackDrag != nil,
@@ -212,6 +213,7 @@ struct CoreTimelineLayout: View {
             ),
             onScrubStart: { viewModel.beginScrub() },
             onScrubChanged: { viewModel.updateScrub(to: $0) },
+            onPlaybackScrubHandoff: { viewModel.updateCurrentTime($0) },
             onScrubEnd: { viewModel.endScrub(at: $0) },
             onPullToAddChanged: { pullToAddDistance = showsOnlySelectedTrack ? 0 : $0 },
             onPullToAddEnded: { shouldAddLayer in
@@ -340,6 +342,7 @@ private struct TimelineTrackHandlesOverlay: View {
             ForEach(Array(snapshot.tracks.enumerated()), id: \.element.id) { index, track in
                 if workspaceContext?.showsOnlySelectedTrack != true,
                     viewportState.window.trackRange.contains(index) || activeTrackDrag?.trackID == track.id {
+                    let isDragging = activeTrackDrag?.trackID == track.id
                     let offset = reorderOffset(trackID: track.id, index: index)
                     TimelineTrackReorderHandle(
                         centerPadding: centerPadding, height: trackHeight, scrollState: scrollState,
@@ -362,13 +365,19 @@ private struct TimelineTrackHandlesOverlay: View {
                     )
                     .frame(width: size.width, height: trackHeight, alignment: .topLeading)
                     .offset(y: trackOriginY + CGFloat(index) * (trackHeight + rowSpacing) - scrollState.verticalOffset + offset)
-                    .animation(activeTrackDrag?.trackID == track.id ? nil : .interactiveSpring(response: 0.22, dampingFraction: 0.86), value: offset)
-                    .zIndex(activeTrackDrag?.trackID == track.id ? 1 : 0)
+                    .animation(isDragging ? nil : .interactiveSpring(response: 0.22, dampingFraction: 0.86), value: offset)
+                    .frame(height: size.height, alignment: .top)
+                    .zIndex(isDragging ? 1 : 0)
                 }
             }
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
-        .mask(alignment: .bottom) { Rectangle().frame(height: max(size.height - trackOriginY, 0)) }
+        .mask {
+            TimelineHandleVerticalFadeMask(
+                topFade: trackOriginY,
+                bottomFade: 22
+            )
+        }
     }
 
     private func reorderOffset(trackID: UUID, index: Int) -> CGFloat {
@@ -392,6 +401,31 @@ private struct TimelineTrackHandlesOverlay: View {
         activeTrackDrag = TimelineTrackDragState(trackID: trackID, sourceIndex: drag.sourceIndex,
             targetIndex: target, translationY: translation, fingerTranslation: value.translation,
             fingerLocationInWindow: value.locationInWindow)
+    }
+}
+
+private struct TimelineHandleVerticalFadeMask: View {
+    let topFade: CGFloat
+    let bottomFade: CGFloat
+
+    var body: some View {
+        GeometryReader { geometry in
+            let height = max(geometry.size.height, 1)
+            let topFadeEnd = min(max(topFade / height, 0), 1)
+            let bottomFadeStart = min(max(1 - bottomFade / height, topFadeEnd), 1)
+
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: topFadeEnd),
+                    .init(color: .black, location: bottomFadeStart),
+                    .init(color: .clear, location: 1)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .allowsHitTesting(false)
     }
 }
 

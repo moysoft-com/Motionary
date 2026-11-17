@@ -26,6 +26,16 @@ struct TimelineScratchAudioTests {
         #expect(velocity.update(time: 9, hostTime: 11) == 0)
     }
 
+    @Test func batchedScrollSamplesPreserveDirectionAndDisplacement() {
+        var velocity = ScratchVelocity()
+        velocity.reset(time: 0, hostTime: 10)
+        #expect(velocity.update(time: 0.05, hostTime: 10.0005) == 0)
+        let forward = velocity.update(time: 0.06, hostTime: 10.01)
+        #expect(forward > 1)
+        #expect(velocity.update(time: 0.065, hostTime: 10.0105) == forward)
+        #expect(velocity.update(time: 0.02, hostTime: 10.02) < 0)
+    }
+
     @Test func samplesRunBothWaysAndFadeToSilenceOnReleaseAndIdle() throws {
         let bank = ScratchSampleBank()
         let slot = try #require(bank.beginWrite())
@@ -39,11 +49,11 @@ struct TimelineScratchAudioTests {
         let renderer = ScratchAudioRenderer(control: control, bank: bank)
         control.active.store(true, ordering: .releasing)
         control.update(time: 2, rate: 1, hostTime: 10)
-        let forward = render(renderer, count: 2048, hostTime: 10)
-        #expect(forward.left[1800] > forward.left[1000])
+        let forward = render(renderer, count: 4096, hostTime: 10)
+        #expect(forward.left[4000] > forward.left[3200])
         #expect(zip(forward.left, forward.right).allSatisfy { abs($0 + $1) < 0.000_01 })
-        control.update(time: 2.04, rate: -1, hostTime: 10.02)
-        let reverse = render(renderer, count: 2048, hostTime: 10.02)
+        control.update(time: 2.04, rate: -1, hostTime: 10.09)
+        let reverse = render(renderer, count: 2048, hostTime: 10.09)
         #expect(reverse.left[1800] < reverse.left[1000])
         let idle = render(renderer, count: 1024, hostTime: 10.3)
         #expect(idle.left.suffix(500).allSatisfy { $0 == 0 })
@@ -86,6 +96,58 @@ struct TimelineScratchAudioTests {
         #expect(bank.beginWrite() == nil)
         bank.release()
         #expect(bank.beginWrite() == first)
+    }
+
+    @Test func inFlightRefillFromPreviousAudioRevisionCannotPlayAfterEdit() throws {
+        let bank = ScratchSampleBank()
+        let first = try #require(bank.beginWrite())
+        bank.slots[first].samples.update(repeating: 0.4, count: ScratchSampleBank.capacity * 2)
+        bank.publish(slot: first, start: 0, count: ScratchSampleBank.capacity)
+        let control = ScratchAudioControl()
+        let renderer = ScratchAudioRenderer(control: control, bank: bank)
+        control.active.store(true, ordering: .releasing)
+        control.update(time: 2, rate: 1, hostTime: 10)
+        #expect(render(renderer, count: 2048, hostTime: 10).left.last! > 0.3)
+
+        let late = try #require(bank.beginWrite())
+        bank.generation.store(1, ordering: .releasing)
+        bank.slots[late].samples.update(repeating: 0.6, count: ScratchSampleBank.capacity * 2)
+        bank.publish(slot: late, start: 0, count: ScratchSampleBank.capacity)
+        #expect(!bank.covers(time: 2, rate: 1, duration: 8))
+        #expect(render(renderer, count: 1024, hostTime: 10.01).left.allSatisfy { $0 == 0 })
+
+        let replacement = try #require(bank.beginWrite())
+        bank.slots[replacement].samples.update(repeating: -0.4, count: ScratchSampleBank.capacity * 2)
+        bank.publish(slot: replacement, start: 0, count: ScratchSampleBank.capacity, generation: 1)
+        control.update(time: 2.02, rate: 1, hostTime: 10.02)
+        let afterEdit = render(renderer, count: 2048, hostTime: 10.02).left
+        #expect(afterEdit.allSatisfy { $0 <= 0 })
+        #expect(afterEdit.last! < -0.3)
+    }
+
+    @Test func obsoleteDemandReadCannotEvictTheAudibleWindow() async throws {
+        let url = try makeConstantAudio(value: 0.2)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .audio)
+        let bank = ScratchSampleBank()
+        let playing = try #require(bank.beginWrite())
+        bank.slots[playing].samples.update(repeating: 0.6, count: ScratchSampleBank.capacity * 2)
+        bank.publish(slot: playing, start: 10 * 48_000, count: 48_000)
+        let pending = try #require(bank.beginWrite())
+        var consideredForPublication = false
+        ScratchWindowDecoder.read(asset: asset, tracks: tracks, audioMix: nil, duration: 1,
+            around: 0.5, bank: bank, slot: pending,
+            shouldPublish: { _, _ in
+                consideredForPublication = true
+                return false
+            }, shouldContinue: { true })
+
+        #expect(consideredForPublication)
+        let window = try #require(bank.borrow())
+        defer { bank.release() }
+        #expect(window.start == 10 * 48_000)
+        #expect(window.sample(at: 10.5 * 48_000, channel: 0) == 0.6)
     }
 
     @Test func decodedTimelineMixHonorsVolumeOverlapAndSilence() async throws {
@@ -153,36 +215,54 @@ struct TimelineScratchAudioTests {
 
     @Test func preparedPCMCacheServesDistantJumpsAndKeepsRealSilentGaps() async throws {
         let url = try makeConstantAudio(value: 0.8)
+        let distantURL = try makeConstantAudio(value: 0.4)
         defer { try? FileManager.default.removeItem(at: url) }
+        defer { try? FileManager.default.removeItem(at: distantURL) }
         let asset = AVURLAsset(url: url)
+        let distantAsset = AVURLAsset(url: distantURL)
         let source = try #require(try await asset.loadTracks(withMediaType: .audio).first)
+        let distantSource = try #require(try await distantAsset.loadTracks(withMediaType: .audio).first)
         let composition = AVMutableComposition()
         let track = try #require(composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid))
         let range = CMTimeRange(start: .zero, duration: CMTime(seconds: 1, preferredTimescale: 48_000))
         try track.insertTimeRange(range, of: source, at: .zero)
-        try track.insertTimeRange(range, of: source, at: CMTime(seconds: 40, preferredTimescale: 48_000))
+        let distantStart = CMTime(seconds: 40, preferredTimescale: 48_000)
+        try track.insertTimeRange(range, of: distantSource, at: distantStart)
+        track.scaleTimeRange(
+            CMTimeRange(start: distantStart, duration: range.duration),
+            toDuration: CMTime(seconds: 0.5, preferredTimescale: 48_000)
+        )
         let parameters = AVMutableAudioMixInputParameters(track: track)
         parameters.setVolume(0.25, at: .zero)
+        parameters.audioTimePitchAlgorithm = .varispeed
         let mix = AVMutableAudioMix()
         mix.inputParameters = [parameters]
-        let cache = ScratchTimelineCache(asset: composition, tracks: [track], audioMix: mix, duration: 41)
+        let warmingQueue = DispatchQueue(label: "scratch-test-warming")
+        let cache = ScratchTimelineCache(asset: composition, tracks: [track], audioMix: mix, duration: 41,
+                                         queue: warmingQueue)
         defer { cache.cancel() }
+        // Let warming finish without asking for any particular position. The
+        // first lookup, including a distant retimed clip, should be a hit.
+        await withCheckedContinuation { continuation in
+            warmingQueue.async { continuation.resume() }
+        }
         let bank = ScratchSampleBank()
         let slot = try #require(bank.beginWrite())
-        var ready = false
-        for _ in 0..<2000 {
-            ready = cache.fill(bank: bank, slot: slot, around: 40.25)
-            if ready { break }
-            try await Task.sleep(for: .milliseconds(2))
-        }
-        #expect(ready)
+        try #require(cache.fill(bank: bank, slot: slot, around: 40.25))
         let distant = try #require(bank.borrow())
-        #expect(abs(distant.sample(at: 40.25 * 48_000, channel: 0) - 0.2) < 0.01)
+        #expect(abs(distant.sample(at: 40.25 * 48_000, channel: 0) - 0.1) < 0.01)
+        #expect(distant.sample(at: 40.75 * 48_000, channel: 0) == 0)
         bank.release()
         let next = try #require(bank.beginWrite())
-        #expect(cache.fill(bank: bank, slot: next, around: 20))
+        try #require(cache.fill(bank: bank, slot: next, around: 20))
         let gap = try #require(bank.borrow())
+        #expect(gap.start <= 20 * 48_000)
         #expect(gap.sample(at: 20 * 48_000, channel: 0) == 0)
+        bank.release()
+        let near = try #require(bank.beginWrite())
+        try #require(cache.fill(bank: bank, slot: near, around: 0.5))
+        let beginning = try #require(bank.borrow())
+        #expect(abs(beginning.sample(at: 0.5 * 48_000, channel: 0) - 0.2) < 0.01)
         bank.release()
         var timings: [Double] = []
         for time in [0.5, 20.0, 40.25, 0.5, 40.25, 20.0] {
@@ -194,6 +274,14 @@ struct TimelineScratchAudioTests {
         Attachment.record("PCM window refill across 40-second jumps, ms: \(timings)", named: "scratch-refill-latency.txt")
         cache.cancel()
         #expect(!cache.fill(bank: bank, slot: slot, around: 0.5))
+
+        let coldSlot = try #require(bank.beginWrite())
+        ScratchWindowDecoder.read(asset: composition, tracks: [track], audioMix: mix, duration: 41, around: 40.25,
+                                  bank: bank, slot: coldSlot, windowLength: 0.55, leading: 0.12) { true }
+        let cold = try #require(bank.borrow())
+        #expect(abs(cold.sample(at: 40.25 * 48_000, channel: 0) - 0.1) < 0.01)
+        #expect(cold.sample(at: 40.6 * 48_000, channel: 0) == 0)
+        bank.release()
     }
 
     @Test func shortRefillKeepsContinuityThenFadesRatherThanHardMuting() throws {
@@ -243,15 +331,41 @@ struct TimelineScratchAudioTests {
         control.active.store(true, ordering: .releasing)
         control.update(time: 2, rate: 1, hostTime: 10)
         let normal = render(renderer, count: 4096, hostTime: 10).left
-        control.update(time: 2.08, rate: 0.1, hostTime: 10.02)
-        let slow = render(renderer, count: 1024, hostTime: 10.02).left
+        let slowHostTime = 10 + 4096 / ScratchSampleBank.sampleRate
+        control.update(time: 2.0715, rate: 0.1, hostTime: slowHostTime)
+        let slow = render(renderer, count: 4096, hostTime: slowHostTime).left
         #expect(abs(normal.last! - 0.34) < 0.001)
         #expect(abs(slow.last! - 0.034) < 0.001)
         let transition = [normal.last!] + slow
         #expect(zip(transition, transition.dropFirst()).allSatisfy { abs($0 - $1) < 0.001 })
         control.active.store(false, ordering: .releasing)
-        let stopped = render(renderer, count: 1024, hostTime: 10.04).left
+        let stopped = render(renderer, count: 1024, hostTime: slowHostTime + 4096 / ScratchSampleBank.sampleRate).left
         #expect(stopped.suffix(500).allSatisfy { $0 == 0 })
+    }
+
+    @Test func slowScrubPositionUpdatesKeepAudioContinuous() throws {
+        let bank = ScratchSampleBank()
+        let slot = try #require(bank.beginWrite())
+        let frames = 3 * Int(ScratchSampleBank.sampleRate)
+        for frame in 0..<frames {
+            let value = Float(sin(Double(frame) * 2 * .pi / 48))
+            bank.slots[slot].samples[frame * 2] = value
+            bank.slots[slot].samples[frame * 2 + 1] = value
+        }
+        bank.publish(slot: slot, start: 0, count: frames)
+        let control = ScratchAudioControl()
+        let renderer = ScratchAudioRenderer(control: control, bank: bank)
+        control.active.store(true, ordering: .releasing)
+        control.update(time: 2, rate: 0.05, hostTime: 10)
+        let before = render(renderer, count: 960, hostTime: 10).left
+        control.update(time: 2.0015, rate: 0.05, hostTime: 10.02)
+        let after = render(renderer, count: 960, hostTime: 10.02).left
+        control.update(time: 2.002, rate: -0.05, hostTime: 10.04)
+        let reversed = render(renderer, count: 2400, hostTime: 10.04).left
+        let transition = [try #require(before.last)] + after + reversed
+        #expect(zip(transition, transition.dropFirst()).allSatisfy { abs($0 - $1) < 0.001 })
+        #expect(reversed.dropFirst(300).prefix(900).filter { abs($0) < 0.002 }.count > 40)
+        #expect(reversed.suffix(500).contains { abs($0) > 0.015 })
     }
 
     private func render(_ renderer: ScratchAudioRenderer, count: Int, hostTime: Double) -> (left: [Float], right: [Float]) {

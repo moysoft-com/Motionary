@@ -239,7 +239,9 @@ extension EditorViewModel {
         if interactive, retimingChanged,
             updatedItem.mediaType == .video, updatedItem.speedMap.timeRemap != nil
         {
-            renderService.livePreviewState.setSpeedMap(updatedItem.speedMap, for: itemID)
+            renderService.livePreviewState.setSpeedMap(
+                updatedItem.speedMap, for: itemID, affecting: livePreviewCacheRange(for: itemID)
+            )
             pendingLiveVisualOverrideItemIDs.insert(itemID)
             scheduleLivePreviewFrameRefresh()
         } else if interactive, retimingChanged, updatedItem.speedMap.timeRemap == nil {

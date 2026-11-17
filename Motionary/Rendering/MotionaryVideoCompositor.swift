@@ -173,9 +173,12 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
 
             autoreleasepool {
                 do {
+                    let plan = RenderPlanCompiler.compile(instruction)
+                    let isScrubFrame = plan.scrubEffectScale < 1
                     if instruction.qualityProfile != .export,
                         let cached = instruction.livePreviewState?.cachedFrame(
-                            at: CMTimeGetSeconds(request.compositionTime), sessionID: instruction.renderSessionID),
+                            at: CMTimeGetSeconds(request.compositionTime), sessionID: instruction.renderSessionID,
+                            allowsScrubFrames: isScrubFrame),
                         CVPixelBufferGetWidth(cached) == Int(instruction.renderSize.width),
                         CVPixelBufferGetHeight(cached) == Int(instruction.renderSize.height) {
                         self.recordFramePresentation(instruction: instruction, time: request.compositionTime)
@@ -190,7 +193,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         // Serialize export GPU work. Three concurrent FP16 effect
                         // graphs can exceed a phone's memory budget at 4K.
                         try renderer.render(
-                            plan: RenderPlanCompiler.compile(instruction),
+                            plan: plan,
                             compositionTime: request.compositionTime,
                             sourceFrame: { trackID in
                                 // AVFoundation can briefly expose an export
@@ -237,7 +240,6 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                     self.timeoutQueue.asyncAfter(deadline: .now() + .milliseconds(timeoutMilliseconds)) { [weak finisher] in
                         finisher?.timeOut()
                     }
-                    let plan = RenderPlanCompiler.compile(instruction)
                     // Retain only one frame's decoder buffers, never the request.
                     // Reusing these avoids decoding and same-time seek caching
                     // for every paused inspector/canvas sample.
@@ -274,7 +276,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                         case .success:
                             finisher.finish {
                                 instruction.livePreviewState?.installPausedFrameRenderer {
-                                    [weak self, weak cachedInstruction = instruction] time, sessionID, completion in
+                                    [weak self, weak cachedInstruction = instruction] time, sessionID, isCancelled, completion in
                                     guard let self, let instruction = cachedInstruction,
                                         instruction.renderSessionID == sessionID,
                                         time.isFinite, time >= 0,
@@ -295,7 +297,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                         [weak liveFinisher] in liveFinisher?.timeOut()
                                     }
                                     self.renderQueue.async {
-                                        guard !liveFinisher.isFinished,
+                                        guard !liveFinisher.isFinished, !isCancelled(),
                                             self.isCurrent(cachedGeneration),
                                             let destination = renderContext.newPixelBuffer()
                                         else { liveFinisher.finish { completion(nil) }; return }
@@ -306,14 +308,16 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                             sourceFrame: { cachedSources[$0] },
                                             destination: destination,
                                             isCancelled: {
-                                                liveFinisher.isFinished || !self.isCurrent(cachedGeneration)
+                                                liveFinisher.isFinished || isCancelled() || !self.isCurrent(cachedGeneration)
                                             }
                                         ) { result in
                                             liveFinisher.finish {
-                                                if case .success = result {
+                                                if case .success = result, !isCancelled() {
                                                     instruction.livePreviewState?.cacheFrame(destination, at: time,
                                                         sessionID: sessionID,
-                                                        revision: livePlan.livePreviewSnapshot?.revision ?? 0)
+                                                        revision: livePlan.livePreviewSnapshot?.revision ?? 0,
+                                                        isScrubFrame: livePlan.scrubEffectScale < 1)
+                                                    renderer.preparePreviewStillImages(livePlan, at: time, sessionID: sessionID)
                                                     completion(destination)
                                                 }
                                                 else { completion(nil) }
@@ -323,9 +327,14 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                     return true
                                 }
                                 self.recordSuccessfulFrame(instruction: instruction, time: request.compositionTime,
-                                    frame: destination, revision: plan.livePreviewSnapshot?.revision ?? 0)
-                                self.storeLastGoodFrame(from: destination, instruction: instruction, time: request.compositionTime,
-                                    revision: plan.livePreviewSnapshot?.revision ?? 0)
+                                    frame: destination, revision: plan.livePreviewSnapshot?.revision ?? 0,
+                                    isScrubFrame: isScrubFrame)
+                                renderer.preparePreviewStillImages(plan, at: CMTimeGetSeconds(frameTime),
+                                                                   sessionID: instruction.renderSessionID)
+                                if !isScrubFrame {
+                                    self.storeLastGoodFrame(from: destination, instruction: instruction,
+                                        time: request.compositionTime, revision: plan.livePreviewSnapshot?.revision ?? 0)
+                                }
                                 request.finish(withComposedVideoFrame: destination)
                             }
                         case .failure(MetalRenderingError.sourceFrameUnavailable):
@@ -392,9 +401,9 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
     }
 
     private func recordSuccessfulFrame(instruction: MotionaryVideoCompositionInstruction, time: CMTime,
-                                       frame: CVPixelBuffer, revision: UInt64) {
+                                       frame: CVPixelBuffer, revision: UInt64, isScrubFrame: Bool) {
         instruction.livePreviewState?.cacheFrame(frame, at: CMTimeGetSeconds(time),
-            sessionID: instruction.renderSessionID, revision: revision)
+            sessionID: instruction.renderSessionID, revision: revision, isScrubFrame: isScrubFrame)
         recordFramePresentation(instruction: instruction, time: time)
     }
 

@@ -14,6 +14,7 @@ final class RemapFrameDecoder: @unchecked Sendable {
         var reader: AVAssetReader?
         var output: AVAssetReaderTrackOutput?
         var frames: [Frame] = []
+        var lastRequested: CMTime?
 
         deinit { reader?.cancelReading() }
     }
@@ -32,6 +33,7 @@ final class RemapFrameDecoder: @unchecked Sendable {
     private let lock = NSLock()
     private let historyCount: Int
     private let historyDuration: CMTime
+    private let forwardPreroll: CMTime
     private let historyCost: Int
 
     init(asset: AVURLAsset, track: AVAssetTrack, range: CMTimeRange, rawSize: CGSize, frameRate: Float) {
@@ -44,9 +46,14 @@ final class RemapFrameDecoder: @unchecked Sendable {
         historyDuration = CMTime(
             seconds: Double(historyCount - 1) / Double(max(frameRate, 24)),
             preferredTimescale: 60_000)
+        forwardPreroll = CMTime(seconds: 2 / Double(max(frameRate, 24)), preferredTimescale: 60_000)
     }
 
     deinit { Self.sessions.removeObject(forKey: key) }
+
+    func matches(asset: AVURLAsset, track: AVAssetTrack, range: CMTimeRange) -> Bool {
+        self.asset === asset && self.track.trackID == track.trackID && self.range == range
+    }
 
     func frame(at requested: CMTime) throws -> CVPixelBuffer {
         lock.lock()
@@ -58,6 +65,8 @@ final class RemapFrameDecoder: @unchecked Sendable {
             session = ReaderSession()
             Self.sessions.setObject(session, forKey: key, cost: historyCost)
         }
+        let movingBackward = session.lastRequested.map { requested < $0 } ?? false
+        session.lastRequested = requested
         if let frame = session.frames.last(where: {
             $0.start == requested || ($0.start < requested && $0.end.map { requested < $0 } == true)
         }) {
@@ -69,13 +78,28 @@ final class RemapFrameDecoder: @unchecked Sendable {
                 requested >= $0.start && requested - $0.start <= CMTime(value: 1, timescale: 3)
             } == true
         if !canContinue {
-            try startReader(at: max(range.start, requested - historyDuration), in: session)
+            // A large forward scrub does not need an entire reverse history.
+            // Keep a short preroll so non-frame-aligned requests still select
+            // the preceding sample; retain the larger window for reverse.
+            let preroll = movingBackward ? historyDuration : forwardPreroll
+            try startReader(at: max(range.start, requested - preroll), in: session)
         }
-        guard let output = session.output else { throw MetalRenderingError.sourceFrameUnavailable }
+        guard var output = session.output else { throw MetalRenderingError.sourceFrameUnavailable }
+        var canRetryWithHistory = !movingBackward && forwardPreroll < historyDuration
         while let sample = output.copyNextSampleBuffer() {
             guard let buffer = sample.imageBuffer, sample.presentationTimeStamp.isNumeric else { continue }
             let start = sample.presentationTimeStamp
             let previous = session.frames.last
+            if start > requested, previous == nil, canRetryWithHistory {
+                // Variable-frame-rate sources can have a longer gap than the
+                // nominal-frame-rate preroll. Retry before returning a frame
+                // from the future.
+                canRetryWithHistory = false
+                try startReader(at: max(range.start, requested - historyDuration), in: session)
+                guard let retryOutput = session.output else { throw MetalRenderingError.sourceFrameUnavailable }
+                output = retryOutput
+                continue
+            }
             if let previous {
                 guard start > previous.start else { continue }
                 // Decoded samples can have invalid or unreliable duration

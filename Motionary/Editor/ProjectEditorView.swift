@@ -779,11 +779,12 @@ private struct EditorPlaybackControlBar: View {
                     },
                     isBordered: false
                 )
+                let playbackRequested = playbackState.isPlaying || playbackState.isStartingPlayback
                 CompactIconButton(
-                    systemName: viewModel.isPlaying ? "pause.fill" : "play.fill",
-                    title: viewModel.isPlaying ? "Pause" : "Play",
+                    systemName: playbackRequested ? "pause.fill" : "play.fill",
+                    title: playbackRequested ? "Pause" : "Play",
                     isProminent: true,
-                    isDisabled: viewModel.player == nil && !viewModel.previewRecoveryCircuitIsOpen
+                    isDisabled: viewModel.player == nil && viewModel.duration <= 0
                 ) {
                     if activePanel == .graph {
                         viewModel.toggleGraphPlayback()

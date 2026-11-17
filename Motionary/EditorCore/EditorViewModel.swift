@@ -26,6 +26,9 @@ struct EditorAnalysisState: Equatable {
 /// Coordinates all editor state transitions and delegates media, rendering, export, and persistence work to services.
 final class EditorViewModel: ObservableObject {
     let scratchAudio = TimelineScratchAudio()
+    var preparePlaybackAudio: () async -> Void = { await EditorAudioSession.preparePlayback() }
+    var previewPrerollTask: Task<Void, Never>?
+    var playbackNeedsSeekAfterMixUpdate = false
     let livePreviewPresentation = LivePreviewPresentation()
     let playbackState = PlaybackState()
     let selectionState = SelectionState()
@@ -54,7 +57,7 @@ final class EditorViewModel: ObservableObject {
     var depthPreparationEffectID: UUID?
     var cancelledDepthPreparationID: UUID?
     @Published var player: AVPlayer?
-    @Published var previewRendererIdentity = UUID()
+    var hasRenderedInitialPreviewFrame = false
     var currentTime: Double {
         get { playbackState.currentTime }
         set {
@@ -86,6 +89,7 @@ final class EditorViewModel: ObservableObject {
         get { playbackState.isPlaying }
         set {
             guard playbackState.isPlaying != newValue else { return }
+            livePreviewPresentation.playing = newValue
             playbackState.isPlaying = newValue
         }
     }
@@ -93,6 +97,7 @@ final class EditorViewModel: ObservableObject {
         get { playbackState.isScrubbing }
         set {
             guard playbackState.isScrubbing != newValue else { return }
+            renderService.livePreviewState.setScrubbing(newValue && !scrubIsFinishing)
             playbackState.isScrubbing = newValue
         }
     }
@@ -187,6 +192,7 @@ final class EditorViewModel: ObservableObject {
     let exportService: VideoExportService
     var timeObserver: Any?
     var previewItemStatusObservation: NSKeyValueObservation?
+    var previewPlaybackStatusObservation: NSKeyValueObservation?
     var previewItemNotificationObservers: [NSObjectProtocol] = []
     var previewRecoveryTask: Task<Void, Never>?
     var playbackWatchdogTask: Task<Void, Never>?
@@ -204,8 +210,6 @@ final class EditorViewModel: ObservableObject {
     private(set) var previewDisplayPixelSize: CGSize?
     private var lastRequestedPreviewDimension: Double?
     var scrubSeekTask: Task<Void, Never>?
-    var scrubPrefetchTask: Task<Void, Never>?
-    var lastScrubDirection: Double = 0
     var importTask: Task<Void, Never>?
     var exportTask: Task<Void, Never>?
     var analysisTask: Task<Void, Never>?
@@ -238,8 +242,9 @@ final class EditorViewModel: ObservableObject {
     var pendingScrubSeekTime: Double?
     var isScrubSeekInFlight = false
     var lastIssuedScrubSeekTime: Double?
-    var scrubSeekLatencyEstimate: CFTimeInterval = 0
-    var scrubIsFinishing = false
+    var scrubIsFinishing = false {
+        didSet { renderService.livePreviewState.setScrubbing(isScrubbing && !scrubIsFinishing) }
+    }
     var scrubSessionGeneration = 0
     var previewSeekGeneration = 0
     var isPreviewSeekInFlight = false
@@ -369,7 +374,8 @@ final class EditorViewModel: ObservableObject {
         let ownerID = UUID()
         self.depthProgressOwnerID = ownerID
         self.renderService = CompositionRenderService(
-            previewProxyStore: nil, depthCacheDirectory: depthDirectory, depthProgressOwnerID: ownerID
+            previewProxyStore: .shared, proxiesOnlyForRemappedVideo: true,
+            depthCacheDirectory: depthDirectory, depthProgressOwnerID: ownerID
         )
         self.exportService = VideoExportService(depthCacheDirectory: depthDirectory, depthProgressOwnerID: ownerID)
         self.project = initialContent.editorProject
@@ -391,6 +397,8 @@ final class EditorViewModel: ObservableObject {
         exportState.objectWillChange
             .sink { [weak self] in self?.objectWillChange.send() }
             .store(in: &stateCancellables)
+        // The remap decoder adopts ready proxies in place. Replacing the
+        // preview graph here would invalidate the scrub and DJ caches.
         refreshSelectedTimelineRange()
         installEffectRenderDiagnosticsHandler()
     }

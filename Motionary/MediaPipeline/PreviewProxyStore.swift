@@ -3,6 +3,10 @@ import CoreImage
 import CryptoKit
 import Foundation
 
+extension Notification.Name {
+    static let motionaryPreviewProxyReady = Notification.Name("motionaryPreviewProxyReady")
+}
+
 struct PreviewVideoProxy: Sendable {
     let url: URL
     let originalSize: CGSize
@@ -13,6 +17,70 @@ struct PreviewVideoProxy: Sendable {
     var sourcePixelTransform: CGAffineTransform {
         CGAffineTransform(scaleX: originalSize.width / encodedSize.width,
                           y: originalSize.height / encodedSize.height)
+    }
+}
+
+/// Prepared decoders can be adopted by an existing remapped preview without
+/// replacing its AVPlayerItem in the middle of playback.
+final class LiveRemapProxy: @unchecked Sendable {
+    private struct DecoderEntry {
+        weak var owner: RemapFrameDecoder?
+        let decoder: RemapFrameDecoder
+    }
+    let identity: String
+    let url: URL
+    let size: CGSize
+    let range: CMTimeRange
+    private let asset: AVURLAsset
+    private let track: AVAssetTrack
+    private let frameRate: Float
+    private let lock = NSLock()
+    private var decoders: [ObjectIdentifier: DecoderEntry] = [:]
+
+    init(identity: String, proxy: PreviewVideoProxy, asset: AVURLAsset,
+         track: AVAssetTrack, range: CMTimeRange, frameRate: Float) {
+        self.identity = identity
+        url = proxy.url
+        size = proxy.encodedSize
+        self.range = range
+        self.asset = asset
+        self.track = track
+        self.frameRate = frameRate
+    }
+
+    func decoder(for owner: RemapFrameDecoder) -> RemapFrameDecoder {
+        lock.lock()
+        defer { lock.unlock() }
+        let key = ObjectIdentifier(owner)
+        if let entry = decoders[key], entry.owner === owner { return entry.decoder }
+        decoders = decoders.filter { $0.value.owner != nil }
+        let decoder = RemapFrameDecoder(asset: asset, track: track, range: range,
+                                        rawSize: size, frameRate: frameRate)
+        decoders[key] = DecoderEntry(owner: owner, decoder: decoder)
+        return decoder
+    }
+}
+
+enum LiveRemapProxyRegistry {
+    private static let entries: NSCache<NSURL, LiveRemapProxy> = {
+        let cache = NSCache<NSURL, LiveRemapProxy>()
+        cache.countLimit = 24
+        return cache
+    }()
+
+    static func proxy(for sourceURL: URL) -> LiveRemapProxy? {
+        entries.object(forKey: sourceURL.standardizedFileURL as NSURL)
+    }
+
+    static func invalidate(_ sourceURL: URL, unlessIdentity identity: String) {
+        let key = sourceURL.standardizedFileURL as NSURL
+        if let existing = entries.object(forKey: key), existing.identity != identity {
+            entries.removeObject(forKey: key)
+        }
+    }
+
+    static func install(_ proxy: LiveRemapProxy, for sourceURL: URL) {
+        entries.setObject(proxy, forKey: sourceURL.standardizedFileURL as NSURL)
     }
 }
 
@@ -80,12 +148,35 @@ actor PreviewProxyStore {
     /// a whole asset to transcode. The original source is immediately usable.
     /// Warmups are deduplicated, and installed player items stay immutable.
     func availableProxy(source: CachedMediaAsset) async throws -> PreviewVideoProxy? {
-        guard let (key, proxy) = try request(for: source) else { return nil }
+        guard await supportsPreviewProxy(source: source),
+            let (key, proxy) = try request(for: source) else { return nil }
+        LiveRemapProxyRegistry.invalidate(source.asset.url, unlessIdentity: key)
         if let cached = await cachedProxy(key: key, proxy: proxy, source: source) { return cached }
         if warming.insert(key).inserted {
             Task(priority: .utility) {
                 defer { warming.remove(key) }
-                do { _ = try await prepare(source: source) }
+                do {
+                    if let prepared = try await prepare(source: source) {
+                        // The source can be replaced while the background
+                        // transcode is running. Never install a proxy for an
+                        // older file revision over the current one.
+                        guard let (currentKey, _) = try request(for: source), currentKey == key else { return }
+                        do {
+                            let asset = AVURLAsset(url: prepared.url)
+                            if let track = try await asset.loadTracks(withMediaType: .video).first {
+                                let range = try await track.load(.timeRange)
+                                let frameRate = try await track.load(.nominalFrameRate)
+                                guard let (latestKey, _) = try request(for: source), latestKey == key else { return }
+                                let liveProxy = LiveRemapProxy(identity: key, proxy: prepared,
+                                    asset: asset, track: track, range: range, frameRate: frameRate)
+                                LiveRemapProxyRegistry.install(liveProxy, for: source.asset.url)
+                            }
+                        } catch {
+                            AppLogger.rendering.debug("Live preview proxy unavailable: \(error.localizedDescription, privacy: .public)")
+                        }
+                        NotificationCenter.default.post(name: .motionaryPreviewProxyReady, object: source.asset.url)
+                    }
+                }
                 catch { AppLogger.rendering.debug("Background preview proxy unavailable: \(error.localizedDescription, privacy: .public)") }
             }
         }
@@ -93,7 +184,7 @@ actor PreviewProxyStore {
     }
 
     func prepare(source: CachedMediaAsset) async throws -> PreviewVideoProxy? {
-        guard let track = source.videoTrack,
+        guard await supportsPreviewProxy(source: source), let track = source.videoTrack,
             let (key, proxy) = try request(for: source) else { return nil }
         if let cached = await cachedProxy(key: key, proxy: proxy, source: source) { return cached }
         if let task = inFlight[key] { return try await task.value }
@@ -127,6 +218,20 @@ actor PreviewProxyStore {
         let result = try await task.value
         ready[key] = result
         return result
+    }
+
+    private func supportsPreviewProxy(source: CachedMediaAsset) async -> Bool {
+        guard let track = source.videoTrack,
+            let descriptions = try? await track.load(.formatDescriptions), !descriptions.isEmpty
+        else { return false }
+        // The proxy encoder is Rec. 709 SDR. Never silently discard HDR range
+        // from the editing preview; those sources keep their native decoder.
+        return !descriptions.contains { description in
+            let transfer = CMFormatDescriptionGetExtension(
+                description, extensionKey: kCMFormatDescriptionExtension_TransferFunction) as? String
+            return transfer == (kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String)
+                || transfer == (kCVImageBufferTransferFunction_ITU_R_2100_HLG as String)
+        }
     }
 
     private nonisolated static func transcode(source: CachedMediaAsset, track: AVAssetTrack,

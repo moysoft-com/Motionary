@@ -1522,7 +1522,7 @@ private struct EffectStackDisclosureRow: View {
             Button("Paste", systemImage: "doc.on.clipboard") { viewModel.pasteEffect() }
                 .disabled(!isEnabled)
             Divider()
-            Button("Delete", systemImage: "trash", role: .destructive) {
+            DeleteMenuButton {
                 viewModel.removeEffect(effect.id)
             }
             .disabled(!isEnabled)

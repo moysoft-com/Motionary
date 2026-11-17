@@ -1,8 +1,10 @@
 // Real encoded media verifies source mapping through preview, ripple, and export.
 
 import AVFoundation
+import Combine
 import CoreImage
 import Testing
+import UIKit
 
 @testable import Motionary
 
@@ -366,6 +368,191 @@ struct SourceTimingRenderTests {
     }
 
     @MainActor
+    @Test func audioOutlivesItsTrackOnlyAsSilenceWithoutLosingTheTrack() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("short-track-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let samples = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000))
+        samples.frameLength = samples.frameCapacity
+        let channel = try #require(samples.floatChannelData?[0])
+        for index in 0..<Int(samples.frameLength) {
+            channel[index] = Float(sin(Double(index) * 2 * .pi * 440 / format.sampleRate) * 0.2)
+        }
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: samples)
+        }
+        let clip = TimelineClip(name: "Music", source: ClipSource(url: url, mediaType: .audio,
+            originalDuration: 1.05), timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1.05))
+        let project = EditorProject(title: "Short audio track",
+            tracks: [TimelineTrack(name: "Music", kind: .audio, clips: [clip])])
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let preview = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology, .audioMix]))
+        let track = try #require(preview.composition.tracks.first { $0.mediaType == .audio })
+        #expect(track.segments.contains { !$0.isEmpty })
+        #expect(abs(track.timeRange.end.seconds - 1) < 0.002)
+        let reader = try AVAssetReader(asset: preview.composition)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [AVFormatIDKey: kAudioFormatLinearPCM])
+        reader.add(output)
+        #expect(reader.startReading())
+        let first = try #require(output.copyNextSampleBuffer())
+        #expect(first.presentationTimeStamp.seconds < 0.01)
+        #expect(first.numSamples > 0)
+        reader.cancelReading()
+        let exported = try await service.makeComposition(for: project)
+        #expect(exported.composition.tracks.contains { $0.mediaType == .audio })
+    }
+
+    @MainActor
+    @Test func repeatedRemappedClipsShareTheirSourceDecoder() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = ClipSource(url: url, mediaType: .video, originalDuration: 4,
+                                naturalSize: CGSizeValue(width: 160, height: 96))
+        let first = TimelineClip(name: "First", source: source, timelineStart: 0,
+                                 sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let second = TimelineClip(name: "Second", source: source, timelineStart: 4,
+                                  sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let overlap = TimelineClip(name: "Overlap", source: source, timelineStart: 2,
+                                   sourceRange: TimeRangeValue(start: 0, duration: 4))
+        var project = EditorProject(title: "Repeated source",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [first, second]),
+                     TimelineTrack(name: "Overlay", kind: .visual, clips: [overlap])])
+        var map = SpeedMap.constant
+        map.timeRemap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        project.setSpeedMap(for: first.id, speedMap: map)
+        project.setSpeedMap(for: second.id, speedMap: map)
+        project.setSpeedMap(for: overlap.id, speedMap: map)
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let preview = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology]))
+        let instruction = try #require(preview.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        let firstDecoder = try #require(instruction.clips.first { $0.clipID == first.id }?.temporalSource?.remapVideo?.decoder)
+        let secondDecoder = try #require(instruction.clips.first { $0.clipID == second.id }?.temporalSource?.remapVideo?.decoder)
+        let overlapDecoder = try #require(instruction.clips.first { $0.clipID == overlap.id }?.temporalSource?.remapVideo?.decoder)
+        #expect(firstDecoder === secondDecoder)
+        #expect(firstDecoder !== overlapDecoder)
+    }
+
+    @MainActor
+    @Test func undoOfRemappedSourceTimeRestoresTheDisplayedFrame() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = TimelineClip(name: "Undo remap", source: ClipSource(url: url, mediaType: .video,
+            originalDuration: 4, naturalSize: CGSizeValue(width: 160, height: 96)),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let track = TimelineTrack(name: "Video", kind: .visual, clips: [clip])
+        var project = EditorProject(title: "Undo remap",
+            renderSettings: RenderSettings(width: 160, height: 96, frameRate: 30), tracks: [track])
+        var speed = SpeedMap.constant
+        speed.timeRemap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        project.setSpeedMap(for: clip.id, speedMap: speed)
+        let model = EditorViewModel(projectID: UUID(), projectStore: ProjectStore(),
+                                    initialContent: ProjectContent(editorProject: project))
+        defer { model.stop() }
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 160, height: 96))
+        let host = UIViewController()
+        window.rootViewController = host
+        let playerView = PreviewRendererView.Host(frame: host.view.bounds)
+        playerView.playbackLayer = AVPlayerLayer()
+        host.view.addSubview(playerView)
+        window.isHidden = false
+        let playerBinding = model.$player.sink { playerView.playbackLayer?.player = $0 }
+        defer { playerBinding.cancel(); window.isHidden = true }
+        model.selectTimelineItem(clip.id, trackID: track.id)
+        model.updateCurrentTime(1)
+        await model.rebuildPreview(seekTo: 1, invalidation: [.previewFrame, .compositionTopology, .audioMix],
+                                   generation: model.previewGeneration)
+        let session = try #require(model.beginSelectedTimeRemapEdit(itemID: clip.id))
+        model.setSelectedRemappedSourceTime(3.2, in: session)
+        model.finishInteractiveEdit(delayRebuild: false)
+        await model.rebuildTask?.value
+        let editedExpected = try await nativeSourcePixel(url: url, at: CMTime(seconds: 3.2, preferredTimescale: 600))
+        let context = CIContext()
+        var editedMatched = false
+        for _ in 0..<200 {
+            if let frame = model.livePreviewPresentation.frame
+                ?? model.renderService.livePreviewState.cachedFrame(at: 1, sessionID: model.previewRenderSessionID),
+                let image = context.createCGImage(CIImage(cvPixelBuffer: frame),
+                    from: CGRect(x: 0, y: 0, width: 160, height: 96)),
+                zip(pixel(image), editedExpected).allSatisfy({ abs(Int($0) - Int($1)) < 8 })
+            {
+                editedMatched = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(editedMatched, "The edited frame must be shown before testing undo")
+        // A paused playhead can be between project frames after a scroll or
+        // a playback stop. Undo and redo must still replace the visible frame.
+        model.updateCurrentTime(1.017)
+        model.undo()
+        await model.rebuildTask?.value
+        guard case .media(let restored) = model.selectedTimelineItem else {
+            Issue.record("Expected remapped video")
+            return
+        }
+        #expect(abs(restored.speedMap.sourceTime(at: 1, sourceDuration: 4) - 1) < 0.000_001)
+        let instruction = try #require(model.player?.currentItem?.videoComposition?.instructions.first
+            as? MotionaryVideoCompositionInstruction)
+        let temporal = try #require(instruction.clips.first?.temporalSource)
+        #expect(abs(temporal.speedMap.sourceTime(at: 1, sourceDuration: 4) - 1) < 0.000_001)
+        let expected = try await nativeSourcePixel(url: url, at: CMTime(seconds: 1, preferredTimescale: 600))
+        var matched = false
+        for _ in 0..<200 {
+            if let frame = model.livePreviewPresentation.frame
+                ?? model.renderService.livePreviewState.cachedFrame(at: 1, sessionID: model.previewRenderSessionID),
+                let image = context.createCGImage(CIImage(cvPixelBuffer: frame),
+                    from: CGRect(x: 0, y: 0, width: 160, height: 96))
+            {
+                let actual = pixel(image)
+                if zip(actual, expected).allSatisfy({ abs(Int($0) - Int($1)) < 8 }) {
+                    matched = true
+                    break
+                }
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(matched, "Undo should replace the live edit with the restored source frame")
+        model.redo()
+        await model.rebuildTask?.value
+        var redoneMatched = false
+        for _ in 0..<200 {
+            if let frame = model.livePreviewPresentation.frame
+                ?? model.renderService.livePreviewState.cachedFrame(at: 1, sessionID: model.previewRenderSessionID),
+                let image = context.createCGImage(CIImage(cvPixelBuffer: frame),
+                    from: CGRect(x: 0, y: 0, width: 160, height: 96)),
+                zip(pixel(image), editedExpected).allSatisfy({ abs(Int($0) - Int($1)) < 8 })
+            {
+                redoneMatched = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(redoneMatched, "Redo should display the edited source frame at a fractional playhead position")
+    }
+
+    @MainActor
+    @Test func remapDecoderKeepsCorrectFramesAcrossLargeScrubJumps() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let asset = AVURLAsset(url: url)
+        let track = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let decoder = RemapFrameDecoder(asset: asset, track: track,
+            range: try await track.load(.timeRange), rawSize: CGSize(width: 160, height: 96), frameRate: 30)
+        let context = CIContext()
+        for frame in [2, 61, 12, 91, 60, 32, 95, 29] {
+            let time = CMTime(value: Int64(frame), timescale: 30)
+            let image = CIImage(cvPixelBuffer: try decoder.frame(at: time))
+            let actual = pixel(try #require(context.createCGImage(image, from: image.extent)))
+            let expected = try await nativeSourcePixel(url: url, at: time)
+            #expect(zip(actual, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 })
+        }
+    }
+
+    @MainActor
     @Test func remappedAudioDoesNotOutlastTheVideoClockAtFractionalProjectEnd() async throws {
         let videoURL = try await makeVideo()
         let audioURL = FileManager.default.temporaryDirectory.appendingPathComponent("fractional-remap-\(UUID()).caf")
@@ -410,7 +597,11 @@ struct SourceTimingRenderTests {
         let clockID = try #require(preview.videoComposition?.sourceTrackIDForFrameTiming)
         let clock = try #require(preview.composition.track(withTrackID: clockID))
         #expect(audioTrack.timeRange.end <= clock.timeRange.end)
-        #expect(audioTrack.segments.filter { !$0.isEmpty }.count >= 3)
+        #expect(audioTrack.segments.filter { !$0.isEmpty }.count == 1)
+        let native = try await service.makeComposition(for: project)
+        let nativeTrack = try #require(native.composition.tracks(withMediaType: .audio).first)
+        #expect(nativeTrack.segments.filter { !$0.isEmpty }.count >= 3)
+        #expect(nativeTrack.timeRange.end == audioTrack.timeRange.end)
         let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
         for seconds in [0.0, 1.0, 2.05, 2.3, 3.0] {
             _ = try await probe.image(at: CMTime(seconds: seconds, preferredTimescale: 600))
@@ -535,6 +726,88 @@ struct SourceTimingRenderTests {
         }
     }
 
+    @MainActor
+    @Test func retimedPreviewMixKeepsMusicAtStartAndUpdatesInPlaceAfterVolumeEdit() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("preview-mix-\(UUID()).caf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 96_000))
+        buffer.frameLength = 96_000
+        let samples = try #require(buffer.floatChannelData?[0])
+        for index in 0..<Int(buffer.frameLength) {
+            samples[index] = Float(sin(Double(index) * 2 * .pi * 440 / format.sampleRate) * 0.3)
+        }
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+        }
+        let source = ClipSource(url: url, mediaType: .audio, originalDuration: 2)
+        let retimed = TimelineClip(
+            name: "Retimed", source: source, timelineStart: 0.5,
+            sourceRange: TimeRangeValue(start: 0, duration: 2))
+        let music = TimelineClip(
+            name: "Music", source: source, timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 2))
+        var project = EditorProject(title: "Mixed preview audio", tracks: [
+            TimelineTrack(name: "Retimed", kind: .audio, clips: [retimed]),
+            TimelineTrack(name: "Music", kind: .audio, clips: [music]),
+        ])
+        var remap = try #require(TimeRemap(sourceDuration: 2, timelineDuration: 1.5))
+        remap.setInterpolation(KeyframeCurvePreset.easeInOut.interpolation, at: 0)
+        var map = SpeedMap.constant
+        map.timeRemap = remap
+        project.setSpeedMap(for: retimed.id, speedMap: map)
+
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let first = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.compositionTopology, .audioMix]))
+        #expect(first.composition.tracks(withMediaType: .audio).count == 2)
+        let loudPeak = try Self.earlyAudioPeak(of: first)
+        #expect(loudPeak > 0.15)
+
+        let location = try #require(project.itemLocation(id: music.id))
+        guard case .media(var item) = project.tracks[location.track].items[location.item] else {
+            Issue.record("Expected music clip")
+            return
+        }
+        item.visuals.volume = AnimatableProperty(baseValue: 0.25)
+        project.replaceItem(id: music.id, with: .media(item))
+        let edited = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.audioMix]))
+        #expect(!edited.topologyWasRebuilt)
+        #expect(edited.composition === first.composition)
+        let quietPeak = try Self.earlyAudioPeak(of: edited)
+        #expect(quietPeak > loudPeak * 0.15 && quietPeak < loudPeak * 0.36)
+    }
+
+    private static func earlyAudioPeak(of preview: PreparedPreview) throws -> Float {
+        let composition = preview.composition
+        let reader = try AVAssetReader(asset: composition)
+        reader.timeRange = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 25))
+        let output = AVAssetReaderAudioMixOutput(audioTracks: composition.tracks(withMediaType: .audio), audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        output.audioMix = preview.audioMix
+        try #require(reader.canAdd(output))
+        reader.add(output)
+        try #require(reader.startReading())
+        var peak: Float = 0
+        while let sample = output.copyNextSampleBuffer(), let block = sample.dataBuffer {
+            var values = [Float](repeating: 0, count: CMBlockBufferGetDataLength(block) / MemoryLayout<Float>.stride)
+            try #require(!values.isEmpty)
+            let status = values.withUnsafeMutableBytes { bytes in
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes.count, destination: bytes.baseAddress!)
+            }
+            try #require(status == noErr)
+            peak = max(peak, values.lazy.map { abs($0) }.max() ?? 0)
+        }
+        try #require(reader.status == .completed)
+        return peak
+    }
+
     @Test func audioRemappingKeepsContinuousTrackEditsAndTheSelectedPitchMode() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("remap-\(UUID()).caf")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -582,8 +855,20 @@ struct SourceTimingRenderTests {
             Issue.record("Expected audio media")
             return
         }
+        let fixedPitch = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.compositionTopology, .audioMix]))
+        let fixedTrack = try #require(fixedPitch.composition.tracks(withMediaType: .audio).first)
+        let fixedSegment = try #require(fixedTrack.segments.first { !$0.isEmpty })
+        #expect(fixedTrack.segments.filter { !$0.isEmpty }.count == 1)
         media.pitchFollowsSpeed = true
         project.replaceItem(id: clip.id, with: .media(media))
+        let changedPitch = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.audioMix]))
+        #expect(changedPitch.topologyWasRebuilt)
+        let changedTrack = try #require(changedPitch.composition.tracks(withMediaType: .audio).first)
+        let changedSegment = try #require(changedTrack.segments.first { !$0.isEmpty })
+        #expect(changedSegment.sourceURL != fixedSegment.sourceURL)
+        #expect(changedSegment.timeMapping.target == fixedSegment.timeMapping.target)
         let pitchFollowsSpeed = try await service.makeComposition(for: project)
         #expect(pitchFollowsSpeed.audioMix?.inputParameters.first?.audioTimePitchAlgorithm == .varispeed)
         remap.setSourceTime(2, at: 0, tolerance: 0.001)
@@ -611,6 +896,43 @@ struct SourceTimingRenderTests {
         let head = try #require(reversedHead.floatChannelData?[0])
         for index in 0..<32 { #expect(abs(tail[31 - index] - head[index]) < 0.0001) }
 
+    }
+
+    @MainActor
+    @Test func previewReusesTheSourceDecoderWhenItsTimelineMappingChanges() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = TimelineClip(
+            name: "Remapped source",
+            source: ClipSource(url: url, mediaType: .video, originalDuration: 4),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4)
+        )
+        var project = EditorProject(title: "Source decoder reuse", tracks: [
+            TimelineTrack(name: "Video", kind: .visual, clips: [clip])
+        ])
+        var map = SpeedMap.constant
+        map.timeRemap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        project.setSpeedMap(for: clip.id, speedMap: map)
+        let service = CompositionRenderService(previewProxyStore: nil)
+
+        let original = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.previewFrame, .compositionTopology, .audioMix]))
+        let originalInstruction = try #require(
+            original.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        let originalSource = try #require(originalInstruction.clips.first?.temporalSource)
+
+        map.timeRemap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 2))
+        project.setSpeedMap(for: clip.id, speedMap: map)
+        let updated = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.previewFrame, .compositionTopology, .audioMix]))
+        let updatedInstruction = try #require(
+            updated.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        let updatedSource = try #require(updatedInstruction.clips.first?.temporalSource)
+
+        #expect(updated.topologyWasRebuilt)
+        #expect(updatedSource.speedMap == map)
+        let decoder = try #require(originalSource.remapVideo?.decoder)
+        #expect(updatedSource.remapVideo?.decoder === decoder)
     }
 
     @MainActor

@@ -73,6 +73,7 @@ struct RemapVideoSource: Sendable {
     let timeRange: CMTimeRange
     let decoder: RemapFrameDecoder
     var sourceOffset = 0.0
+    var liveProxySourceURL: URL? = nil
 
     func image(at sourceTime: Double, quality: RenderQualityProfile) throws -> CIImage {
         guard rawSize.width > 0, rawSize.height > 0 else {
@@ -81,6 +82,18 @@ struct RemapVideoSource: Sendable {
         let requested = CMTime(seconds: sourceTime - sourceOffset, preferredTimescale: 60_000)
         let last = max(timeRange.start, timeRange.end - CMTime(value: 1, timescale: 60_000))
         let target = min(max(requested, timeRange.start), last)
+        if quality != .export, let liveProxySourceURL,
+            let proxy = LiveRemapProxyRegistry.proxy(for: liveProxySourceURL),
+            proxy.size.width > 0, proxy.size.height > 0
+        {
+            let proxyEnd = max(proxy.range.start, proxy.range.end - CMTime(value: 1, timescale: 60_000))
+            let proxyTarget = min(max(target, proxy.range.start), proxyEnd)
+            if let buffer = try? proxy.decoder(for: decoder).frame(at: proxyTarget) {
+                return VideoSourceGeometry.engineImage(CIImage(cvPixelBuffer: buffer))
+                    .transformed(by: CGAffineTransform(scaleX: rawSize.width / proxy.size.width,
+                                                       y: rawSize.height / proxy.size.height))
+            }
+        }
         if let buffer = try? decoder.frame(at: target) {
             return VideoSourceGeometry.engineImage(CIImage(cvPixelBuffer: buffer))
         }

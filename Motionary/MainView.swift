@@ -91,6 +91,8 @@ struct MainView: App {
                         home: { EffectsGestureTestScene() }, settings: { Text("Settings") }
                     )
                     .ignoresSafeArea(.container)
+                } else if let fixture = ProcessInfo.processInfo.environment["MOTIONARY_EDITOR_UI_FIXTURE"] {
+                    NavigationStack { ArchivedEditorTestScene(url: URL(fileURLWithPath: fixture), store: projectStore) }
                 } else if ProcessInfo.processInfo.arguments.contains("--adjustment-editor-tests") {
                     NavigationStack { AdjustmentEditorTestScene() }
                 } else if ProcessInfo.processInfo.arguments.contains("--timeline-gesture-tests") {
@@ -130,7 +132,7 @@ struct MainView: App {
     private var tabView: some View {
         Group {
             if UIDevice.current.userInterfaceIdiom == .pad {
-                iPadTabs
+                iPadTabs.ignoresSafeArea(.keyboard, edges: .bottom)
             } else {
                 phoneTabs
                     .ignoresSafeArea(.container)
@@ -184,55 +186,51 @@ struct MainView: App {
                 .allowsHitTesting(selectedTab == 1)
                 .accessibilityHidden(selectedTab != 1)
         }
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(.primary)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !isEditorPresented {
-                iPadTabBar
+        .modifier(PadTabBarPlacement(isEditorPresented: isEditorPresented, selection: $selectedTab,
+                                     isSearching: isProjectSearchPresented, onSearch: handlePadSearch))
+    }
+
+    private struct PadTabBarPlacement: ViewModifier {
+        let isEditorPresented: Bool
+        @Binding var selection: Int
+        let isSearching: Bool
+        let onSearch: () -> Void
+
+        func body(content: Content) -> some View {
+            reservedContent(content)
+                .overlay(alignment: .bottom) {
+                    if !isEditorPresented {
+                        MotionaryPadTabBar(
+                            selection: $selection,
+                            isSearching: isSearching,
+                            onSearch: onSearch
+                        )
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
+                }
+        }
+
+        @ViewBuilder
+        private func reservedContent(_ content: Content) -> some View {
+            if #available(iOS 26.0, *) {
+                content.safeAreaBar(edge: .bottom, spacing: 0) { MotionaryPadTabBar.safeAreaReservation }
+            } else {
+                content.safeAreaInset(edge: .bottom, spacing: 0) { MotionaryPadTabBar.safeAreaReservation }
             }
         }
     }
 
-    private var iPadTabBar: some View {
-        HStack(spacing: 8) {
-            iPadTabButton("Motionary", image: Image("MotionarySF"), selected: selectedTab == 0) {
-                selectedTab = 0
-                isProjectSearchPresented = false
-                projectSearchText = ""
-            }
-            iPadTabButton("Settings", image: Image(systemName: "gearshape.fill"), selected: selectedTab == 1) {
-                selectedTab = 1
-            }
-            Divider().frame(height: 24).padding(.horizontal, 4)
-            iPadTabButton(isProjectSearchPresented ? "Close search" : "Search",
-                          image: Image(systemName: isProjectSearchPresented ? "keyboard.chevron.compact.down" : "magnifyingglass"),
-                          selected: false) {
-                if isProjectSearchPresented { UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil) }
-                selectedTab = 0
-                isProjectSearchPresented.toggle()
-                if !isProjectSearchPresented { projectSearchText = "" }
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            }
+    private func handlePadSearch() {
+        if isProjectSearchPresented {
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
-        .padding(8)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.primary.opacity(0.08), lineWidth: 0.5))
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-    }
-
-    private func iPadTabButton(_ label: String, image: Image, selected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            image
-                .renderingMode(.template)
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: 56, height: 44)
-                .foregroundStyle(selected ? MotionaryTheme.accent : Color.secondary)
-                .background(selected ? Color.primary.opacity(0.08) : .clear, in: Capsule())
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        selectedTab = 0
+        isProjectSearchPresented.toggle()
+        if !isProjectSearchPresented { projectSearchText = "" }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     private func handlePendingAction() {

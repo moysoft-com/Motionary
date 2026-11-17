@@ -232,6 +232,7 @@ struct LivePreviewClipOverride: @unchecked Sendable {
 struct LivePreviewRenderSnapshot: Sendable {
     let overrides: [UUID: LivePreviewClipOverride]
     let usesInteractiveQuality: Bool
+    let isScrubbing: Bool
     let revision: UInt64
 
     func override(for clipID: UUID) -> LivePreviewClipOverride? {
@@ -243,14 +244,18 @@ final class LivePreviewRenderState: @unchecked Sendable {
     private let lock = NSLock()
     private var overrides: [UUID: LivePreviewClipOverride] = [:]
     private var forcesInteractiveQuality = false
+    private var isScrubbing = false
     private var revision: UInt64 = 0
     private let composedFrames = PreviewFrameCache()
-    private var pausedFrameRenderer: ((Double, UUID, @escaping (CVPixelBuffer?) -> Void) -> Bool)?
+    private var pausedFrameRenderer: ((
+        Double, UUID, @escaping @Sendable () -> Bool, @escaping (CVPixelBuffer?) -> Void
+    ) -> Bool)?
 
-    func cachedFrame(at time: Double, sessionID: UUID) -> CVPixelBuffer? {
+    func cachedFrame(at time: Double, sessionID: UUID, allowsScrubFrames: Bool? = nil) -> CVPixelBuffer? {
         lock.lock()
         defer { lock.unlock() }
-        return composedFrames.frame(at: time, sessionID: sessionID, revision: revision)
+        return composedFrames.frame(at: time, sessionID: sessionID, revision: revision,
+                                    allowsScrubFrames: allowsScrubFrames ?? isScrubbing)
     }
 
     /// Transient scrub fallback only. Returns the closest composed frame
@@ -261,27 +266,44 @@ final class LivePreviewRenderState: @unchecked Sendable {
     func cachedFrameNear(at time: Double, sessionID: UUID, window: Double) -> (frame: CVPixelBuffer, time: Double)? {
         lock.lock()
         defer { lock.unlock() }
-        return composedFrames.frameNear(at: time, sessionID: sessionID, window: window, revision: revision)
+        return composedFrames.frameNear(at: time, sessionID: sessionID, window: window, revision: revision,
+                                        allowsScrubFrames: isScrubbing)
     }
 
-    func cacheFrame(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision renderedRevision: UInt64) {
+    func cacheFrame(_ frame: CVPixelBuffer, at time: Double, sessionID: UUID, revision renderedRevision: UInt64,
+                    isScrubFrame: Bool = false) {
         lock.lock()
         defer { lock.unlock() }
         guard renderedRevision == revision else { return }
-        composedFrames.store(frame, at: time, sessionID: sessionID, revision: renderedRevision)
+        composedFrames.store(frame, at: time, sessionID: sessionID, revision: renderedRevision,
+                             isScrubFrame: isScrubFrame)
     }
 
     func invalidateComposedFrames() {
         lock.lock()
-        revision &+= 1
         // A timeline edit can assign completely different source content to
         // the same timeline timestamp. Such entries are not valid scrub holds.
-        composedFrames.removeAll()
+        advanceRevision()
         lock.unlock()
     }
 
+    /// Called with the render-state lock held. Previously completed pixels
+    /// outside the interval are still valid. In-flight completions must
+    /// match the new revision before they enter the cache.
+    private func advanceRevision(affecting timeRange: ClosedRange<Double>? = nil) {
+        let previous = revision
+        revision &+= 1
+        if let timeRange {
+            composedFrames.advanceRevision(from: previous, to: revision, invalidating: timeRange)
+        } else {
+            composedFrames.removeAll()
+        }
+    }
+
     func installPausedFrameRenderer(
-        _ render: @escaping (Double, UUID, @escaping (CVPixelBuffer?) -> Void) -> Bool
+        _ render: @escaping (
+            Double, UUID, @escaping @Sendable () -> Bool, @escaping (CVPixelBuffer?) -> Void
+        ) -> Bool
     ) {
         lock.lock()
         pausedFrameRenderer = render
@@ -297,38 +319,42 @@ final class LivePreviewRenderState: @unchecked Sendable {
     /// A single decoded frame set is reused only at its original timeline time
     /// and composition session. Scrubbing/playback continue through AVFoundation.
     func renderPausedFrame(at time: Double, sessionID: UUID,
+                           isCancelled: @escaping @Sendable () -> Bool = { false },
                            completion: @escaping (CVPixelBuffer?) -> Void) -> Bool {
         lock.lock()
         let render = pausedFrameRenderer
         lock.unlock()
-        return render?(time, sessionID, completion) ?? false
+        return render?(time, sessionID, isCancelled, completion) ?? false
     }
 
     @discardableResult
-    func setTransform(_ transform: ClipTransform, for clipID: UUID) -> UInt64 {
+    func setTransform(_ transform: ClipTransform, for clipID: UUID,
+                      affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         overrides[clipID, default: LivePreviewClipOverride()].transform = transform
-        revision &+= 1
+        advanceRevision(affecting: timeRange)
         let currentRevision = revision
         lock.unlock()
         return currentRevision
     }
 
     @discardableResult
-    func setTransform(_ transform: ClipTransform, hidden isHidden: Bool, for clipID: UUID) -> UInt64 {
+    func setTransform(_ transform: ClipTransform, hidden isHidden: Bool, for clipID: UUID,
+                      affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         overrides[clipID, default: LivePreviewClipOverride()].transform = transform
         overrides[clipID]?.isHidden = isHidden
-        revision &+= 1
+        advanceRevision(affecting: timeRange)
         let currentRevision = revision
         lock.unlock()
         return currentRevision
     }
 
-    func setSpeedMap(_ speedMap: SpeedMap, for clipID: UUID) {
+    func setSpeedMap(_ speedMap: SpeedMap, for clipID: UUID,
+                     affecting timeRange: ClosedRange<Double>? = nil) {
         lock.lock()
         overrides[clipID, default: LivePreviewClipOverride()].speedMap = speedMap
-        revision &+= 1
+        advanceRevision(affecting: timeRange)
         lock.unlock()
     }
 
@@ -343,7 +369,8 @@ final class LivePreviewRenderState: @unchecked Sendable {
         _ visuals: TimelineItemVisuals,
         shape: ClipShape? = nil,
         text: TextTimelineItem? = nil,
-        for clipID: UUID
+        for clipID: UUID,
+        affecting timeRange: ClosedRange<Double>? = nil
     ) -> UInt64 {
         lock.lock()
         var override = overrides[clipID] ?? LivePreviewClipOverride()
@@ -351,26 +378,27 @@ final class LivePreviewRenderState: @unchecked Sendable {
         override.shape = shape
         override.text = text
         overrides[clipID] = override
-        revision &+= 1
+        advanceRevision(affecting: timeRange)
         let currentRevision = revision
         lock.unlock()
         return currentRevision
     }
 
     @discardableResult
-    func setHidden(_ isHidden: Bool, for clipID: UUID) -> UInt64 {
+    func setHidden(_ isHidden: Bool, for clipID: UUID,
+                   affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         if isHidden {
             if overrides[clipID]?.isHidden != true {
                 overrides[clipID, default: LivePreviewClipOverride()].isHidden = true
-                revision &+= 1
+                advanceRevision(affecting: timeRange)
             }
         } else if overrides[clipID]?.isHidden == true {
             overrides[clipID]?.isHidden = false
             if overrides[clipID]?.isEmpty == true {
                 overrides.removeValue(forKey: clipID)
             }
-            revision &+= 1
+            advanceRevision(affecting: timeRange)
         }
         let currentRevision = revision
         lock.unlock()
@@ -378,14 +406,15 @@ final class LivePreviewRenderState: @unchecked Sendable {
     }
 
     @discardableResult
-    func revealPreservingTransform(for clipID: UUID) -> UInt64 {
+    func revealPreservingTransform(for clipID: UUID,
+                                   affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         if overrides[clipID]?.isHidden == true {
             overrides[clipID]?.isHidden = false
             if overrides[clipID]?.isEmpty == true {
                 overrides.removeValue(forKey: clipID)
             }
-            revision &+= 1
+            advanceRevision(affecting: timeRange)
         }
         let currentRevision = revision
         lock.unlock()
@@ -393,14 +422,15 @@ final class LivePreviewRenderState: @unchecked Sendable {
     }
 
     @discardableResult
-    func clearTransform(for clipID: UUID) -> UInt64 {
+    func clearTransform(for clipID: UUID,
+                        affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         if overrides[clipID]?.transform != nil {
             overrides[clipID]?.transform = nil
             if overrides[clipID]?.isEmpty == true {
                 overrides.removeValue(forKey: clipID)
             }
-            revision &+= 1
+            advanceRevision(affecting: timeRange)
         }
         let currentRevision = revision
         lock.unlock()
@@ -410,7 +440,8 @@ final class LivePreviewRenderState: @unchecked Sendable {
     /// Clears only inspector-driven visual data. A concurrent canvas
     /// transform/hidden handoff remains active until its own commit completes.
     @discardableResult
-    func clearVisuals(for clipID: UUID) -> UInt64 {
+    func clearVisuals(for clipID: UUID,
+                      affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         if let existing = overrides[clipID],
             existing.visuals != nil || existing.shape != nil || existing.text != nil || existing.speedMap != nil
@@ -422,7 +453,7 @@ final class LivePreviewRenderState: @unchecked Sendable {
             if overrides[clipID]?.isEmpty == true {
                 overrides.removeValue(forKey: clipID)
             }
-            revision &+= 1
+            advanceRevision(affecting: timeRange)
         }
         let currentRevision = revision
         lock.unlock()
@@ -432,10 +463,11 @@ final class LivePreviewRenderState: @unchecked Sendable {
     /// Clears the complete handoff for a clip after both its persistent
     /// descriptor and presentation state have committed.
     @discardableResult
-    func clearOverride(for clipID: UUID) -> UInt64 {
+    func clearOverride(for clipID: UUID,
+                       affecting timeRange: ClosedRange<Double>? = nil) -> UInt64 {
         lock.lock()
         if overrides.removeValue(forKey: clipID) != nil {
-            revision &+= 1
+            advanceRevision(affecting: timeRange)
         }
         let currentRevision = revision
         lock.unlock()
@@ -448,7 +480,7 @@ final class LivePreviewRenderState: @unchecked Sendable {
         if !overrides.isEmpty || forcesInteractiveQuality {
             overrides.removeAll(keepingCapacity: true)
             forcesInteractiveQuality = false
-            revision &+= 1
+            advanceRevision()
         }
         let currentRevision = revision
         lock.unlock()
@@ -494,6 +526,12 @@ final class LivePreviewRenderState: @unchecked Sendable {
         return currentRevision
     }
 
+    func setScrubbing(_ enabled: Bool) {
+        lock.lock()
+        isScrubbing = enabled
+        lock.unlock()
+    }
+
     var usesInteractiveQuality: Bool {
         lock.lock()
         let isInteractive = forcesInteractiveQuality
@@ -506,6 +544,7 @@ final class LivePreviewRenderState: @unchecked Sendable {
         let snapshot = LivePreviewRenderSnapshot(
             overrides: overrides,
             usesInteractiveQuality: forcesInteractiveQuality,
+            isScrubbing: isScrubbing,
             revision: revision
         )
         lock.unlock()
@@ -596,6 +635,14 @@ struct FrameRenderPlan: @unchecked Sendable {
     let failurePolicy: RenderFailurePolicy
     let livePreviewState: LivePreviewRenderState?
     let livePreviewSnapshot: LivePreviewRenderSnapshot?
+
+    var scrubEffectScale: CGFloat {
+        guard quality != .export, livePreviewSnapshot?.isScrubbing == true else { return 1 }
+        // Effect stacks normally run in authored pixels, even on a small
+        // preview. Limit their scratch surfaces while the playhead is moving.
+        let authoredDimension = max(renderSize.width, renderSize.height) / max(renderScale, 0.000_001)
+        return min(1, 720 / authoredDimension)
+    }
 
     init(
         renderSize: CGSize,
@@ -730,31 +777,30 @@ extension RenderClipDescriptor {
 
 /// The effect stack runs in a stable authored pixel grid before placement.
 /// Media uses its source pixels; generated and adjustment layers use project
-/// pixels. Output resolution and raster supersampling never alter that grid.
+/// pixels. Scrubbing may sample the same grid at a lower resolution.
 struct LayerEffectCoordinates {
     let renderScale: CGFloat
     let inputTransform: CGAffineTransform
 
     init(isGeneratedLayer: Bool, outputScale: CGFloat, rasterScaleCorrection: CGSize,
-         mediaSize: CGSize? = nil, canvasSize: CGSize? = nil) {
+         mediaSize: CGSize? = nil, canvasSize: CGSize? = nil, effectScale: CGFloat = 1) {
+        renderScale = effectScale
         guard isGeneratedLayer else {
-            renderScale = 1
             // Media effects use project pixels just like generated layers. A
             // proxy and its original must not assign different visual sizes to
             // the same blur radius, grain cell or scanline spacing.
             let fit = mediaSize.flatMap { source in
                 canvasSize.flatMap { VideoSourceGeometry.fitScale(sourceSize: source, inside: $0) }
             } ?? 1
-            inputTransform = CGAffineTransform(scaleX: fit, y: fit)
+            inputTransform = CGAffineTransform(scaleX: fit * effectScale, y: fit * effectScale)
             return
         }
-        renderScale = 1
         // Run the complete stack in project pixels, including grain, scanlines,
         // offsets and margins. Output and supersampling affect placement only.
         let outputScale = max(outputScale, 0.000_001)
         inputTransform = CGAffineTransform(
-            scaleX: max(rasterScaleCorrection.width, 0.000_001) / outputScale,
-            y: max(rasterScaleCorrection.height, 0.000_001) / outputScale
+            scaleX: max(rasterScaleCorrection.width, 0.000_001) * effectScale / outputScale,
+            y: max(rasterScaleCorrection.height, 0.000_001) * effectScale / outputScale
         )
     }
 }

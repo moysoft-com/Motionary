@@ -2096,21 +2096,38 @@ struct CanvasAndRenderingTests {
     }
 
     @MainActor
-    @Test func stillImageRenderPreservesTopToBottomOrientation() throws {
-        let image = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image { context in
+    @Test(arguments: [false, true])
+    func stillImageRenderPreservesTopToBottomOrientation(preview: Bool) throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let size = CGSize(width: 256, height: 256)
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
             UIColor.systemRed.setFill()
-            context.fill(CGRect(x: 0, y: 0, width: 64, height: 32))
+            context.fill(CGRect(x: 0, y: 0, width: 256, height: 128))
             UIColor.systemBlue.setFill()
-            context.fill(CGRect(x: 0, y: 32, width: 64, height: 32))
+            context.fill(CGRect(x: 0, y: 128, width: 256, height: 128))
         }
         let sourceURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString)-oriented-still.png")
+        let matteURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-oriented-matte.png")
         try #require(image.pngData()).write(to: sourceURL, options: .atomic)
-        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: matteURL)
+        }
+        let matte = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 128, y: 0, width: 128, height: 256))
+        }
+        try #require(matte.pngData()).write(to: matteURL)
 
         let descriptor = RenderClipDescriptor(
             trackID: kCMPersistentTrackID_Invalid,
             backgroundMaskTrackID: nil,
+            backgroundMaskImageURL: matteURL,
             stillImageURL: sourceURL,
             clipID: UUID(),
             timelineStart: 0,
@@ -2121,7 +2138,7 @@ struct CanvasAndRenderingTests {
             adjustments: AdjustmentSettings(),
             effectStack: EffectStack(),
             mask: nil,
-            backgroundRemoval: nil,
+            backgroundRemoval: BackgroundRemovalSettings(),
             blendMode: .normal,
             blendIntensity: 1,
             shape: nil,
@@ -2150,8 +2167,9 @@ struct CanvasAndRenderingTests {
                 backgroundColor: RGBAColor(red: 0, green: 0, blue: 0, alpha: 1),
                 frameDuration: 0.1,
                 clips: [descriptor],
-                quality: .export,
-                failurePolicy: .failOnUnavailableEffects
+                quality: preview ? .balanced : .export,
+                failurePolicy: .failOnUnavailableEffects,
+                livePreviewState: preview ? LivePreviewRenderState() : nil
             ),
             compositionTime: CMTime(seconds: 0, preferredTimescale: 600),
             sourceFrame: { _ in nil },
@@ -2159,10 +2177,12 @@ struct CanvasAndRenderingTests {
             isCancelled: { false }
         )
 
-        let top = rgbaPixel(in: destination, x: 32, y: 8)
-        let bottom = rgbaPixel(in: destination, x: 32, y: 56)
+        let top = rgbaPixel(in: destination, x: 48, y: 8)
+        let bottom = rgbaPixel(in: destination, x: 48, y: 56)
+        let masked = rgbaPixel(in: destination, x: 16, y: 8)
         #expect(top[0] > top[2])
         #expect(bottom[2] > bottom[0])
+        #expect(masked.prefix(3).allSatisfy { $0 < 10 })
     }
 
     @MainActor

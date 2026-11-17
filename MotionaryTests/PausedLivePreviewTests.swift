@@ -11,6 +11,7 @@ struct PreviewLayoutTests {
     @Test func rearrangingWorkspacePreservesNativePreviewSurfaces() async throws {
         let presentation = LivePreviewPresentation()
         let player = AVPlayer()
+        presentation.playerLayer.player = player
         func content(wide: Bool, hidden: Bool = false) -> some View {
             EditorPreviewWorkspaceLayout(
                 usesSideWorkspace: wide, hidesPreview: hidden,
@@ -19,7 +20,7 @@ struct PreviewLayoutTests {
                 workspaceID: wide ? "inspector" : "timeline",
                 preview: {
                     ZStack {
-                        PreviewRendererView(player: player)
+                        PreviewRendererView(playerLayer: presentation.playerLayer)
                         LivePreviewSurface(presentation: presentation)
                     }
                 }, controls: { Color.clear }, workspace: { Color.gray }
@@ -44,7 +45,7 @@ struct PreviewLayoutTests {
             if let view = root as? T { return view }
             return root.subviews.lazy.compactMap { find(type, in: $0) }.first
         }
-        let originalPlayer = try #require(find(PreviewPlayerContainerView.self, in: host.view))
+        let originalPlayer = try #require(find(PreviewRendererView.Host.self, in: host.view))
         let originalSurface = try #require(find(LivePreviewSampleView.self, in: host.view))
         for (wide, hidden) in [(true, false), (false, false), (false, true), (false, false)] {
             withAnimation(.smooth(duration: 0.2, extraBounce: 0)) {
@@ -53,9 +54,9 @@ struct PreviewLayoutTests {
             host.view.setNeedsLayout()
             host.view.layoutIfNeeded()
             try await Task.sleep(for: .milliseconds(450))
-            #expect(find(PreviewPlayerContainerView.self, in: host.view) === originalPlayer)
+            #expect(find(PreviewRendererView.Host.self, in: host.view) === originalPlayer)
             #expect(find(LivePreviewSampleView.self, in: host.view) === originalSurface)
-            #expect(originalPlayer.playerLayer.player === player)
+            #expect(originalPlayer.playbackLayer?.player === player)
             var buffer: CVPixelBuffer?
             #expect(CVPixelBufferCreate(kCFAllocatorDefault, 96, 96, kCVPixelFormatType_32BGRA,
                 [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer) == kCVReturnSuccess)
@@ -198,7 +199,8 @@ struct PausedLivePreviewTests {
     }
 
     @MainActor
-    @Test func measureDisplaySizedLiveFrameLatency() async throws {
+    @Test(arguments: [false, true])
+    func measureDisplaySizedLiveFrameLatency(scrubbing: Bool) async throws {
         var shape = ShapeTimelineItem(
             name: "Latency", mediaID: MediaID(),
             shape: ClipShape(kind: .rectangle, color: .white, width: 480, height: 300),
@@ -221,6 +223,7 @@ struct PausedLivePreviewTests {
         generator.videoComposition = prepared.videoComposition
         _ = try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600))
         service.livePreviewState.setInteractiveQualityOverride(true)
+        service.livePreviewState.setScrubbing(scrubbing)
         var milliseconds: [Double] = []
         for index in 0..<65 {
             var transform = ClipTransform()
@@ -250,7 +253,8 @@ struct PausedLivePreviewTests {
             #expect(service.livePreviewState.cachedFrame(at: 0.5, sessionID: session) === cached)
         }
         let cacheMS = (ProcessInfo.processInfo.systemUptime - cacheStart) * 1_000 / 1_000
-        let report = "960x540, Wave Warp + Blur + Soft Glow, full preview quality, 60 GPU refreshes after warm-up: LIVE_PREVIEW_GPU_MS median=\(milliseconds[30]) p95=\(milliseconds[57]) max=\(milliseconds[59]); cached full-quality frame lookup average=\(cacheMS) ms (1000 samples, including assertions)"
+        let report = "960x540, Wave Warp + Blur + Soft Glow, scrubbing=\(scrubbing), 60 GPU refreshes after warm-up: LIVE_PREVIEW_GPU_MS median=\(milliseconds[30]) p95=\(milliseconds[57]) max=\(milliseconds[59]); cached frame lookup average=\(cacheMS) ms (1000 samples, including assertions)"
+        print(report)
         Attachment.record(report, named: "live-preview-render-latency.txt")
         withExtendedLifetime(generator) {}
     }

@@ -43,7 +43,7 @@ struct KeyframeWorkspaceView: View {
                             }
                             .disabled(!context.isActive)
                             Divider()
-                            Button("Delete", systemImage: "trash", role: .destructive) {
+                            DeleteMenuButton {
                                 viewModel.setInterpolation(
                                     .linear,
                                     section: context.segment.section,

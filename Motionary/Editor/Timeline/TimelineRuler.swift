@@ -170,6 +170,8 @@ final class TimelineRulerSurface: UIView {
                     let width = ceil(size.width) + 2
                     let height = ceil(size.height)
                     let startX = layout.width / 2 - windowOrigin
+                    // Keep text fixed to its tick. Let it scroll out of view;
+                    // clamping it to a viewport edge makes the ruler sticky.
                     let labelX = x + 22 - width / 2
                     let frame = CGRect(x: labelX, y: 10 - height / 2, width: width, height: height)
                     if frame.minX >= startX {

@@ -88,4 +88,48 @@ struct PreviewFrameCacheTests {
         state.cacheFrame(frame, at: 0.5, sessionID: session, revision: edited)
         #expect(state.cachedFrame(at: 0.5, sessionID: session) == nil)
     }
+
+    @Test func scrubFramesAreReusableDuringScrubAndNeverReplaceFullQuality() throws {
+        let state = LivePreviewRenderState()
+        let session = UUID()
+        let full = try buffer(), scrub = try buffer()
+        let revision = state.snapshot().revision
+        state.setScrubbing(true)
+        state.cacheFrame(scrub, at: 0.5, sessionID: session, revision: revision, isScrubFrame: true)
+        #expect(state.cachedFrame(at: 0.5, sessionID: session) === scrub)
+        #expect(state.cachedFrameNear(at: 0.52, sessionID: session, window: 1 / 30)?.frame === scrub)
+        state.setScrubbing(false)
+        #expect(state.cachedFrame(at: 0.5, sessionID: session) == nil)
+        #expect(state.cachedFrameNear(at: 0.52, sessionID: session, window: 1 / 30) == nil)
+        state.cacheFrame(full, at: 0.5, sessionID: session, revision: revision)
+        state.cacheFrame(scrub, at: 0.5, sessionID: session, revision: revision, isScrubFrame: true)
+        state.setScrubbing(true)
+        #expect(state.cachedFrame(at: 0.5, sessionID: session) === full)
+    }
+
+    @Test func scopedEditsKeepCompletedFramesOutsideTheEditedInterval() throws {
+        let state = LivePreviewRenderState()
+        let session = UUID(), clip = UUID()
+        let before = try buffer(), inside = try buffer(), after = try buffer()
+        let original = state.snapshot().revision
+        state.cacheFrame(before, at: 0.25, sessionID: session, revision: original)
+        state.cacheFrame(inside, at: 3, sessionID: session, revision: original)
+        state.cacheFrame(after, at: 7.5, sessionID: session, revision: original)
+
+        let edited = state.setTransform(ClipTransform(), for: clip, affecting: 2...4)
+        #expect(state.cachedFrame(at: 0.25, sessionID: session) === before)
+        #expect(state.cachedFrame(at: 7.5, sessionID: session) === after)
+        #expect(state.cachedFrame(at: 3, sessionID: session) == nil)
+        #expect(state.cachedFrameNear(at: 3, sessionID: session, window: 1 / 30) == nil)
+        state.cacheFrame(inside, at: 3, sessionID: session, revision: original)
+        #expect(state.cachedFrame(at: 3, sessionID: session) == nil)
+
+        let renderedAfterEdit = try buffer()
+        state.cacheFrame(renderedAfterEdit, at: 3, sessionID: session, revision: edited)
+        state.clearTransform(for: clip, affecting: 2...4)
+        #expect(state.cachedFrame(at: 3, sessionID: session) == nil)
+        #expect(state.cachedFrame(at: 7.5, sessionID: session) === after)
+        state.invalidateComposedFrames()
+        #expect(state.cachedFrame(at: 7.5, sessionID: session) == nil)
+    }
 }

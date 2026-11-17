@@ -8,6 +8,90 @@ import Testing
 @Suite(.serialized)
 struct PreviewProxyTests {
     @MainActor
+    @Test func coldRemapCanAdoptReadyProxyWithoutReplacingItsComposition() async throws {
+        let sourceURL = try await makeLongGOPVideo()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("live-remap-proxy-\(UUID())")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = PreviewProxyStore(directory: directory)
+        let metadata = try await MediaAssetCache.shared.metadata(for: sourceURL)
+        let clip = TimelineClip(name: "Cold remap", source: ClipSource(url: sourceURL, mediaType: .video,
+            originalDuration: metadata.duration, naturalSize: CGSizeValue(width: 1920, height: 1080)),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: metadata.duration))
+        var project = EditorProject(title: "Cold remap",
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        var speed = SpeedMap.constant
+        speed.timeRemap = try #require(TimeRemap(sourceDuration: metadata.duration, timelineDuration: metadata.duration))
+        project.setSpeedMap(for: clip.id, speedMap: speed)
+        let service = CompositionRenderService(previewProxyStore: store, proxiesOnlyForRemappedVideo: true)
+        let preview = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology]))
+        let instruction = try #require(preview.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        let source = try #require(instruction.clips.first?.temporalSource?.remapVideo)
+        #expect(source.url == sourceURL)
+        #expect(source.liveProxySourceURL == sourceURL)
+        let proxy = try #require(try await store.prepare(source: metadata))
+        for _ in 0..<1000 where LiveRemapProxyRegistry.proxy(for: sourceURL) == nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(LiveRemapProxyRegistry.proxy(for: sourceURL)?.url == proxy.url)
+        let liveProxy = try #require(LiveRemapProxyRegistry.proxy(for: sourceURL))
+        let sourceTrack = try #require(metadata.videoTrack)
+        let otherDecoder = RemapFrameDecoder(asset: metadata.asset, track: sourceTrack,
+            range: try await sourceTrack.load(.timeRange), rawSize: CGSize(width: 1920, height: 1080),
+            frameRate: try await sourceTrack.load(.nominalFrameRate))
+        #expect(liveProxy.decoder(for: source.decoder) === liveProxy.decoder(for: source.decoder))
+        #expect(liveProxy.decoder(for: source.decoder) !== liveProxy.decoder(for: otherDecoder))
+        // The original decoder has not read a frame. Removing its source
+        // proves the already-built descriptor can use the newly ready proxy.
+        try FileManager.default.removeItem(at: sourceURL)
+        let image = try source.image(at: 1.5, quality: .balanced)
+        #expect(abs(image.extent.width - 1920) < 0.01)
+        #expect(abs(image.extent.height - 1080) < 0.01)
+        #expect(instruction.clips.first?.temporalSource?.remapVideo?.url == sourceURL)
+    }
+
+    @MainActor
+    @Test func remappedVideoUsesReadyProxyForPreviewButOriginalForExport() async throws {
+        let sourceURL = try await makeLongGOPVideo()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("remap-proxy-\(UUID())")
+        defer {
+            try? FileManager.default.removeItem(at: sourceURL)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let store = PreviewProxyStore(directory: directory)
+        let metadata = try await MediaAssetCache.shared.metadata(for: sourceURL)
+        let proxy = try #require(try await store.prepare(source: metadata))
+        let clip = TimelineClip(name: "Remap", source: ClipSource(
+            url: sourceURL, mediaType: .video, originalDuration: metadata.duration,
+            naturalSize: CGSizeValue(width: 1920, height: 1080)), timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: metadata.duration))
+        var project = EditorProject(title: "Remap proxy",
+            renderSettings: RenderSettings(width: 960, height: 540, frameRate: 60),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        var remap = try #require(TimeRemap(sourceDuration: metadata.duration, timelineDuration: metadata.duration))
+        remap.setSourceTime(metadata.duration * 0.75, at: metadata.duration * 0.5, tolerance: 0.001)
+        remap.setSourceTime(metadata.duration * 0.25, at: metadata.duration * 0.75, tolerance: 0.001)
+        var speed = SpeedMap.constant
+        speed.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: speed)
+        let service = CompositionRenderService(previewProxyStore: store, proxiesOnlyForRemappedVideo: true)
+        let preview = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.previewFrame, .compositionTopology]))
+        let instruction = try #require(preview.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        #expect(instruction.clips.first?.temporalSource?.remapVideo?.url == proxy.url)
+        let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
+        for time in [0.0, metadata.duration * 0.5, metadata.duration * 0.7] {
+            _ = try await probe.image(at: CMTime(seconds: time, preferredTimescale: 60))
+        }
+        let exported = try await service.makeComposition(for: project)
+        let exportInstruction = try #require(exported.videoComposition?.instructions.first as? MotionaryVideoCompositionInstruction)
+        #expect(exportInstruction.clips.first?.temporalSource?.remapVideo?.url == sourceURL)
+    }
+
+    @MainActor
     @Test func coldPreviewUsesOriginalWhileProxyWarms() async throws {
         let sourceURL = try await makeLongGOPVideo()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("proxy-cold-\(UUID())")

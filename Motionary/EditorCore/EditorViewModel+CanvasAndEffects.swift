@@ -244,7 +244,9 @@ extension EditorViewModel {
         guard let snapshot = interactiveEditSnapshot else {
             persist()
             if rebuild {
-                schedulePreviewRebuild(seekTo: currentTime, delay: delayRebuild)
+                let invalidation = deferredPreviewInvalidation.union([.previewFrame])
+                deferredPreviewInvalidation = []
+                schedulePreviewRebuild(seekTo: currentTime, delay: delayRebuild, invalidation: invalidation)
             }
             return
         }
@@ -255,6 +257,10 @@ extension EditorViewModel {
         guard project != snapshot else {
             pendingTimelineInvalidationScope = nil
             refreshSelectedTimelineRange()
+            if rebuild, !deferredPreviewInvalidation.isEmpty {
+                flushDeferredPreviewRebuild(seekTo: currentTime)
+                return
+            }
             if !pendingLiveVisualOverrideItemIDs.isEmpty,
                 !pendingPreviewInvalidation.intersection([.previewFrame, .compositionTopology]).isEmpty {
                 // An earlier commit may have been cancelled by this gesture.
@@ -264,6 +270,11 @@ extension EditorViewModel {
                 if rebuild {
                     schedulePreviewRebuild(seekTo: currentTime, delay: false, invalidation: [.previewFrame])
                 }
+            } else if rebuild, !pendingLiveVisualOverrideItemIDs.isEmpty {
+                // A drag can end at its starting value after showing other
+                // live frames. Restore the canonical image without exposing
+                // the player's temporarily empty layer at gesture end.
+                schedulePreviewRebuild(seekTo: currentTime, delay: false, invalidation: [.previewFrame])
             } else {
                 livePreviewPresentation.frame = nil
                 clearPendingLiveVisualOverrides()
@@ -290,14 +301,16 @@ extension EditorViewModel {
             return
         }
         if rebuild {
+            let invalidation = renderInvalidation.union(deferredPreviewInvalidation)
+            deferredPreviewInvalidation = []
             schedulePreviewRebuild(
                 seekTo: currentTime,
                 // Audio-only commits already use a retained topology and do
                 // not seek. Apply their canonical mix immediately after the
                 // live task is cancelled so the final scrub value is audible
                 // without a debounce gap.
-                delay: delayRebuild && renderInvalidation != [.audioMix],
-                invalidation: renderInvalidation
+                delay: delayRebuild && invalidation != [.audioMix],
+                invalidation: invalidation
             )
         }
     }

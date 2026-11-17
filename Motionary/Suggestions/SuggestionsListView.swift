@@ -451,7 +451,7 @@ private struct SuggestionCard: View {
                 if isOwned {
                     Menu {
                         Button("Edit", systemImage: "pencil", action: onEdit)
-                        Button("Delete", systemImage: "trash", role: .destructive, action: onDelete)
+                        DeleteMenuButton(action: onDelete)
                     } label: {
                         Image(systemName: "ellipsis")
                             .font(.caption.weight(.semibold))
@@ -470,7 +470,7 @@ private struct SuggestionCard: View {
         .contextMenu {
             if isOwned {
                 Button("Edit", systemImage: "pencil", action: onEdit)
-                Button("Delete", systemImage: "trash", role: .destructive, action: onDelete)
+                DeleteMenuButton(action: onDelete)
             }
         }
         .accessibilityElement(children: .contain)

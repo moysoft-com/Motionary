@@ -544,7 +544,7 @@ struct PreviewTransformCanvas: View {
     @State private var frameMemo = PreviewFrameMemo()
     @State private var textRasterizer = PreviewTextRasterizer()
     @State private var shapeRasterizer = PreviewShapeRasterizer()
-    @State private var visualIntervalIndex: PreviewVisualIntervalIndex
+    @State private var visualIntervalIndex: PreviewVisualIntervalIndex?
 
     init(viewModel: EditorViewModel, canvasFrame: CGRect) {
         self.viewModel = viewModel
@@ -555,9 +555,6 @@ struct PreviewTransformCanvas: View {
         _previewCanvasState = ObservedObject(wrappedValue: viewModel.previewCanvasState)
         _livePreviewPresentation = ObservedObject(wrappedValue: viewModel.livePreviewPresentation)
         self.canvasFrame = canvasFrame
-        _visualIntervalIndex = State(
-            initialValue: PreviewVisualIntervalIndex(project: viewModel.project)
-        )
     }
 
     var body: some View {
@@ -678,7 +675,7 @@ struct PreviewTransformCanvas: View {
             TimelineView(
                 .animation(
                     minimumInterval: 1 / Double(min(60, max(livePreviewPresentation.maximumFramesPerSecond, 1))),
-                    paused: !playbackState.isPlaying
+                    paused: !playbackState.isPlaying || selectionState.clipID == nil
                 )
             ) { _ in
                 selectionOverlay
@@ -699,11 +696,8 @@ struct PreviewTransformCanvas: View {
                 clearLivePreview()
             }
         }
-        .onChange(of: visualIndexRevision) { _, _ in
-            let project = viewModel.project
-            DispatchQueue.main.async {
-                visualIntervalIndex = PreviewVisualIntervalIndex(project: project)
-            }
+        .onChange(of: visualIndexRevision, initial: true) { _, _ in
+            visualIntervalIndex = PreviewVisualIntervalIndex(project: viewModel.project)
         }
         .onDisappear {
             DispatchQueue.main.async {
@@ -875,18 +869,18 @@ struct PreviewTransformCanvas: View {
     }
 
     private var activeVisualInfos: [PreviewVisualInfo] {
-        visualIntervalIndex.active(
+        visualIntervalIndex?.active(
             at: previewTime,
             retaining: viewModel.selectedTimelineItemID
-        )
+        ) ?? []
     }
 
     private var isSelectedItemActive: Bool {
         guard let selectedItemID = viewModel.selectedTimelineItemID else { return false }
-        return visualIntervalIndex.active(
+        return visualIntervalIndex?.active(
             at: previewTime,
             retaining: nil
-        ).contains { $0.id == selectedItemID }
+        ).contains { $0.id == selectedItemID } == true
     }
 
     private var visualIndexRevision: PreviewVisualIndexRevision {
