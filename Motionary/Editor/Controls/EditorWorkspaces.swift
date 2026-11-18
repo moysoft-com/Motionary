@@ -1957,11 +1957,12 @@ struct PropertyWorkspaceShell<Content: View>: View {
     }
 }
 
-private struct PropertyScrubber: View {
+struct PropertyScrubber: View {
     @Environment(\.workspaceScrollRevision) private var workspaceScrollRevision
     @ObservedObject var viewModel: EditorViewModel
     @ObservedObject private var playbackState: PlaybackState
-    let clip: TimelineClip
+    private let clip: TimelineClip?
+    private let haptic: HapticTimelineItem?
     let target: KeyframeTarget
     let isEnabled: Bool
 
@@ -1980,12 +1981,25 @@ private struct PropertyScrubber: View {
         self.viewModel = viewModel
         _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
         self.clip = clip
+        haptic = nil
         self.target = target
         self.isEnabled = isEnabled
     }
 
+    init(viewModel: EditorViewModel, haptic: HapticTimelineItem, target: KeyframeTarget, isEnabled: Bool) {
+        self.viewModel = viewModel
+        _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        clip = nil
+        self.haptic = haptic
+        self.target = target
+        self.isEnabled = isEnabled
+    }
+
+    private var metadata: KeyframePropertyMetadata {
+        clip?.keyframeMetadata(for: target) ?? target.hapticMetadata
+    }
+
     var body: some View {
-        let metadata = clip.keyframeMetadata(for: target)
         let value = rulerTickPosition.map { value(at: $0, metadata: metadata) }
             ?? displayedValue
         VStack {
@@ -2063,18 +2077,21 @@ private struct PropertyScrubber: View {
     }
 
     private var displayedValue: Double {
-        if viewModel.selectedClipID == clip.id {
+        if viewModel.selectedClipID == (clip?.id ?? haptic?.id) {
             return viewModel.displayedValue(for: target)
         }
-        let time = viewModel.timelineLocalTime(for: clip)
-        return clip.animatableProperty(for: target)?.value(at: time) ?? 0
+        if let clip {
+            return clip.animatableProperty(for: target)?.value(at: viewModel.timelineLocalTime(for: clip)) ?? 0
+        }
+        guard let haptic, let property = target.hapticProperty else { return 0 }
+        return haptic[keyPath: property].value(at: viewModel.hapticKeyframeTime(for: haptic))
     }
 
     private func beginScrub(metadata: KeyframePropertyMetadata) {
         momentumTask?.cancel()
         momentumTask = nil
         if isScrubbing {
-            viewModel.finishInteractiveEdit()
+            viewModel.finishInteractiveEdit(rebuild: haptic == nil)
         }
         let currentValue = displayedValue
         rulerTickPosition = tickPosition(
@@ -2174,7 +2191,6 @@ private struct PropertyScrubber: View {
             finishScrubbing()
             return
         }
-        let metadata = clip.keyframeMetadata(for: target)
         let currentValue = value(at: position, metadata: metadata)
         let snappedPosition = tickPosition(for: currentValue, metadata: metadata)
         withAnimation(.spring(duration: 0.22, bounce: 0.12)) {
@@ -2195,7 +2211,7 @@ private struct PropertyScrubber: View {
         rulerTickPosition = nil
         isScrubbing = false
         lastHapticBucket = nil
-        viewModel.finishInteractiveEdit()
+        viewModel.finishInteractiveEdit(rebuild: haptic == nil)
     }
 
     private func value(
@@ -2428,13 +2444,7 @@ struct SectionKeyframeButton: View {
         if section == .speed, case .media(let media) = item {
             return media.speedMap.timeRemap == nil ? 0 : 1
         }
-        if let clip = item.visualEditingClip() {
-            return clip.keyframeTargets(in: section).count
-        }
-        if case .text(let text) = item {
-            return text.keyframeTargets(in: section).count
-        }
-        return 0
+        return item.keyframeTargets(in: section).count
     }
 
     private var hasKeyframeAtCurrentTime: Bool {
@@ -2445,6 +2455,10 @@ struct SectionKeyframeButton: View {
                 at: playbackState.currentTime - item.timelineStart,
                 tolerance: viewModel.keyframeTimeTolerance
             ) != nil
+        case .haptic(let haptic) where section == .haptics:
+            return haptic.hasKeyframe(
+                at: viewModel.hapticKeyframeTime(for: haptic), tolerance: viewModel.keyframeTimeTolerance
+            )
         case .text(let text):
             let time = viewModel.snappedTextKeyframeTime(
                 playbackState.currentTime - text.timelineStart,

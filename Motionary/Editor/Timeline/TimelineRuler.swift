@@ -15,8 +15,10 @@ struct TimelineSnapGuideLine: View {
 }
 
 struct TimelineRulerSample: Equatable {
+    static let collapseDistance: CGFloat = 60
+
     let horizontalOffset: CGFloat
-    let verticalOffset: CGFloat
+    let collapseOffset: CGFloat
     let pixelsPerSecond: CGFloat
     let duration: Double
 }
@@ -96,9 +98,20 @@ final class TimelineRulerSurface: UIView {
         updateBand()
     }
 
-    func present(_ sample: TimelineRulerSample) {
+    func present(_ sample: TimelineRulerSample, animated: Bool = false) {
+        let previousY = animated ? band.presentation()?.position.y ?? band.position.y : band.position.y
+        let didChangeCollapseOffset = self.sample?.collapseOffset != sample.collapseOffset
         self.sample = sample
         updateBand()
+        guard didChangeCollapseOffset else { return }
+        band.removeAnimation(forKey: "rulerSnap")
+        guard animated, !UIAccessibility.isReduceMotionEnabled, previousY != band.position.y else { return }
+        let snap = CABasicAnimation(keyPath: "position.y")
+        snap.fromValue = previousY
+        snap.toValue = band.position.y
+        snap.duration = 0.18
+        snap.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        band.add(snap, forKey: "rulerSnap")
     }
 
     private func updateBand() {
@@ -118,7 +131,7 @@ final class TimelineRulerSurface: UIView {
             rebuildBand(layout)
             renderedLayout = layout
         }
-        let progress = min(max(sample.verticalOffset / 60, 0), 1)
+        let progress = sample.collapseOffset / TimelineRulerSample.collapseDistance
         let y = -15 * progress * progress * (3 - 2 * progress)
         band.position = CGPoint(x: pixelAligned(windowOrigin - sample.horizontalOffset), y: y)
         CATransaction.commit()

@@ -821,6 +821,67 @@ struct PreviewRebuildTests {
     }
 
     @MainActor
+    @Test func frozenScrubKeepsThePreviewWhileTheTimelineMovesAndSeeksOnRelease() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        var buffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let frame = try #require(buffer)
+        let state = model.renderService.livePreviewState
+        for time in [0.0, 0.5] {
+            state.cacheFrame(frame, at: time, sessionID: model.previewRenderSessionID,
+                             revision: state.snapshot().revision)
+        }
+        model.configureScreenRecordingPreview(.init(freezesScrubPreview: true))
+        model.beginScrub()
+        model.updateScrub(to: 0.5)
+        #expect(model.currentTime == 0.5)
+        #expect(model.livePreviewPresentation.frameTime == 0)
+        #expect(player.pendingSeekCount == 0)
+
+        model.endScrub(at: 0.5)
+        for _ in 0..<100 where player.pendingSeekCount == 0 { await Task.yield() }
+        try #require(player.pendingSeekCount == 1)
+        #expect(player.seekRequests.first?.time == 0.5)
+        #expect(player.seekRequests.first?.tolerance == 0)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<100 where model.isScrubbing { await Task.yield() }
+        #expect(model.livePreviewPresentation.frameTime == 0.5)
+    }
+
+    @MainActor
+    @Test func recordingScrubLimitAlsoPacesCachedFrames() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        model.configureScreenRecordingPreview(.init(scrubFrameRateLimit: 30))
+        model.beginScrub()
+        var buffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let frame = try #require(buffer)
+        let state = model.renderService.livePreviewState
+        for time in [0.5, 0.8] {
+            state.cacheFrame(frame, at: time, sessionID: model.previewRenderSessionID,
+                             revision: state.snapshot().revision)
+        }
+
+        model.updateScrub(to: 0.5)
+        #expect(model.livePreviewPresentation.frameTime == 0.5)
+        model.lastScrubUIUpdate = CFAbsoluteTimeGetCurrent()
+        model.updateScrub(to: 0.8)
+        #expect(model.currentTime == 0.8)
+        #expect(model.livePreviewPresentation.frameTime == 0.5)
+        for _ in 0..<100 where model.livePreviewPresentation.frameTime != 0.8 {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        #expect(model.livePreviewPresentation.frameTime == 0.8)
+        #expect(player.pendingSeekCount == 0)
+    }
+
+    @MainActor
     @Test func cachedScrubFrameDisplaysImmediatelyWithoutDecoderWork() throws {
         let model = makeGeneratedLayerViewModel()
         defer { model.stop() }

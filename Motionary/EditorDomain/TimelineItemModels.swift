@@ -9,6 +9,7 @@ enum TimelineItemKind: String, Codable, CaseIterable, Sendable {
     case caption
     case adjustment
     case compound
+    case haptic
 }
 
 enum BlendMode: String, Codable, CaseIterable, Sendable {

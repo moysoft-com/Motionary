@@ -21,7 +21,7 @@ enum TimelineTrackBackgroundRadius {
         let scale = max(pixelsPerSecond, 0)
         let contentWidth = CGFloat(max(range.upperBound - range.lowerBound, 0)) * scale
         var radius = maximum
-        for item in items {
+        for item in items where !item.isHapticImpact {
             let start = CGFloat(item.timelineStart - range.lowerBound) * scale
             let end = start + max(CGFloat(item.placementDuration) * scale, 6)
             guard end >= 0, start <= contentWidth else { continue }
@@ -52,6 +52,7 @@ struct TimelineTrackRow: View {
     let rowStride: CGFloat
     let onSelectTrack: () -> Void
     let onTapEmptySpace: () -> Void
+    let onToggleTrackMuted: () -> Void
     let onDeleteTrack: () -> Void
     let onCopyTrack: () -> Void
     let onCutTrack: () -> Void
@@ -90,6 +91,7 @@ struct TimelineTrackRow: View {
                 height: height,
                 scrollPresentationState: scrollPresentationState,
                 onSelectTrack: onSelectTrack,
+                onToggleTrackMuted: onToggleTrackMuted,
                 onDeleteTrack: onDeleteTrack,
                 onCopyTrack: onCopyTrack,
                 onCutTrack: onCutTrack,
@@ -166,6 +168,7 @@ struct TimelineTrackRow: View {
                 )
                 .saturation(workspaceContext == nil || selectedClipID == item.id ? 1 : 0)
                 .opacity(workspaceContext == nil || selectedClipID == item.id ? 1 : 0.28)
+                .opacity(track.isMuted ? 0.45 : 1)
                 .offset(x: centerPadding + CGFloat(item.timelineStart) * pixelsPerSecond)
             }
         }
@@ -252,6 +255,7 @@ private struct TimelineTrackHeader: View {
     let height: CGFloat
     @ObservedObject var scrollPresentationState: TimelineScrollPresentationState
     let onSelectTrack: () -> Void
+    let onToggleTrackMuted: () -> Void
     let onDeleteTrack: () -> Void
     let onCopyTrack: () -> Void
     let onCutTrack: () -> Void
@@ -266,6 +270,15 @@ private struct TimelineTrackHeader: View {
         trackLabel
             .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contextMenu {
+                Button(action: onToggleTrackMuted) {
+                    switch (track.kind == .audio, track.isMuted) {
+                    case (true, true): Label("Unmute Layer", systemImage: "speaker.wave.2")
+                    case (true, false): Label("Mute Layer", systemImage: "speaker.slash")
+                    case (false, true): Label("Enable Layer", systemImage: "eye")
+                    case (false, false): Label("Disable Layer", systemImage: "eye.slash")
+                    }
+                }
+                Divider()
                 Button("Cut", systemImage: "scissors", action: onCutTrack)
                 Button("Copy", systemImage: "doc.on.doc", action: onCopyTrack)
                 Button("Paste", systemImage: "doc.on.clipboard", action: onPasteTrack)
@@ -276,6 +289,7 @@ private struct TimelineTrackHeader: View {
             }
             .onTapGesture(count: 2) { EditorHaptics.tap(); isShowingDeleteConfirmation = true }
             .onTapGesture { onSelectTrack() }
+            .accessibilityValue(trackState)
             .accessibilityIdentifier("timeline-track-\(track.id.uuidString)")
             .position(
                 x: trackLabelOffset + trackLabelWidth * 0.5,
@@ -293,9 +307,19 @@ private struct TimelineTrackHeader: View {
 
     private var trackLabelWidth: CGFloat { TimelineTrackHeaderLayout.width }
 
+    private var trackState: Text {
+        guard track.isMuted else { return Text("") }
+        return track.kind == .audio ? Text("Muted") : Text("Disabled")
+    }
+
+    private var trackIcon: String {
+        guard track.isMuted else { return timelineTrackIcon(for: track.kind) }
+        return track.kind == .audio ? "speaker.slash" : "eye.slash"
+    }
+
     private var trackLabel: some View {
         HStack(spacing: 7) {
-            Image(systemName: timelineTrackIcon(for: track.kind))
+            Image(systemName: trackIcon)
                 .font(.caption)
             Text(track.name)
                 .font(.caption.weight(.semibold))
@@ -334,6 +358,8 @@ struct TimelineTrackReorderHandle: View {
     let centerPadding: CGFloat
     let height: CGFloat
     @ObservedObject var scrollState: TimelineScrollPresentationState
+    let topInViewport: CGFloat
+    let viewportHeight: CGFloat
     let items: [TimelineRenderItem]
     let pixelsPerSecond: CGFloat
     let hiddenItemID: UUID?
@@ -352,7 +378,9 @@ struct TimelineTrackReorderHandle: View {
     var body: some View {
         handleLines
         .frame(width: height, height: height)
-        .contentShape(Rectangle())
+        .contentShape(.interaction, TimelineReorderHandleHitShape(
+            topInViewport: topInViewport, viewportHeight: viewportHeight
+        ))
         .task(id: sampleKey) {
             await updateBackgroundBrightness()
         }
@@ -520,6 +548,25 @@ struct TimelineTrackReorderHandle: View {
         context.interpolationQuality = .high
         context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
         return (0.2126 * Double(pixel[0]) + 0.7152 * Double(pixel[1]) + 0.0722 * Double(pixel[2])) / 255
+    }
+}
+
+/// The overlay can keep handles outside the viewport during scroll and reorder.
+/// The fade mask clips their appearance only, so bound the gesture separately.
+private struct TimelineReorderHandleHitShape: Shape {
+    var topInViewport: CGFloat
+    let viewportHeight: CGFloat
+
+    var animatableData: CGFloat {
+        get { topInViewport }
+        set { topInViewport = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let viewport = CGRect(x: rect.minX, y: rect.minY - topInViewport,
+                              width: rect.width, height: viewportHeight)
+        let visibleRegion = rect.intersection(viewport)
+        return visibleRegion.isEmpty ? Path() : Path(visibleRegion)
     }
 }
 

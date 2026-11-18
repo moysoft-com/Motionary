@@ -8,6 +8,29 @@ import Testing
 
 struct TimelineEditingTests {
     @MainActor
+    @Test func reapplyingTheCurrentCanvasPresetDoesNotConsumeUndoOrClearRedo() {
+        let model = EditorViewModel(
+            projectID: UUID(), projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: EditorProject(title: "History"))
+        )
+        let first = CanvasRatioPreset.presets[0]
+        let second = CanvasRatioPreset.presets[1]
+        model.setCanvasPreset(first)
+        model.setCanvasPreset(second)
+        model.setCanvasPreset(second)
+
+        model.undo()
+        #expect(model.project.renderSettings.width == first.width)
+        #expect(model.project.renderSettings.height == first.height)
+        #expect(model.canRedo)
+
+        model.setCanvasPreset(first)
+        #expect(model.canRedo)
+        model.redo()
+        #expect(model.project.renderSettings.height == second.height)
+    }
+
+    @MainActor
     @Test func timelineViewportOverscanClampsToProjectDuration() async throws {
         let state = TimelineViewportState()
         state.update(

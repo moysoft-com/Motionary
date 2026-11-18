@@ -7,8 +7,12 @@
         @State private var pixelsPerSecond: CGFloat = 88
 
         init() {
-            let tracks = (1...16).map { index in
-                TimelineTrack(
+            let includesAudioLayer = ProcessInfo.processInfo.arguments.contains("--layer-mute-tests")
+            let tracks = (1...16).map { index -> TimelineTrack in
+                if includesAudioLayer && index == 2 {
+                    return TimelineTrack(id: Self.identifier(index + 100), name: "Audio", kind: .audio)
+                }
+                return TimelineTrack(
                     id: Self.identifier(index + 100), name: "Layer \(index)", kind: .text,
                     items: [
                         .text(

@@ -81,6 +81,7 @@ struct TimelinePlaybackPosition {
 @MainActor
 final class TimelineViewportState: ObservableObject {
     @Published private(set) var window: TimelineViewportWindow = .initial
+    private var wasPinching = false
 
     @discardableResult
     func update(
@@ -88,8 +89,11 @@ final class TimelineViewportState: ObservableObject {
         viewportSize: CGSize,
         pixelsPerSecond: CGFloat,
         configuration: TimelineVirtualizationConfiguration,
+        isPinching: Bool = false,
         force: Bool = false
     ) -> Bool {
+        let pinchStateChanged = wasPinching != isPinching
+        wasPinching = isPinching
         let safePixelsPerSecond = max(pixelsPerSecond, 1)
         let timelineDuration = max(configuration.duration, 0)
         let visibleDuration = max(Double(viewportSize.width / safePixelsPerSecond), 0.25)
@@ -107,7 +111,13 @@ final class TimelineViewportState: ObservableObject {
             ),
             max(timelineDuration, visibleStart)
         )
-        let retentionMargin = visibleDuration * 0.22
+        // Each scale change supplies a fresh viewport. A small gutter covers
+        // the clip edges just outside the viewport during the gesture.
+        let scrollOverscan = visibleDuration * 0.9
+        let horizontalOverscan = isPinching
+            ? min(scrollOverscan, Double(32 / safePixelsPerSecond))
+            : scrollOverscan
+        let retentionMargin = isPinching ? horizontalOverscan / 2 : visibleDuration * 0.22
         let retainedUpper = min(
             visibleEnd + retentionMargin,
             max(timelineDuration, visibleEnd)
@@ -120,14 +130,9 @@ final class TimelineViewportState: ObservableObject {
         )
 
         let safeStride = max(configuration.rowStride, 1)
-        let firstVisibleTrack = max(
-            Int(
-                floor(
-                    (contentOffset.y - configuration.trackOriginY)
-                        / safeStride
-                )
-            ),
-            0
+        let firstVisibleTrack = min(
+            max(Int(floor((contentOffset.y - configuration.trackOriginY) / safeStride)), 0),
+            configuration.trackCount
         )
         let lastVisibleTrack = min(
             Int(
@@ -138,10 +143,11 @@ final class TimelineViewportState: ObservableObject {
             ),
             configuration.trackCount
         )
-        let retainedTrackRange: Range<Int> =
-            max(firstVisibleTrack - 1, 0)..<min(max(lastVisibleTrack + 1, 0), configuration.trackCount)
+        let retainedTrackOverscan = isPinching ? 0 : 1
+        let retainedTrackRange =
+            max(firstVisibleTrack - retainedTrackOverscan, 0)..<min(max(lastVisibleTrack + retainedTrackOverscan, 0), configuration.trackCount)
 
-        if !force,
+        if !force, !pinchStateChanged,
             window.contains(timeRange: retainedVisibleRange),
             window.trackRange.lowerBound <= retainedTrackRange.lowerBound,
             window.trackRange.upperBound >= retainedTrackRange.upperBound
@@ -149,7 +155,6 @@ final class TimelineViewportState: ObservableObject {
             return false
         }
 
-        let horizontalOverscan = visibleDuration * 0.9
         let requestedUpper = min(
             visibleEnd + horizontalOverscan,
             max(timelineDuration, visibleEnd)
@@ -160,13 +165,14 @@ final class TimelineViewportState: ObservableObject {
                 upper: requestedUpper
             )
         )
+        let trackOverscan = isPinching ? 0 : 3
         let requestedTrackRange =
-            max(firstVisibleTrack - 3, 0)..<min(max(lastVisibleTrack + 3, 0), configuration.trackCount)
+            max(firstVisibleTrack - trackOverscan, 0)..<min(max(lastVisibleTrack + trackOverscan, 0), configuration.trackCount)
         let updated = TimelineViewportWindow(
             timeRange: requestedRange,
             trackRange: requestedTrackRange
         )
-        guard force || updated != window else { return false }
+        guard updated != window else { return false }
         window = updated
         os_signpost(
             .event,
@@ -198,10 +204,10 @@ final class TimelineScrollPresentationState: ObservableObject {
         if ruler === surface { ruler = nil }
     }
 
-    func presentRuler(_ sample: TimelineRulerSample) {
+    func presentRuler(_ sample: TimelineRulerSample, animated: Bool = false) {
         guard rulerSample != sample else { return }
         rulerSample = sample
-        ruler?.present(sample)
+        ruler?.present(sample, animated: animated)
     }
 
     func update(verticalOffset: CGFloat) {

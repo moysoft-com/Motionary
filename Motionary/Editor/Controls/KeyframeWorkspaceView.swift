@@ -82,7 +82,7 @@ struct KeyframeWorkspaceView: View {
                                 )
                             },
                             onHandleEnded: {
-                                viewModel.finishInteractiveEdit()
+                                viewModel.finishInteractiveEdit(rebuild: context.segment.section != .haptics)
                                 if context.segment.section == .speed {
                                     viewModel.refreshGraphSegment()
                                 }
@@ -137,7 +137,7 @@ struct KeyframeWorkspaceView: View {
         guard let segment = viewModel.graphSegment ?? viewModel.displayedGraphSegment,
             let item = viewModel.project.item(id: segment.clipID)
         else { return nil }
-        let isLocked = segment.section == .speed
+        let isLocked = (segment.section == .speed || segment.section == .haptics)
             && viewModel.project.itemLocation(id: item.id).map { viewModel.project.tracks[$0.track].isLocked } == true
         return (item, item.timelineStart, segment, viewModel.graphSegment != nil && !isLocked)
     }

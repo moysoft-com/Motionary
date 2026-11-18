@@ -8,8 +8,13 @@ import QuartzCore
 import CoreHaptics
 
 struct ExportSettingsView: View {
+    enum ExportFormat {
+        case standardVideo
+        case motionaryVideo(includeHaptics: Bool)
+    }
+
     let project: EditorProject
-    let onExport: (VideoExportSettings) -> Void
+    let onExport: (VideoExportSettings, ExportFormat) -> Void
     let onSettingsChanged: (VideoExportSettings) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -17,12 +22,16 @@ struct ExportSettingsView: View {
     @State private var settings: VideoExportSettings
     @State private var resolutionPreset: ExportResolutionPreset
     @State private var showAdvanced: Bool = false
-    @State private var showWatermarkConfirmation = false
+    private enum ExportAlert: Equatable {
+        case watermark, haptics
+    }
+
+    @State private var exportAlert: ExportAlert?
 
     init(
         project: EditorProject,
         onSettingsChanged: @escaping (VideoExportSettings) -> Void = { _ in },
-        onExport: @escaping (VideoExportSettings) -> Void
+        onExport: @escaping (VideoExportSettings, ExportFormat) -> Void
     ) {
         self.project = project
         self.onExport = onExport
@@ -94,7 +103,7 @@ struct ExportSettingsView: View {
                         get: { settings.watermarkEnabled },
                         set: { enabled in
                             if enabled { settings.watermarkEnabled = true }
-                            else { showWatermarkConfirmation = true }
+                            else { exportAlert = .watermark }
                         }
                     ))
                     .tint(MotionaryTheme.accent)
@@ -158,30 +167,66 @@ struct ExportSettingsView: View {
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Export") {
-                        onExport(settings.normalized)
+                    Menu {
+                        Button("Export as Standard Video", systemImage: "video") {
+                            onExport(settings.normalized, .standardVideo)
+                        }
+                        .tint(.primary)
+                        Button("Export as Motionary Video", systemImage: "waveform") {
+                            onExport(settings.normalized, .motionaryVideo(includeHaptics: false))
+                        }
+                        .tint(.primary)
+                    } label: {
+                        Text("Export")
+                    } primaryAction: {
+                        if project.containsHaptics {
+                            exportAlert = .haptics
+                        } else {
+                            onExport(settings.normalized, .standardVideo)
+                        }
                     }
                     .fontWeight(.semibold)
+                    .buttonStyle(.borderedProminent)
+                    .tint(MotionaryTheme.accent)
                     .disabled(settings.width < 2 || settings.height < 2)
                 }
             }
         }
         .background {
-            WatermarkAlertAnimationOverlay(isPresented: showWatermarkConfirmation, colorScheme: colorScheme)
+            WatermarkAlertAnimationOverlay(isPresented: exportAlert == .watermark, colorScheme: colorScheme)
                 .frame(width: 0, height: 0)
         }
-        .alert("Remove watermark?", isPresented: $showWatermarkConfirmation) {
-            Button("Keep Watermark", role: .cancel) {
-                NotificationCenter.default.post(name: .watermarkAlertWillDismiss, object: nil)
-            }
+        .alert(
+            exportAlert == .watermark ? "Remove watermark?" : "Include Haptics?",
+            isPresented: Binding(
+                get: { exportAlert != nil },
+                set: { if !$0 { exportAlert = nil } }
+            ),
+            presenting: exportAlert
+        ) { alert in
+            switch alert {
+            case .haptics:
+                Button("Export Standard Video") { onExport(settings.normalized, .standardVideo) }
+                Button("Export Motionary Video") { onExport(settings.normalized, .motionaryVideo(includeHaptics: true)) }
+                Button("Cancel", role: .cancel) {}
+            case .watermark:
+                Button("Keep Watermark", role: .cancel) {
+                    NotificationCenter.default.post(name: .watermarkAlertWillDismiss, object: nil)
+                }
                 .keyboardShortcut(.defaultAction)
                 .tint(MotionaryTheme.accent)
-            Button("Remove Watermark", role: .destructive) {
-                NotificationCenter.default.post(name: .watermarkAlertWillDismiss, object: nil)
-                settings.watermarkEnabled = false
+                Button("Remove Watermark", role: .destructive) {
+                    NotificationCenter.default.post(name: .watermarkAlertWillDismiss, object: nil)
+                    settings.watermarkEnabled = false
+                }
             }
-        } message: {
-            Text("Every watermark helps more creators discover Motionary and grow our community :)")
+        } message: { alert in
+            switch alert {
+            case .haptics:
+                Text("To keep haptics, export a Motionary Video. Haptics play when you open it in Motionary.")
+            case .watermark:
+                Text("Every watermark helps more creators discover Motionary and grow our community :)")
+            }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)

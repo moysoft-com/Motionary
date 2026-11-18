@@ -66,6 +66,9 @@ struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
     let emptyState: EditorWorkspaceEmptyState?
     let contentStyle: EditorWorkspaceContentStyle
     let disablesContentWhenUnavailable: Bool
+    private let onTitleTap: (() -> Void)?
+    private let titleActionHint: String
+    private let isTitleActionEnabled: Bool
     private let accessory: Accessory
     private let content: Content
 
@@ -76,6 +79,9 @@ struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
         emptyState: EditorWorkspaceEmptyState? = nil,
         contentStyle: EditorWorkspaceContentStyle = .scrollable,
         disablesContentWhenUnavailable: Bool = false,
+        onTitleTap: (() -> Void)? = nil,
+        titleActionHint: String = "",
+        isTitleActionEnabled: Bool = true,
         @ViewBuilder accessory: () -> Accessory,
         @ViewBuilder content: () -> Content
     ) {
@@ -85,6 +91,9 @@ struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
         self.emptyState = emptyState
         self.contentStyle = contentStyle
         self.disablesContentWhenUnavailable = disablesContentWhenUnavailable
+        self.onTitleTap = onTitleTap
+        self.titleActionHint = titleActionHint
+        self.isTitleActionEnabled = isTitleActionEnabled
         self.accessory = accessory()
         self.content = content()
     }
@@ -102,6 +111,9 @@ struct EditorWorkspaceShell<Accessory: View, Content: View>: View {
                     EditorWorkspaceHeader(
                         title: title,
                         systemImage: systemImage,
+                        onTitleTap: onTitleTap,
+                        titleActionHint: titleActionHint,
+                        isTitleActionEnabled: isTitleActionEnabled,
                         accessory: { accessory }
                     )
 
@@ -152,28 +164,52 @@ extension EditorWorkspaceShell where Accessory == EmptyView {
 struct EditorWorkspaceHeader<Accessory: View>: View {
     let title: String
     let systemImage: String
+    private let onTitleTap: (() -> Void)?
+    private let titleActionHint: String
+    private let isTitleActionEnabled: Bool
     private let accessory: Accessory
 
     init(
         title: String,
         systemImage: String,
+        onTitleTap: (() -> Void)? = nil,
+        titleActionHint: String = "",
+        isTitleActionEnabled: Bool = true,
         @ViewBuilder accessory: () -> Accessory
     ) {
         self.title = title
         self.systemImage = systemImage
+        self.onTitleTap = onTitleTap
+        self.titleActionHint = titleActionHint
+        self.isTitleActionEnabled = isTitleActionEnabled
         self.accessory = accessory()
     }
 
     var body: some View {
         HStack(spacing: 9) {
-            Label(title, systemImage: systemImage)
-                .font(MotionaryDesign.Typography.workspaceHeader)
-                .labelStyle(.titleAndIcon)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
+            if let onTitleTap {
+                Button(action: onTitleTap) {
+                    titleLabel
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(titleActionHint)
+                .disabled(!isTitleActionEnabled)
+            } else {
+                titleLabel
+                Spacer()
+            }
             accessory
         }
         .frame(height: 22)
+    }
+
+    private var titleLabel: some View {
+        Label(title, systemImage: systemImage)
+            .font(MotionaryDesign.Typography.workspaceHeader)
+            .labelStyle(.titleAndIcon)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 

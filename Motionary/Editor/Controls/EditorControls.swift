@@ -9,6 +9,7 @@ private enum CoreToolBarToolset: Equatable {
     case shape
     case text
     case adjustment
+    case haptic
     case otherLayer
 }
 
@@ -53,6 +54,12 @@ struct CoreToolBar: View {
                             activePanel = .text
                         }
                         .accessibilityLabel("Add text")
+
+                        CoreToolButton(systemName: "waveform.path", title: "Haptics") {
+                            viewModel.addHaptic()
+                        }
+                        .disabled(viewModel.isPerformingLongTask)
+                        .accessibilityLabel("Add haptics")
 
                         AudioImportMenu(
                             viewModel: viewModel,
@@ -106,11 +113,13 @@ struct CoreToolBar: View {
                         }
                     }
 
-                    CoreToolButton(systemName: "scissors", title: "Split") {
-                        if let splitClipID = viewModel.splitSelectedClip(),
-                            activePanel.isPropertyPanel
-                        {
-                            propertyContextClipID = splitClipID
+                    if viewModel.selectedTimelineItem?.isHapticImpact != true {
+                        CoreToolButton(systemName: "scissors", title: "Split") {
+                            if let splitClipID = viewModel.splitSelectedClip(),
+                                activePanel.isPropertyPanel
+                            {
+                                propertyContextClipID = splitClipID
+                            }
                         }
                     }
 
@@ -263,6 +272,7 @@ struct CoreToolBar: View {
         case .shape: .shape
         case .text: .text
         case .adjustment: .adjustment
+        case .haptic: .haptic
         case .caption, .compound: .otherLayer
         }
     }
@@ -321,6 +331,14 @@ struct CoreToolBar: View {
                 isSelected: true
             ) {
                 openEffectsPanel()
+            }
+        case .haptic:
+            CoreToolButton(
+                systemName: "waveform.path",
+                title: "Edit",
+                isSelected: true
+            ) {
+                openPropertyPanel(.haptic)
             }
         case .caption, .compound:
             EmptyView()

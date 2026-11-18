@@ -17,6 +17,7 @@ struct HomeView: View {
     @StateObject private var projectStore: ProjectStore
     @Binding private var searchText: String
     @Binding private var isSearchPresented: Bool
+    @Binding private var incomingProjectID: UUID?
     @FocusState private var isSearchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsSearchHeader = false
@@ -44,6 +45,7 @@ struct HomeView: View {
     init(
         projectStore: ProjectStore = ProjectStore(),
         newProjectRequest: UUID? = nil,
+        incomingProjectID: Binding<UUID?> = .constant(nil),
         searchText: Binding<String> = .constant(""),
         isSearchPresented: Binding<Bool> = .constant(false),
         onEditorPresentationChange: @escaping (Bool) -> Void = { _ in }
@@ -53,6 +55,7 @@ struct HomeView: View {
         _projectStore = StateObject(wrappedValue: projectStore)
         _searchText = searchText
         _isSearchPresented = isSearchPresented
+        _incomingProjectID = incomingProjectID
     }
 
     var body: some View {
@@ -78,12 +81,7 @@ struct HomeView: View {
                                             ),
                                             isRenaming: editingProjectID == project.id,
                                             onOpen: {
-                                                guard let selected = projectStore.projects.first(where: { $0.id == project.id }) else { return }
-                                                dismissProjectSearch()
-                                                selectedProject = ProjectEditorSelection(
-                                                    project: selected,
-                                                    initialContent: projectStore.bestAvailableContent(for: selected)
-                                                )
+                                                openProject(project.id)
                                             },
                                             onRename: {
                                                 dismissProjectSearch()
@@ -119,17 +117,7 @@ struct HomeView: View {
             }
             .overlay {
                 if isCreatingProject || isTransferringProject {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .tint(MotionaryTheme.accent)
-                            .motionaryLoadingShimmer()
-                        Text(isTransferringProject ? "Preparing project" : "Importing")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(MotionaryTheme.textPrimary)
-                            .motionaryLoadingShimmer()
-                    }
-                    .padding(18)
-                    .motionaryGlass(cornerRadius: 18)
+                    MotionaryProjectLoadingView(title: isTransferringProject ? "Preparing project" : "Importing")
                 }
             }
             .onChange(of: newProjectMediaItems) { _, items in
@@ -159,6 +147,7 @@ struct HomeView: View {
                             self.selectedProject = nil
                         }
                     )
+                    .id(selectedProject.id)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
@@ -168,6 +157,11 @@ struct HomeView: View {
         }
         .onChange(of: selectedProject?.id, initial: true) { _, projectID in
             onEditorPresentationChange(projectID != nil)
+        }
+        .onChange(of: incomingProjectID, initial: true) { _, projectID in
+            guard let projectID else { return }
+            incomingProjectID = nil
+            openProject(projectID)
         }
         .onChange(of: isSearchPresented, initial: true) { _, presented in
             if presented {
@@ -184,7 +178,7 @@ struct HomeView: View {
         }) { item in
             ActivityView(activityItems: [item.url])
         }
-        .fileImporter(isPresented: $isProjectImporterPresented, allowedContentTypes: [UTType(exportedAs: "com.moysoft.motionary.project")]) { result in
+        .fileImporter(isPresented: $isProjectImporterPresented, allowedContentTypes: [.motionaryProject]) { result in
             if case .success(let url) = result { importProject(url) }
             else if case .failure(let error) = result { errorMessage = error.localizedDescription }
         }
@@ -378,23 +372,22 @@ struct HomeView: View {
         Task {
             isTransferringProject = true
             defer { isTransferringProject = false }
-            let accessible = url.startAccessingSecurityScopedResource()
-            defer { if accessible { url.stopAccessingSecurityScopedResource() } }
-            let id = UUID()
-            let folder = projectStore.projectFolderURL(for: id)
             do {
-                let imported = try await Task.detached(priority: .userInitiated) {
-                    try ProjectArchive.extract(url: url, to: folder, projectID: id)
-                }.value
-                try await projectStore.repository.save(imported, projectID: id)
-                projectStore.recordSavedContent(imported, projectID: id)
-                projectStore.notePosterChanged()
-                projectStore.schedulePosterRender(for: imported.editorProject, projectID: id)
+                let projectID = UUID()
+                try await projectStore.importArchive(at: url, id: projectID)
+                openProject(projectID)
             } catch {
-                try? FileManager.default.removeItem(at: folder)
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func openProject(_ id: UUID) {
+        guard let project = projectStore.projects.first(where: { $0.id == id }) else { return }
+        dismissProjectSearch()
+        selectedProject = ProjectEditorSelection(
+            project: project, initialContent: projectStore.bestAvailableContent(for: project)
+        )
     }
 
     private func createEmptyProject() {
@@ -496,7 +489,7 @@ struct HomeView: View {
         project.registerClipMedia(&registeredClip, source: imported.source)
 
         switch kind {
-        case .undefined:
+        case .undefined, .haptic:
             return
         case .visual:
             let trackIndex: Int

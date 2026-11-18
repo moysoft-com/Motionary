@@ -57,7 +57,7 @@ struct TimelinePlacementDragSession {
             tracks[location.track].items.indices.contains(location.item)
         else { return nil }
         let item = tracks[location.track].items.remove(at: location.item)
-        let safeDuration = max(item.placementDuration, 0.001)
+        let safeDuration = item.isHapticImpact ? 0 : max(item.placementDuration, 0.001)
 
         self.itemID = itemID
         sourceTrackIndex = location.track
@@ -286,14 +286,14 @@ struct TimelinePlacementDragSession {
         duration: Double,
         items: [TimelineItem]
     ) -> [FreeRange] {
-        guard !items.isEmpty else {
+        guard duration > 0, !items.isEmpty else {
             return [FreeRange(start: 0, end: Double.greatestFiniteMagnitude / 4)]
         }
 
         var result: [FreeRange] = []
         result.reserveCapacity(items.count + 1)
         var cursor = 0.0
-        for item in items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+        for item in items.sorted(by: { $0.timelineStart < $1.timelineStart }) where !item.isHapticImpact {
             if item.timelineStart - cursor >= duration {
                 result.append(
                     FreeRange(
@@ -434,7 +434,7 @@ extension EditorProject {
     }
 
     mutating func insertFreshTrack(kind: TrackKind) -> Int {
-        if kind != .undefined,
+        if kind != .undefined, kind != .haptic,
             let undefinedIndex = tracks.firstIndex(where: { $0.kind == .undefined && $0.items.isEmpty })
         {
             tracks[undefinedIndex].kind = kind
@@ -442,7 +442,7 @@ extension EditorProject {
         }
 
         let hasClipsInKind = tracks.contains { $0.kind == kind && !$0.items.isEmpty }
-        if !hasClipsInKind, let emptyIndex = tracks.firstIndex(where: { $0.kind == kind && $0.items.isEmpty }) {
+        if kind != .haptic, !hasClipsInKind, let emptyIndex = tracks.firstIndex(where: { $0.kind == kind && $0.items.isEmpty }) {
             return emptyIndex
         }
 
@@ -464,6 +464,9 @@ extension EditorProject {
             }) ?? 0
             tracks.insert(TimelineTrack(name: nextTrackName(for: kind), kind: kind), at: insertionIndex)
             return insertionIndex
+        case .haptic:
+            tracks.insert(TimelineTrack(name: nextTrackName(for: kind), kind: kind), at: 0)
+            return 0
         case .audio:
             tracks.append(TimelineTrack(name: nextTrackName(for: kind), kind: kind))
             return tracks.count - 1
@@ -480,11 +483,12 @@ extension EditorProject {
 
         return tracks.firstIndex { track in
             guard track.kind == kind else { return false }
+            if kind == .haptic, track.isLocked { return false }
             if kind == .visual, track.items.contains(where: \.isAdjustmentLayer) {
                 return false
             }
             return track.items.allSatisfy { item in
-                item.timelineEnd <= rangeStart || item.timelineStart >= rangeEnd
+                item.isHapticImpact || item.timelineEnd <= rangeStart || item.timelineStart >= rangeEnd
             }
         }
     }
@@ -561,6 +565,7 @@ extension EditorProject {
         var shapeIndex = 1
         var textIndex = 1
         var audioIndex = 1
+        var hapticIndex = 1
         for index in tracks.indices {
             switch tracks[index].kind {
             case .undefined:
@@ -584,6 +589,9 @@ extension EditorProject {
             case .audio:
                 tracks[index].name = "Audio \(audioIndex)"
                 audioIndex += 1
+            case .haptic:
+                tracks[index].name = "Haptics \(hapticIndex)"
+                hapticIndex += 1
             }
         }
     }
@@ -597,6 +605,7 @@ extension EditorProject {
         case .shape: return "Shape \(count)"
         case .text: return "Text \(count)"
         case .audio: return "Audio \(count)"
+        case .haptic: return "Haptics \(count)"
         }
     }
 
@@ -626,7 +635,7 @@ extension EditorProject {
         snapThreshold: Double = 0.16,
         snapAnchors: [Double] = []
     ) -> (start: Double, snapped: Bool, snapTime: Double?) {
-        let safeDuration = max(duration, 0.001)
+        let safeDuration = duration == 0 && requiredKind == .haptic ? 0 : max(duration, 0.001)
         let baseStart = max(0, proposedStart)
         let baseEnd = baseStart + safeDuration
         var candidate = baseStart
@@ -718,12 +727,12 @@ extension EditorProject {
     }
 
     private func nearestNonOverlappingStart(proposedStart: Double, duration: Double, items: [TimelineItem]) -> Double {
-        guard !items.isEmpty else { return max(0, proposedStart) }
+        guard duration > 0, !items.isEmpty else { return max(0, proposedStart) }
 
         var ranges: [(start: Double, end: Double)] = []
         var cursor = 0.0
 
-        for item in items.sorted(by: { $0.timelineStart < $1.timelineStart }) {
+        for item in items.sorted(by: { $0.timelineStart < $1.timelineStart }) where !item.isHapticImpact {
             if item.timelineStart - cursor >= duration {
                 ranges.append((cursor, item.timelineStart - duration))
             }
@@ -749,7 +758,7 @@ extension EditorProject {
             return (0, Double.greatestFiniteMagnitude / 4)
         }
 
-        let items = tracks[trackIndex].items.filter { $0.id != clipID }
+        let items = tracks[trackIndex].items.filter { $0.id != clipID && !$0.isHapticImpact }
         let previousEnd =
             items
             .filter { $0.timelineEnd <= item.timelineStart + 0.001 }

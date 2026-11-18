@@ -27,6 +27,8 @@ extension EditorViewModel {
 
     func snappedTimelineKeyframeTime(for item: TimelineItem) -> Double {
         switch item {
+        case .haptic(let haptic):
+            return item.timelineStart + hapticKeyframeTime(for: haptic) - haptic.sourceStart
         case .text(let text):
             return item.timelineStart + snappedTextKeyframeTime(
                 currentTime - item.timelineStart,
@@ -41,6 +43,9 @@ extension EditorViewModel {
     }
 
     func displayedValue(for target: KeyframeTarget) -> Double {
+        if case .haptic(let item) = selectedTimelineItem, let property = target.hapticProperty {
+            return item[keyPath: property].value(at: hapticKeyframeTime(for: item))
+        }
         if selectedTextItem != nil {
             return textDisplayedValue(for: target)
         }
@@ -153,6 +158,10 @@ extension EditorViewModel {
             guard case .media(let item) = selectedTimelineItem else { return nil }
             return timeRemapGraphSegment(for: item)
         }
+        if case .haptic(let item) = selectedTimelineItem {
+            guard section == .haptics, currentTime >= item.timelineStart, currentTime <= item.timelineEnd else { return nil }
+            return hapticGraphSegment(item, at: currentTime - item.timelineStart)
+        }
         if let item = selectedTextItem {
             guard currentTime >= item.timelineStart, currentTime < item.timelineEnd else { return nil }
             return textGraphSegmentCandidate(
@@ -180,36 +189,45 @@ extension EditorViewModel {
         let times = clip.keyframeTimes(in: section, effectID: effectID).filter {
             $0 >= -0.000_001 && $0 <= placementDuration + 0.000_001
         }
+        return graphSegment(
+            clipID: clip.id, section: section, effectID: effectID, times: times, localTime: localTime
+        ) { time in
+            clip.keyframeTargets(in: section, effectID: effectID).lazy.compactMap { target in
+                clip.animatableProperty(for: target)?.keyframes.first {
+                    abs($0.time - time) <= self.keyframeTimeTolerance
+                }?.interpolation
+            }.first
+        }
+    }
+
+    private func hapticGraphSegment(_ item: HapticTimelineItem, at time: Double) -> KeyframeSegment? {
+        graphSegment(clipID: item.id, section: .haptics, times: item.keyframeTimes, localTime: time) { time in
+            item.keyframeTargets.compactMap(\.hapticProperty).lazy.compactMap { property in
+                item[keyPath: property].keyframes.first {
+                    abs($0.time - (item.sourceStart + time)) < KeyframeMergeSupport.timeTolerance
+                }?.interpolation
+            }.first
+        }
+    }
+
+    private func graphSegment(
+        clipID: UUID, section: KeyframeSection, effectID: UUID? = nil, times: [Double], localTime: Double,
+        interpolationAt: (Double) -> KeyframeInterpolation?
+    ) -> KeyframeSegment? {
         guard times.count >= 2 else { return nil }
         let leftIndex: Int?
-        if let exact = times.firstIndex(
-            where: { abs($0 - localTime) <= keyframeTimeTolerance }
-        ) {
+        if let exact = times.firstIndex(where: { abs($0 - localTime) <= keyframeTimeTolerance }) {
             leftIndex = exact < times.count - 1 ? exact : exact - 1
         } else {
             leftIndex = times.indices.dropLast().first {
                 localTime > times[$0] && localTime < times[$0 + 1]
             }
         }
-        guard let leftIndex, leftIndex >= 0, leftIndex + 1 < times.count else {
-            return nil
-        }
-        let startTime = times[leftIndex]
-        let endTime = times[leftIndex + 1]
-        let interpolation =
-            clip.keyframeTargets(in: section, effectID: effectID).lazy.compactMap { target in
-                clip.animatableProperty(for: target)?.keyframes.first {
-                    abs($0.time - startTime) <= self.keyframeTimeTolerance
-                }?.interpolation
-            }.first
-            ?? .linear
+        guard let leftIndex, leftIndex >= 0, leftIndex + 1 < times.count else { return nil }
         return KeyframeSegment(
-            clipID: clip.id,
-            section: section,
-            effectID: effectID,
-            startTime: startTime,
-            endTime: endTime,
-            interpolation: interpolation
+            clipID: clipID, section: section, effectID: effectID,
+            startTime: times[leftIndex], endTime: times[leftIndex + 1],
+            interpolation: interpolationAt(times[leftIndex]) ?? .linear
         )
     }
 
@@ -234,6 +252,11 @@ extension EditorViewModel {
         guard let segment = graphSegment else { return }
         if segment.section == .speed {
             graphSegment = candidateGraphSegment(in: .speed)
+            if let graphSegment { displayedGraphSegment = graphSegment }
+            return
+        }
+        if case .haptic(let item) = project.item(id: segment.clipID) {
+            graphSegment = hapticGraphSegment(item, at: currentTime - item.timelineStart)
             if let graphSegment { displayedGraphSegment = graphSegment }
             return
         }
@@ -266,6 +289,11 @@ extension EditorViewModel {
         target: KeyframeTarget,
         interactive: Bool = false
     ) {
+        if case .haptic(let item) = selectedTimelineItem, let property = target.hapticProperty {
+            activeKeyframeTarget = target
+            setHapticKeyframeValue(value, item: item, property: property, interactive: interactive)
+            return
+        }
         if selectedTextItem != nil {
             setSelectedTextKeyframeValue(value, target: target, interactive: interactive)
             return
@@ -378,6 +406,10 @@ extension EditorViewModel {
     }
 
     func toggleKeyframeSection(_ section: KeyframeSection) {
+        if section == .haptics, case .haptic(let item) = selectedTimelineItem {
+            toggleHapticKeyframes(for: item)
+            return
+        }
         if section == .speed {
             toggleSelectedTimeRemapKeyframe()
             return
@@ -515,6 +547,20 @@ extension EditorViewModel {
         startTime: Double,
         interactive: Bool = false
     ) {
+        if section == .haptics, case .haptic(let item) = selectedTimelineItem {
+            if interactive { beginInteractiveEdit() }
+            updateHaptic(id: item.id, interactive: interactive) { item in
+                for property in item.keyframeTargets.compactMap(\.hapticProperty) {
+                    if let index = item[keyPath: property].keyframeIndex(
+                        at: item.sourceStart + startTime, tolerance: KeyframeMergeSupport.timeTolerance
+                    ) {
+                        item[keyPath: property].keyframes[index].interpolation = interpolation
+                    }
+                }
+            }
+            refreshGraphSegment()
+            return
+        }
         if section == .speed {
             setSelectedTimeRemapInterpolation(interpolation, startTime: startTime, interactive: interactive)
             return
@@ -890,7 +936,17 @@ extension EditorViewModel {
             abs($0 - from) >= 0.000001 && abs($0 - destination) < 0.000001
         }), let location = project.itemLocation(id: itemID), !project.tracks[location.track].isLocked else { return false }
         if interactive { beginInteractiveEdit() }
-        if section == .speed {
+        if section == .haptics, case .haptic = item {
+            updateHaptic(id: itemID, interactive: interactive) { haptic in
+                let sourceStart = haptic.sourceStart
+                for property in haptic.keyframeTargets.compactMap(\.hapticProperty) {
+                    moveTimelineKeyframe(
+                        &haptic[keyPath: property].keyframes,
+                        from: sourceStart + from, to: sourceStart + destination
+                    )
+                }
+            }
+        } else if section == .speed {
             mutateProject(rebuild: !interactive, recordHistory: !interactive, persistChanges: !interactive, touchUpdatedAt: !interactive) { project in
                 guard let location = project.itemLocation(id: itemID),
                       !project.tracks[location.track].isLocked,
@@ -941,7 +997,7 @@ extension EditorViewModel {
             }
         }
         refreshGraphSegmentAfterKeyframeMove(itemID: itemID, section: section, from: from, to: destination)
-        if interactive {
+        if interactive && section != .haptics {
             scheduleInteractivePreviewRebuild(invalidation: section == .speed ? [.previewFrame, .compositionTopology, .audioMix] : (section == .audio ? [.audioMix] : [.previewFrame]))
         }
         return true
@@ -967,6 +1023,8 @@ extension EditorViewModel {
             candidate = KeyframeSegment(clipID: itemID, section: section, startTime: start, endTime: end, interpolation: left.interpolation)
         } else if case .text(let text) = item {
             candidate = textGraphSegmentCandidate(in: section, item: text, localTime: (start + end) / 2)
+        } else if case .haptic(let haptic) = item {
+            candidate = hapticGraphSegment(haptic, at: (start + end) / 2)
         } else if let clip = item.visualEditingClip() {
             candidate = graphSegmentCandidate(in: section, clip: clip, localTime: (start + end) / 2, effectID: old.effectID)
         } else {

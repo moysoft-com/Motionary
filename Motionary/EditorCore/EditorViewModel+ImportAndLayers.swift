@@ -333,6 +333,14 @@ extension EditorViewModel {
         )
     }
 
+    func toggleLayerMuted(_ trackID: UUID) {
+        guard let index = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        pausePlaybackForEditing()
+        mutateProject { project in
+            project.tracks[index].isMuted.toggle()
+        }
+    }
+
     func deleteLayer(_ trackID: UUID) {
         guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
         let before = project.tracks
@@ -431,6 +439,10 @@ extension EditorViewModel {
         if revealInPreview, let clipID, let item = project.item(id: clipID),
             !(currentTime >= item.timelineStart && currentTime < item.timelineEnd)
         {
+            if item.isHapticImpact {
+                if currentTime != item.timelineStart { seek(to: item.timelineStart, exact: true) }
+                return
+            }
             let edge = currentTime < item.timelineStart ? item.timelineStart : item.timelineEnd
             let revealedTime = currentTime < item.timelineStart ? edge + clipRevealEpsilon : edge - clipRevealEpsilon
             seek(to: revealedTime, exact: true)

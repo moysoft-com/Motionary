@@ -83,7 +83,10 @@ extension EditorViewModel {
         }
     }
 
-    func exportProject(settings: VideoExportSettings, saveToPhotos: Bool = true) {
+    func exportProject(
+        settings: VideoExportSettings, saveToPhotos: Bool = true, includeHaptics: Bool = false,
+        packageAsMotionaryVideo: Bool = false
+    ) {
         saveExportSettings(settings)
         guard exportTask == nil, !isPerformingLongTask else { return }
         exportTask = Task { [weak self] in
@@ -98,8 +101,9 @@ extension EditorViewModel {
                 isExporting = true
                 exportProgress = 0
                 recoverableExportURL = nil
+                let snapshot = project
                 let url = try await exportService.export(
-                    project: project,
+                    project: snapshot,
                     settings: settings
                 ) { [weak self] progress in
                     Task { @MainActor in
@@ -110,6 +114,29 @@ extension EditorViewModel {
                     if recoverableExportURL != url { try? FileManager.default.removeItem(at: url) }
                 }
                 try Task.checkCancellation()
+                if includeHaptics || packageAsMotionaryVideo {
+                    let items = includeHaptics ? snapshot.audibleHapticItems : []
+                    let title = snapshot.title
+                    let package = Task.detached(priority: .userInitiated) {
+                        let asset = AVURLAsset(url: url)
+                        let duration = try await asset.load(.duration).seconds
+                        let track = try HapticTrack.render(items, through: duration)
+                        let poster = try? await MotionaryVideoArchive.makePosterJPEG(from: asset)
+                        try Task.checkCancellation()
+                        return try MotionaryVideoArchive.write(movie: url, title: title, haptics: track, posterJPEG: poster)
+                    }
+                    let packagedURL = try await withTaskCancellationHandler {
+                        try await package.value
+                    } onCancel: {
+                        package.cancel()
+                    }
+                    if Task.isCancelled {
+                        try? FileManager.default.removeItem(at: packagedURL.deletingLastPathComponent())
+                        return
+                    }
+                    exportedVideoURL = packagedURL
+                    return
+                }
                 if !saveToPhotos {
                     exportedVideoURL = try PhotoLibraryExportService.preserveVideo(at: url)
                     return
@@ -437,6 +464,7 @@ extension EditorViewModel {
     }
 
     func replacePreviewPlayer(with item: AVPlayerItem?, preservingFrame: Bool = false) {
+        hapticPlayback.detach()
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
         scrubSeekGeneration &+= 1
@@ -945,7 +973,7 @@ extension EditorProject {
                     {
                         return true
                     }
-                case .media, .caption, .adjustment:
+                case .media, .caption, .adjustment, .haptic:
                     continue
                 }
             }

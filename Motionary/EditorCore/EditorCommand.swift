@@ -350,7 +350,7 @@ extension EditorProject {
                         text: nil,
                         adjustmentTargets: adjustment.targets
                     )
-                case .caption, .compound:
+                case .caption, .compound, .haptic:
                     nil
                 }
             }

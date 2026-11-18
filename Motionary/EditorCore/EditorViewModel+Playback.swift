@@ -5,6 +5,7 @@ import AVFoundation
 extension EditorViewModel {
     func suspendPreview() {
         guard !previewIsSuspended else { return }
+        hapticPlayback.detach()
         previewIsSuspended = true
         if isPlaying, !isPreviewSeekInFlight, let player {
             let seconds = CMTimeGetSeconds(player.currentTime())
@@ -49,7 +50,7 @@ extension EditorViewModel {
         installEffectRenderDiagnosticsHandler()
         EditorAudioSession.configurePlayback()
         TimelineCacheLifecycle.installMemoryWarningHandler()
-        if project.tracks.contains(where: { !$0.isMuted && !$0.items.isEmpty && $0.kind != .audio }) {
+        if project.tracks.contains(where: { !$0.isMuted && !$0.items.isEmpty && $0.kind != .audio && $0.kind != .haptic }) {
             Task.detached(priority: .userInitiated) {
                 try? MetalRenderResources.validateAvailability()
             }
@@ -68,6 +69,7 @@ extension EditorViewModel {
     }
 
     func stop() {
+        hapticPlayback.detach()
         workspaceScrollOwners.removeAll()
         workspacePersistencePending = false
         playbackState.isStartingPlayback = false
@@ -378,6 +380,21 @@ extension EditorViewModel {
             if let warmup = self.previewPrerollTask { await warmup.value }
             guard self.ownsPlaybackStart(for: player, generation: generation) else { return }
             self.previewPrerollTask = nil
+            let hapticItems = self.project.audibleHapticItems
+            let duration = self.duration
+            self.hapticPlayback.detach()
+            if HapticPlayback.isSupported, !hapticItems.isEmpty {
+                let prepared = Task.detached(priority: .userInitiated) {
+                    try HapticTrack.render(hapticItems, through: duration)
+                }
+                let track = await withTaskCancellationHandler {
+                    try? await prepared.value
+                } onCancel: {
+                    prepared.cancel()
+                }
+                guard self.ownsPlaybackStart(for: player, generation: generation) else { return }
+                if let track { self.hapticPlayback.attach(to: player, track: track) }
+            }
             self.isPlaying = true
             player.play()
             self.startPlaybackWatchdog()
@@ -390,6 +407,7 @@ extension EditorViewModel {
     }
 
     func pausePlaybackForEditing() {
+        hapticPlayback.stopAudition()
         guard isPlaying || playbackState.isStartingPlayback || pendingPlaybackResumeAfterPreviewRebuild else { return }
         pendingPlaybackResumeAfterPreviewRebuild = false
         guard let player else {
@@ -403,6 +421,7 @@ extension EditorViewModel {
     }
 
     private func pausePlaybackForUserCommand(_ player: AVPlayer) {
+        hapticPlayback.detach()
         let wasSeeking = isPreviewSeekInFlight
         previewSeekGeneration &+= 1
         isPreviewSeekInFlight = false
@@ -684,6 +703,7 @@ extension EditorViewModel {
     func beginScrub() {
         guard !previewIsSuspended else { return }
         guard !isScrubbing || scrubIsFinishing else { return }
+        hapticPlayback.detach()
         if scrubIsFinishing { player?.currentItem?.cancelPendingSeeks() }
         let frameTime = currentScrubPresentationTime()
         let heldFrame = renderService.livePreviewState.cachedFrameNear(

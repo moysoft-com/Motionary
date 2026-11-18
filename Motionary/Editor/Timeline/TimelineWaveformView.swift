@@ -18,31 +18,7 @@ struct TimelineWaveformView: View {
         Canvas { context, size in
             guard size.width > 1, size.height > 1, !samples.isEmpty else { return }
 
-            let midY = size.height * 0.5
-            let maxAmplitude = max(size.height * 0.47, 1)
-            let step = size.width / CGFloat(max(samples.count - 1, 1))
-            var upper: [CGPoint] = []
-            var lower: [CGPoint] = []
-            upper.reserveCapacity(samples.count)
-            lower.reserveCapacity(samples.count)
-
-            for index in samples.indices {
-                let x = CGFloat(index) * step
-                let amplitude = min(max(samples[index], 0), 1) * maxAmplitude
-                upper.append(CGPoint(x: x, y: midY - amplitude))
-                lower.append(CGPoint(x: x, y: midY + amplitude))
-            }
-
-            var fillPath = Path()
-            fillPath.move(to: lower[0])
-            for point in lower.dropFirst() {
-                fillPath.addLine(to: point)
-            }
-            for point in upper.reversed() {
-                fillPath.addLine(to: point)
-            }
-            fillPath.closeSubpath()
-
+            let fillPath = TimelineWaveformShape.path(samples: samples, xRange: 0...size.width, height: size.height)
             context.fill(
                 fillPath,
                 with: .color(Color(red: 0.16, green: 0.03, blue: 0.32))
@@ -51,11 +27,106 @@ struct TimelineWaveformView: View {
     }
 }
 
+private enum TimelineWaveformShape {
+    static func path(samples: [CGFloat], xRange: ClosedRange<CGFloat>, height: CGFloat) -> Path {
+        let midY = height / 2
+        let step = (xRange.upperBound - xRange.lowerBound) / CGFloat(max(samples.count - 1, 1))
+        let amplitudes = samples.map { min(max($0, 0), 1) * height * 0.47 }
+        var path = Path()
+        guard let first = amplitudes.first else { return path }
+        if amplitudes.count == 1 {
+            path.addRect(CGRect(x: xRange.lowerBound, y: midY - first, width: step, height: first * 2))
+            return path
+        }
+
+        func point(_ index: Int, sign: CGFloat) -> CGPoint {
+            CGPoint(x: xRange.lowerBound + CGFloat(index) * step, y: midY + sign * amplitudes[index])
+        }
+
+        func connect(from start: CGPoint, to end: CGPoint) {
+            let tangent = (end.x - start.x) / 3
+            path.addCurve(to: end, control1: CGPoint(x: start.x + tangent, y: start.y),
+                          control2: CGPoint(x: end.x - tangent, y: end.y))
+        }
+
+        let last = amplitudes.count - 1
+        path.move(to: point(0, sign: -1))
+        for index in 1...last { connect(from: point(index - 1, sign: -1), to: point(index, sign: -1)) }
+        path.addLine(to: point(last, sign: 1))
+        for index in (0..<last).reversed() { connect(from: point(index + 1, sign: 1), to: point(index, sign: 1)) }
+        path.closeSubpath()
+        return path
+    }
+}
+
+struct TimelineHapticWaveformView: View {
+    let item: HapticTimelineItem
+    let pixelsPerSecond: CGFloat
+    let visibleTimelineRange: ClosedRange<Double>?
+
+    var body: some View {
+        Canvas { context, size in
+            guard size.height > 1, pixelsPerSecond > 0 else { return }
+            let start = max(0, (visibleTimelineRange?.lowerBound ?? item.timelineStart) - item.timelineStart)
+            let end = min(item.duration, (visibleTimelineRange?.upperBound ?? item.timelineEnd) - item.timelineStart)
+            let inset = min(5, size.width * 0.15)
+            let scale = (size.width - inset * 2) / max(size.width, 1)
+            let waveformScale = pixelsPerSecond * scale
+            let lowerX = inset + CGFloat(start) * waveformScale
+            let upperX = min(inset + CGFloat(end) * waveformScale, size.width - inset)
+            let span = upperX - lowerX
+            guard span > 0 else { return }
+
+            let count = max(2, Int(ceil(span / 0.75)) + 1)
+            let sampleStart = Double((lowerX - inset) / waveformScale)
+            let sampleStep = Double(span / CGFloat(count - 1) / waveformScale)
+            let samples = waveformSamples(start: sampleStart, step: sampleStep, count: count)
+            let path = TimelineWaveformShape.path(
+                samples: samples,
+                xRange: lowerX...upperX,
+                height: size.height
+            )
+            context.fill(path, with: .color(MotionaryTheme.hapticsWaveform))
+        }
+    }
+
+    private func waveformSamples(start: Double, step: Double, count: Int) -> [CGFloat] {
+        guard item.isPatternEnabled else {
+            return (0..<count).map { CGFloat(item.playbackSample(at: start + Double($0) * step).intensity) }
+        }
+
+        let start = max(0, start - step / 2)
+        let end = min(item.duration, start + Double(count) * step)
+        guard start < end else { return Array(repeating: 0, count: count) }
+        var peaks = [CGFloat](repeating: 0, count: count)
+        item.forEachPulse(in: start..<end) { pulse in
+            let pulseEnd = pulse.time + pulse.duration
+            if pulse.duration == 0 {
+                guard pulse.time >= start, pulse.time < end else { return }
+            } else {
+                guard pulseEnd > start, pulse.time < end else { return }
+            }
+            let first = max(0, min(count - 1, Int(floor((pulse.time - start) / step))))
+            let last = min(count - 1, Int(floor((min(pulseEnd, end) - start) / step)))
+            for index in first...max(first, last) {
+                let left = max(pulse.time, start + Double(index) * step)
+                let right = min(pulseEnd, start + Double(index + 1) * step)
+                guard right > left || pulse.duration == 0 else { continue }
+                let sample = item.playbackSample(at: (left + right) / 2, step: pulse.step)
+                peaks[index] = max(peaks[index], CGFloat(sample.intensity))
+            }
+        }
+        return peaks
+    }
+
+}
+
 actor TimelineAudioWaveformCache {
     static let shared = TimelineAudioWaveformCache()
     private let sourceCache = NSCache<NSString, TimelineWaveformBox>()
     private let retimedCache = NSCache<NSString, TimelineWaveformBox>()
     private var inFlight: [String: Task<[CGFloat], Never>] = [:]
+    private var generation = 0
 
     init() {
         sourceCache.countLimit = 120
@@ -70,61 +141,63 @@ actor TimelineAudioWaveformCache {
         speedMap: SpeedMap,
         targetCount: Int
     ) async -> [CGFloat] {
+        guard !Task.isCancelled else { return [] }
         let quantizedCount = max(32, Int((Double(targetCount) / 32).rounded(.up)) * 32)
         let sourceKey = [
             media.mediaID.rawValue.uuidString,
             String(format: "%.3f", clip.sourceRange.start),
-            String(format: "%.3f", clip.sourceRange.duration),
-            "\(quantizedCount)"
+            String(format: "%.3f", clip.sourceRange.duration)
         ].joined(separator: "|")
-        let retimedKey = "\(sourceKey)|speed:\(speedMap.topologySignature)"
+        let retimedKey = "\(sourceKey)|count:\(quantizedCount)|speed:\(speedMap.topologySignature)"
 
         if let cached = retimedCache.object(forKey: retimedKey as NSString) {
             return cached.samples
         }
 
-        if let cached = sourceCache.object(forKey: sourceKey as NSString) {
-            return cacheRetimedSamples(
-                cached.samples,
-                key: retimedKey,
-                speedMap: speedMap,
-                sourceDuration: clip.sourceRange.duration
-            )
+        let requestGeneration = generation
+        let sourceSamples = await sourceSamples(for: clip, media: media, key: sourceKey)
+        guard generation == requestGeneration, !Task.isCancelled else { return [] }
+        if let cached = retimedCache.object(forKey: retimedKey as NSString) {
+            return cached.samples
         }
 
-        if let task = inFlight[sourceKey] {
-            return cacheRetimedSamples(
-                await task.value,
-                key: retimedKey,
-                speedMap: speedMap,
-                sourceDuration: clip.sourceRange.duration
-            )
-        }
-
-        let task = Task {
-            await TimelineAudioWaveformLoader.generateSourceSamples(
-                for: clip,
-                media: media,
-                targetCount: quantizedCount
-            )
-        }
-        inFlight[sourceKey] = task
-        let sourceSamples = await task.value
-        inFlight[sourceKey] = nil
-        sourceCache.setObject(
-            TimelineWaveformBox(sourceSamples),
-            forKey: sourceKey as NSString,
-            cost: max(sourceSamples.count * MemoryLayout<CGFloat>.stride, 1)
-        )
-        return cacheRetimedSamples(
-            sourceSamples,
-            key: retimedKey,
+        let samples = TimelineAudioWaveformLoader.retimedSamples(
+            TimelineAudioWaveformLoader.resampledEnvelope(sourceSamples, count: quantizedCount),
             speedMap: speedMap,
             sourceDuration: clip.sourceRange.duration
         )
+        retimedCache.setObject(
+            TimelineWaveformBox(samples),
+            forKey: retimedKey as NSString,
+            cost: max(samples.count * MemoryLayout<CGFloat>.stride, 1)
+        )
+        return samples
+    }
+
+    private func sourceSamples(for clip: TimelineClip, media: ClipMediaDescriptor, key: String) async -> [CGFloat] {
+        if let cached = sourceCache.object(forKey: key as NSString) {
+            return cached.samples
+        }
+        if let task = inFlight[key] {
+            return await task.value
+        }
+
+        let requestGeneration = generation
+        let task = TimelineAudioWaveformLoader.sourceSampleTask(for: clip, media: media)
+        inFlight[key] = task
+        let samples = await task.value
+        guard generation == requestGeneration else { return [] }
+        inFlight[key] = nil
+        sourceCache.setObject(
+            TimelineWaveformBox(samples),
+            forKey: key as NSString,
+            cost: max(samples.count * MemoryLayout<CGFloat>.stride, 1)
+        )
+        return samples
     }
 
     func removeAll() {
+        generation &+= 1
         inFlight.values.forEach { $0.cancel() }
         inFlight.removeAll()
         sourceCache.removeAllObjects()
@@ -132,29 +205,7 @@ actor TimelineAudioWaveformCache {
     }
 
     func trimForMemoryPressure() {
-        inFlight.values.forEach { $0.cancel() }
-        inFlight.removeAll()
-        sourceCache.removeAllObjects()
-        retimedCache.removeAllObjects()
-    }
-
-    private func cacheRetimedSamples(
-        _ sourceSamples: [CGFloat],
-        key: String,
-        speedMap: SpeedMap,
-        sourceDuration: Double
-    ) -> [CGFloat] {
-        let samples = TimelineAudioWaveformLoader.retimedSamples(
-            sourceSamples,
-            speedMap: speedMap,
-            sourceDuration: sourceDuration
-        )
-        retimedCache.setObject(
-            TimelineWaveformBox(samples),
-            forKey: key as NSString,
-            cost: max(samples.count * MemoryLayout<CGFloat>.stride, 1)
-        )
-        return samples
+        removeAll()
     }
 }
 
@@ -173,17 +224,17 @@ enum TimelineAudioWaveformLoader {
         )
     }
 
-    fileprivate static func generateSourceSamples(
+    fileprivate static func sourceSampleTask(
         for clip: TimelineClip,
-        media: ClipMediaDescriptor,
-        targetCount: Int
-    ) async -> [CGFloat] {
+        media: ClipMediaDescriptor
+    ) -> Task<[CGFloat], Never> {
         let url = media.url
         let sourceStart = clip.sourceRange.start
         let sourceDuration = clip.sourceRange.duration
 
-        return await Task<[CGFloat], Never>.detached(priority: .utility) {
-            let count = max(targetCount, 1)
+        return Task.detached(priority: .utility) {
+            // Decode the short-window RMS envelope above the timeline drawing resolution.
+            let count = min(4_096, max(1, Int(max(sourceDuration, 0.05) * 22_050)))
             let fallback = fallbackSamples(count: count)
             let asset = AVURLAsset(url: url)
             guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
@@ -213,12 +264,13 @@ enum TimelineAudioWaveformLoader {
             reader.add(output)
             guard reader.startReading() else { return fallback }
 
-            var buckets = Array(repeating: Float(0), count: count)
+            var energy = Array(repeating: Float(0), count: count)
+            var frames = Array(repeating: 0, count: count)
             let totalSamples = max(Int(max(sourceDuration, 0.05) * sampleRate), 1)
             var sampleIndex = 0
             var readSamples = 0
 
-            while reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
+            while !Task.isCancelled, reader.status == .reading, let sampleBuffer = output.copyNextSampleBuffer() {
                 guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
                 let length = CMBlockBufferGetDataLength(blockBuffer)
                 guard length > 0 else { continue }
@@ -239,28 +291,49 @@ enum TimelineAudioWaveformLoader {
                     for sample in samples {
                         let progress = min(Double(sampleIndex) / Double(totalSamples), 0.999)
                         let bucketIndex = min(Int(progress * Double(count)), count - 1)
-                        let amplitude = min(Float(abs(Int32(sample))) / 32_767, 1)
-                        buckets[bucketIndex] = max(buckets[bucketIndex], amplitude)
+                        let amplitude = Float(sample) / 32_768
+                        energy[bucketIndex] += amplitude * amplitude
+                        frames[bucketIndex] += 1
                         sampleIndex += 1
                         readSamples += 1
                     }
                 }
             }
 
+            if Task.isCancelled {
+                reader.cancelReading()
+                return []
+            }
             guard reader.status == .completed || reader.status == .reading else { return fallback }
             guard readSamples > 0 else { return fallback }
 
-            let peak = max(buckets.max() ?? 0, 0)
-            guard peak > 0.0001 else {
-                return Array(repeating: 0.015, count: count)
+            let envelope = energy.indices.map { index in
+                CGFloat(sqrt(energy[index] / Float(max(frames[index], 1))))
             }
-            let gain = min(1 / peak, 3.2)
-            let normalized = buckets.map { value in
-                let boosted = CGFloat(value * gain)
-                return min(max(sqrt(boosted), 0.015), 1)
-            }
-            return normalized
-        }.value
+            return scaledEnvelope(envelope)
+        }
+    }
+
+    static func scaledEnvelope(_ samples: [CGFloat]) -> [CGFloat] {
+        let nonSilent = samples.filter { $0 > 0.0001 }.sorted()
+        guard let peak = nonSilent.last else { return samples.map { _ in 0.015 } }
+
+        // Scale each clip around its typical loud sections, retaining headroom for transients.
+        let reference = max(nonSilent[Int(Double(nonSilent.count - 1) * 0.95)], 0.003)
+        return samples.map { level in
+            if level <= reference { return max(0.015, 0.76 * level / reference) }
+            return 0.76 + 0.19 * (level - reference) / (peak - reference)
+        }
+    }
+
+    fileprivate static func resampledEnvelope(_ sourceSamples: [CGFloat], count: Int) -> [CGFloat] {
+        guard !sourceSamples.isEmpty else { return [] }
+        return (0..<count).map { index in
+            let start = index * sourceSamples.count / count
+            let end = max(start + 1, (index + 1) * sourceSamples.count / count)
+            let window = sourceSamples[start..<end]
+            return sqrt(window.reduce(0) { $0 + $1 * $1 } / CGFloat(window.count))
+        }
     }
 
     fileprivate static func retimedSamples(

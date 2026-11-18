@@ -174,7 +174,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
             autoreleasepool {
                 do {
                     let plan = RenderPlanCompiler.compile(instruction)
-                    let isScrubFrame = plan.scrubEffectScale < 1
+                    let isScrubFrame = plan.isScrubFrame
                     if instruction.qualityProfile != .export,
                         let cached = instruction.livePreviewState?.cachedFrame(
                             at: CMTimeGetSeconds(request.compositionTime), sessionID: instruction.renderSessionID,
@@ -316,7 +316,7 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                                     instruction.livePreviewState?.cacheFrame(destination, at: time,
                                                         sessionID: sessionID,
                                                         revision: livePlan.livePreviewSnapshot?.revision ?? 0,
-                                                        isScrubFrame: livePlan.scrubEffectScale < 1)
+                                                        isScrubFrame: livePlan.isScrubFrame)
                                                     renderer.preparePreviewStillImages(livePlan, at: time, sessionID: sessionID)
                                                     completion(destination)
                                                 }

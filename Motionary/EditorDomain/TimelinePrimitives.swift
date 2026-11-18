@@ -16,6 +16,7 @@ enum TrackKind: String, Codable, CaseIterable {
     case shape
     case text
     case audio
+    case haptic
 }
 
 /// Codable time range expressed in seconds.

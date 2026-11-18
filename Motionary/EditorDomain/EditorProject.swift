@@ -34,11 +34,11 @@ struct EditorProject: Identifiable, Codable, Equatable {
     }
 
     var duration: Double {
-        tracks
-            .lazy
-            .flatMap(\.items)
-            .map(\.timelineEnd)
-            .max() ?? 0
+        let frameDuration = 1 / Double(max(renderSettings.frameRate, 1))
+        return tracks.lazy.flatMap(\.items).map { item in
+            // A point on the last frame still needs that frame to be playable.
+            item.timelineEnd + (item.isHapticImpact ? frameDuration : 0)
+        }.max() ?? 0
     }
 
     mutating func synchronizeExportFrameRate() {

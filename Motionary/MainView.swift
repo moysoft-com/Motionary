@@ -12,6 +12,46 @@ private final class MotionaryAppAttestProviderFactory: NSObject, AppCheckProvide
 }
 
 class AppDelegate: NSObject, UIApplicationDelegate {
+    private var videoLandscapeEnabled = false
+
+    func application(
+        _ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        if UIDevice.current.userInterfaceIdiom == .pad { return .all }
+        return videoLandscapeEnabled ? .allButUpsideDown : .portrait
+    }
+
+    func setVideoLandscapeEnabled(_ enabled: Bool) {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+        videoLandscapeEnabled = enabled
+        if enabled {
+            updateVideoOrientationSupport()
+        } else {
+            requestVideoOrientation(.portrait)
+        }
+    }
+
+    private var activeWindowScene: UIWindowScene? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive && $0.keyWindow != nil }
+    }
+
+    private func updateVideoOrientationSupport() {
+        var controller = activeWindowScene?.keyWindow?.rootViewController
+        while let current = controller {
+            current.setNeedsUpdateOfSupportedInterfaceOrientations()
+            controller = current.presentedViewController
+        }
+    }
+
+    private func requestVideoOrientation(_ mask: UIInterfaceOrientationMask) {
+        updateVideoOrientationSupport()
+        activeWindowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+            AppLogger.lifecycle.debug("Video orientation request failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -77,6 +117,17 @@ struct MainView: App {
     @State private var iconPickerPresented = false
     @State private var rootViewAppeared = false
     @State private var newProjectRequest: UUID?
+    @State private var incomingProjectID: UUID?
+    @State private var openedVideo: MotionaryVideoArchive.Movie?
+    @State private var presentedVideo: MotionaryVideoArchive.Movie?
+    @State private var documentError: String?
+    private struct IncomingDocument {
+        let url: URL
+        var sharedProjectID: UUID?
+    }
+
+    @State private var documentQueue: [IncomingDocument] = []
+    @State private var openingDocumentURL: URL?
     @AppStorage(AppPreferences.appearanceKey)
     private var appearance = AppPreferences.defaultAppearance
 
@@ -117,7 +168,40 @@ struct MainView: App {
         .sheet(isPresented: $iconPickerPresented) {
             AppIconPickerView()
         }
-        .onAppear { rootViewAppeared = true }
+        .onOpenURL { url in
+            guard url.isFileURL, ["mpj", MotionaryVideoArchive.fileExtension].contains(url.pathExtension.lowercased()) else { return }
+            guard openingDocumentURL != url, !documentQueue.contains(where: { $0.url == url }) else { return }
+            documentQueue.append(IncomingDocument(url: url))
+            openNextDocument()
+        }
+        .fullScreenCover(item: $openedVideo, onDismiss: {
+            delegate.setVideoLandscapeEnabled(false)
+            presentedVideo?.removeTemporaryFiles()
+            presentedVideo = nil
+            openNextDocument()
+        }) { movie in
+            MotionaryVideoPlayer(movie: movie)
+        }
+        .alert("Couldn’t Open File", isPresented: Binding(
+            get: { documentError != nil },
+            set: { if !$0 { documentError = nil } }
+        )) {
+            Button("OK", role: .cancel) { documentError = nil; openNextDocument() }
+        } message: {
+            Text(documentError ?? "")
+        }
+        .overlay {
+            if openingDocumentURL != nil {
+                MotionaryProjectLoadingView(title: "Opening File")
+            }
+        }
+        .onAppear {
+            rootViewAppeared = true
+            collectSharedProjects()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { collectSharedProjects() }
+        }
         .onDisappear { rootViewAppeared = false }
         .task(id: rootViewAppeared && scenePhase == .active ? actions.pendingAction?.rawValue : nil) {
             // Cold-launch actions can arrive before SwiftUI has a presenter.
@@ -159,6 +243,7 @@ struct MainView: App {
             HomeView(
                 projectStore: projectStore,
                 newProjectRequest: newProjectRequest,
+                incomingProjectID: $incomingProjectID,
                 searchText: $projectSearchText,
                 isSearchPresented: $isProjectSearchPresented,
                 onEditorPresentationChange: { isEditorPresented = $0 }
@@ -173,6 +258,7 @@ struct MainView: App {
             HomeView(
                 projectStore: projectStore,
                 newProjectRequest: newProjectRequest,
+                incomingProjectID: $incomingProjectID,
                 searchText: $projectSearchText,
                 isSearchPresented: $isProjectSearchPresented,
                 onEditorPresentationChange: { isEditorPresented = $0 }
@@ -231,6 +317,52 @@ struct MainView: App {
         isProjectSearchPresented.toggle()
         if !isProjectSearchPresented { projectSearchText = "" }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func collectSharedProjects() {
+        for url in MotionaryShareInbox.pendingProjects() {
+            guard let id = UUID(uuidString: url.deletingPathExtension().lastPathComponent),
+                openingDocumentURL != url,
+                !documentQueue.contains(where: { $0.url == url })
+            else { continue }
+            documentQueue.append(IncomingDocument(url: url, sharedProjectID: id))
+        }
+        openNextDocument()
+    }
+
+    private func openNextDocument() {
+        guard rootViewAppeared, openingDocumentURL == nil, presentedVideo == nil, documentError == nil,
+            !documentQueue.isEmpty
+        else { return }
+        let document = documentQueue.removeFirst()
+        let url = document.url
+        openingDocumentURL = url
+        Task { @MainActor in
+            defer {
+                if document.sharedProjectID != nil {
+                    try? FileManager.default.removeItem(at: url)
+                }
+                openingDocumentURL = nil
+                openNextDocument()
+            }
+            do {
+                if url.pathExtension.lowercased() == MotionaryVideoArchive.fileExtension {
+                    let movie = try await MotionaryVideoArchive.open(url)
+                    presentedVideo = movie
+                    delegate.setVideoLandscapeEnabled(true)
+                    openedVideo = movie
+                } else {
+                    let projectID = document.sharedProjectID ?? UUID()
+                    try await projectStore.importArchive(at: url, id: projectID)
+                    selectedTab = 0
+                    projectSearchText = ""
+                    isProjectSearchPresented = false
+                    incomingProjectID = projectID
+                }
+            } catch {
+                documentError = error.localizedDescription
+            }
+        }
     }
 
     private func handlePendingAction() {

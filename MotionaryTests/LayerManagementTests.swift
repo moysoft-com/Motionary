@@ -7,6 +7,36 @@ import Testing
 
 @MainActor
 struct LayerManagementTests {
+    @Test func layerMutePersistsAndIsUndoableWithoutRemovingClips() throws {
+        let item = TextTimelineItem(name: "Title", text: "Hello", timelineStart: 0, duration: 2)
+        let visual = TimelineTrack(name: "Title", kind: .text, items: [.text(item)])
+        let audio = TimelineTrack(name: "Audio", kind: .audio)
+        let model = EditorViewModel(
+            projectID: UUID(), projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: EditorProject(title: "Layers", tracks: [visual, audio]))
+        )
+        model.selectTimelineItem(item.id)
+        model.toggleLayerMuted(visual.id)
+        model.toggleLayerMuted(audio.id)
+
+        #expect(model.selectedClipID == item.id)
+        #expect(model.project.item(id: item.id) == .text(item))
+        #expect(model.timelineRenderSnapshot.tracks.map(\.isMuted) == [true, true])
+        #expect(PreviewVisualIntervalIndex(project: model.project).active(at: 1, retaining: item.id).isEmpty)
+        let encoded = try JSONEncoder().encode(model.project)
+        let saved = try JSONDecoder().decode(EditorProject.self, from: encoded)
+        #expect(saved.tracks.map(\.isMuted) == [true, true])
+
+        model.undo()
+        #expect(model.project.tracks.first(where: { $0.id == audio.id })?.isMuted == false)
+        model.undo()
+        #expect(PreviewVisualIntervalIndex(project: model.project).active(at: 1, retaining: nil).map(\.id) == [item.id])
+        model.redo()
+        #expect(model.project.tracks.first(where: { $0.id == visual.id })?.isMuted == true)
+        model.redo()
+        #expect(model.project.tracks.first(where: { $0.id == audio.id })?.isMuted == true)
+    }
+
     @Test func adjustmentTimelineFiltersEffectMarkersAndVisibleRange() {
         let first = EffectInstance(
             moduleID: .noir,

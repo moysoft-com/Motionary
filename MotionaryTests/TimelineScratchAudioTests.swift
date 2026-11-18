@@ -6,6 +6,28 @@ import Testing
 
 @Suite(.serialized)
 struct TimelineScratchAudioTests {
+    @Test func mutedAudioLayerIsExcludedFromTheComposition() async throws {
+        let url = try makeConstantAudio(value: 0.25)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = ClipSource(url: url, mediaType: .audio, originalDuration: 1)
+        let clip = TimelineClip(
+            name: "Test audio", source: source, timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 1)
+        )
+        var project = EditorProject(
+            title: "Audio mute", renderSettings: RenderSettings(width: 160, height: 96),
+            tracks: [TimelineTrack(name: "Audio", kind: .audio, clips: [clip])]
+        )
+        let service = CompositionRenderService()
+        let audible = try await service.makeComposition(for: project)
+        #expect(audible.audioTrackIDs[clip.id] != nil)
+
+        project.tracks[0].isMuted = true
+        let muted = try await service.makeComposition(for: project)
+        #expect(muted.audioTrackIDs.isEmpty)
+        #expect(muted.duration == audible.duration)
+    }
+
     @Test func preferenceDefaultsOffPersistsAndResets() {
         let suite = "scratch-preferences-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
@@ -180,6 +202,26 @@ struct TimelineScratchAudioTests {
         #expect(abs(window.sample(at: 0.75 * 48_000, channel: 0) - 0.4) < 0.01)
         #expect(abs(window.sample(at: 1.25 * 48_000, channel: 0) - 0.2) < 0.01)
         #expect(window.sample(at: 1.75 * 48_000, channel: 0) == 0)
+    }
+
+    @Test func waveformZoomReusesDecodedAudioAtDifferentResolutions() async throws {
+        let url = try makeConstantAudio(value: 0.4)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = ClipSource(url: url, mediaType: .audio, originalDuration: 1)
+        let clip = TimelineClip(name: "Waveform", source: source, timelineStart: 0,
+                                sourceRange: TimeRangeValue(start: 0, duration: 1))
+        let media = ClipMediaDescriptor(asset: MediaAsset(id: clip.mediaID, source: source))
+        let cache = TimelineAudioWaveformCache()
+
+        let zoomedOut = await cache.samples(for: clip, media: media, speedMap: .constant, targetCount: 96)
+        try #require(zoomedOut.count == 96)
+        #expect(zoomedOut[zoomedOut.count / 2] > 0.5)
+
+        // A different drawing resolution must use the same source envelope.
+        try FileManager.default.removeItem(at: url)
+        let zoomedIn = await cache.samples(for: clip, media: media, speedMap: .constant, targetCount: 512)
+        try #require(zoomedIn.count == 512)
+        #expect(zoomedIn[zoomedIn.count / 2] > 0.5)
     }
 
     @Test func audioEngineSourceActuallyProducesStereoAudioAndStops() throws {

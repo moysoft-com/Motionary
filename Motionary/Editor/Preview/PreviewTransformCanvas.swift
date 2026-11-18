@@ -75,7 +75,7 @@ struct PreviewVisualIntervalIndex {
             project.tracks.reduce(0) { $0 + $1.items.count }
         )
         var order = 0
-        for track in project.tracks {
+        for track in project.tracks where !track.isMuted {
             for item in track.items {
                 defer { order += 1 }
                 let info: PreviewVisualInfo
@@ -102,7 +102,7 @@ struct PreviewVisualIntervalIndex {
                             item: adjustment
                         )
                     )
-                case .caption, .compound:
+                case .caption, .compound, .haptic:
                     continue
                 }
                 guard item.timelineStart.isFinite,

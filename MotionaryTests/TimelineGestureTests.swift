@@ -1,5 +1,6 @@
 // Regression coverage for timeline gesture intent, ownership, and cancellation.
 
+import Combine
 import SwiftUI
 import Testing
 import UIKit
@@ -256,11 +257,68 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    @Test func rulerExpandsAsSoonAsVerticalScrollingReverses() throws {
+        let state = TimelineScrollPresentationState()
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        state.attachRuler(ruler)
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: .constant(88), currentTime: 0, duration: 10,
+            contentRevision: 0, contentSize: CGSize(width: 1_180, height: 600),
+            isScrollDisabled: false, scrollPresentationState: state,
+            onScrubStart: {}, onScrubChanged: { _ in }, onScrubEnd: { _ in },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 1_180, height: 600)
+        scroll.delegate = coordinator
+        coordinator.attach(to: scroll)
+        let band = try #require(ruler.layer.sublayers?.first)
+
+        #expect(band.position.y == 0)
+        scroll.contentOffset.y = 400
+        #expect(band.position.y == -15)
+        scroll.contentOffset.y = 425
+        scroll.contentOffset.y = 400
+        #expect(band.position.y == -15)
+        scroll.contentOffset.y = 370
+        #expect(band.position.y == -7.5)
+        scroll.contentOffset.x = 100
+        #expect(band.position.y == -7.5)
+        scroll.contentOffset.y = 340
+        #expect(band.position.y == 0)
+        scroll.contentOffset.y = 370
+        #expect(band.position.y == -7.5)
+        scroll.contentOffset.y = -20
+        scroll.contentOffset.y = 0
+        #expect(band.position.y == 0)
+
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 0, y: -20))
+        scroll.contentOffset.y = 20
+        #expect(band.position.y < 0)
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
+        #expect(band.position.y == 0)
+
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 0, y: -40))
+        scroll.contentOffset.y = 60
+        #expect(band.position.y > -15)
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: true)
+        #expect(band.position.y > -15)
+        coordinator.scrollViewDidEndDecelerating(scroll)
+        #expect(band.position.y == -15)
+
+        coordinator.beginScroll(in: scroll, translation: CGPoint(x: 0, y: 40))
+        scroll.contentOffset.y = 20
+        coordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
+        #expect(band.position.y == 0)
+    }
+
+    @MainActor
     @Test func rulerWindowRebuildKeepsTheSameTickCoordinates() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
         func visibleTickPositions(offset: CGFloat) throws -> [CGFloat] {
-            ruler.present(TimelineRulerSample(horizontalOffset: offset, verticalOffset: 0,
+            ruler.present(TimelineRulerSample(horizontalOffset: offset, collapseOffset: 0,
                                               pixelsPerSecond: 88, duration: 7_200))
             let band = try #require(ruler.layer.sublayers?.first)
             let ticks = try #require(band.sublayers?.compactMap { $0 as? CAShapeLayer }
@@ -283,7 +341,7 @@ struct TimelineGestureTests {
     @Test func labelKeepsItsTickOffsetAtTheViewportEdge() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
-        ruler.present(TimelineRulerSample(horizontalOffset: 120, verticalOffset: 0,
+        ruler.present(TimelineRulerSample(horizontalOffset: 120, collapseOffset: 0,
                                           pixelsPerSecond: 88, duration: 10))
         let band = try #require(ruler.layer.sublayers?.first)
         let label = try #require(band.sublayers?.compactMap { $0 as? CATextLayer }.first {
@@ -292,7 +350,7 @@ struct TimelineGestureTests {
         let labelFrame = label.frame
         #expect(labelFrame.maxX + band.position.x > ruler.bounds.maxX)
 
-        ruler.present(TimelineRulerSample(horizontalOffset: 170, verticalOffset: 0,
+        ruler.present(TimelineRulerSample(horizontalOffset: 170, collapseOffset: 0,
                                           pixelsPerSecond: 88, duration: 10))
         #expect(label.frame.maxX + band.position.x < ruler.bounds.maxX)
         #expect(label.frame == labelFrame)
@@ -302,7 +360,7 @@ struct TimelineGestureTests {
     @Test func endLabelStaysVisibleWhenItsTickFits() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
-        ruler.present(TimelineRulerSample(horizontalOffset: 3 * 88, verticalOffset: 0,
+        ruler.present(TimelineRulerSample(horizontalOffset: 3 * 88, collapseOffset: 0,
                                           pixelsPerSecond: 88, duration: 3.1))
         let band = try #require(ruler.layer.sublayers?.first)
         let labels = try #require(band.sublayers).compactMap { $0 as? CATextLayer }
@@ -324,7 +382,7 @@ struct TimelineGestureTests {
     @Test func rulerStopsTicksAtTheProjectEndAndLeavesRoomForLabels() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
-        ruler.present(TimelineRulerSample(horizontalOffset: 84, verticalOffset: 0,
+        ruler.present(TimelineRulerSample(horizontalOffset: 84, collapseOffset: 0,
                                           pixelsPerSecond: 280, duration: 0.4))
         let band = try #require(ruler.layer.sublayers?.first)
         #expect(band.masksToBounds)
@@ -476,6 +534,69 @@ struct TimelineGestureTests {
         #expect(abs(scroll.contentOffset.x - 352) < 0.01)
         coordinator.updatePinch(state: .cancelled, scale: 2, in: scroll)
         #expect(!coordinator.isUserInteracting)
+    }
+
+    @MainActor
+    @Test func pinchPublishesOnlyTheCurrentViewport() async {
+        var zoom: CGFloat = 88
+        var zoomWrites: [CGFloat] = []
+        let viewport = TimelineViewportState()
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.contentSize = CGSize(width: 79_500, height: 5_138)
+        scroll.contentOffset = CGPoint(x: 61_600, y: 250)
+        let zoomBinding = Binding(get: { zoom }, set: { value in
+            zoom = value
+            zoomWrites.append(value)
+        })
+        let coordinator = TimelineScrollContainer(
+            pixelsPerSecond: zoomBinding,
+            currentTime: 700, duration: 900, contentRevision: 0,
+            contentSize: scroll.contentSize, isScrollDisabled: false,
+            viewportState: viewport,
+            virtualizationConfiguration: TimelineVirtualizationConfiguration(
+                centerPadding: 150, trackOriginY: 38, rowStride: 51, trackCount: 100, duration: 900
+            ),
+            onScrubStart: {}, onScrubChanged: { _ in }, onScrubEnd: { _ in },
+            onPullToAddChanged: { _ in }, onPullToAddEnded: { _ in }
+        ) { Color.clear }.makeCoordinator()
+        coordinator.attach(to: scroll)
+        defer { coordinator.stopInteractions(in: scroll) }
+        #expect(viewport.window.trackRange == 1..<12)
+        var windows: [TimelineViewportWindow] = []
+        let observation = viewport.$window.dropFirst().sink { windows.append($0) }
+        defer { observation.cancel() }
+
+        coordinator.updatePinch(state: .began, scale: 1, in: scroll)
+        coordinator.updatePinch(state: .changed, scale: 0.5, in: scroll)
+        #expect(scroll.contentOffset.x == 30_800)
+        let zoomedOutWindow = viewport.window
+        let zoomedOutHalfDuration: Double = 150 / 44
+        let zoomedOutVisibleRange = (700 - zoomedOutHalfDuration)...(700 + zoomedOutHalfDuration)
+        #expect(zoomedOutWindow.trackRange == 4..<9)
+        #expect(zoomedOutWindow.contains(timeRange: zoomedOutVisibleRange))
+        coordinator.isUpdatingUIView = true
+        coordinator.updateViewport(in: scroll, force: true)
+        coordinator.isUpdatingUIView = false
+        coordinator.updatePinch(state: .changed, scale: 4, in: scroll)
+        let zoomedInWindow = viewport.window
+        let zoomedInHalfDuration: Double = 150 / 280
+        let zoomedInVisibleRange = (700 - zoomedInHalfDuration)...(700 + zoomedInHalfDuration)
+        #expect(zoomedInWindow.trackRange == 4..<9)
+        #expect(zoomedInWindow.contains(timeRange: zoomedInVisibleRange))
+        #expect(zoomedOutWindow.timeRange.lowerBound < zoomedInWindow.timeRange.lowerBound)
+        coordinator.updatePinch(state: .changed, scale: 5, in: scroll)
+        coordinator.updatePinch(state: .ended, scale: 5, in: scroll)
+        #expect(scroll.contentOffset == CGPoint(x: 196_000, y: 250))
+        #expect(zoomWrites == [44, 280])
+        let finalWindow = viewport.window
+        #expect(finalWindow.trackRange == 1..<12)
+        #expect(finalWindow.contains(timeRange: zoomedInWindow.timeRange))
+
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+        #expect(viewport.window == finalWindow)
+        #expect(windows == [zoomedOutWindow, zoomedInWindow, finalWindow])
     }
 
     @MainActor

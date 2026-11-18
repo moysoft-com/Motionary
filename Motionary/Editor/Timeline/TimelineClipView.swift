@@ -17,6 +17,7 @@ struct TimelineTrimPreview {
 }
 
 struct TimelineItemBlock: View {
+    static let impactHitWidth: CGFloat = 30
     let item: TimelineItem
     let media: ClipMediaDescriptor?
     let keyframeTimes: [Double]
@@ -52,65 +53,77 @@ struct TimelineItemBlock: View {
     @State private var lastSnapFeedbackKey: String?
     @State private var lastSnapFeedbackAt: Date = .distantPast
 
+    private let innerOutline = Color.black.opacity(0.42)
+
     var body: some View {
         let previewItem = displayedItem
         let mediaClip = trimBaseline?.legacyClip() ?? cachedMediaClip ?? previewItem.legacyClip()
         let mediaSampleWidth = trimBaseline.map {
-            CGFloat(timelineDisplayDuration(for: $0)) * pixelsPerSecond
+            CGFloat($0.placementDuration) * pixelsPerSecond
         }
         let mediaSampleOffsetX =
             trimBaseline.map {
                 CGFloat($0.timelineStart - previewItem.timelineStart) * pixelsPerSecond
             } ?? 0
-        let displayDuration = timelineDisplayDuration(for: previewItem)
-        let displayWidth = max(CGFloat(displayDuration) * pixelsPerSecond, 6)
+        let displayDuration = previewItem.placementDuration
+        let displayWidth = previewItem.isHapticImpact ? Self.impactHitWidth : max(CGFloat(displayDuration) * pixelsPerSecond, 6)
         let displayOffsetX =
             isDragSourceHidden ? 0 : CGFloat(previewItem.timelineStart - item.timelineStart) * pixelsPerSecond
         let isEditing = trimBaseline != nil
         let visualOpacity = isDragSourceHidden ? 0 : (isDragGhost ? 0.58 : 1)
         let selectionExtension: CGFloat = 9
+        let clipShape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
         ZStack {
-            if isSelected && !isDragSourceHidden && !isDragGhost {
-                RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
-                    .fill(MotionaryTheme.selected)
-                    .frame(width: displayWidth + selectionExtension * 2, height: height + 4)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
-                            .stroke(MotionaryTheme.selected, lineWidth: 2)
-                    }
+            if previewItem.isHapticImpact {
+                impactMarker
+                    .opacity(visualOpacity)
                     .allowsHitTesting(false)
-                    .zIndex(0)
-            }
+            } else {
+                if isSelected && !isDragSourceHidden && !isDragGhost {
+                    RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
+                        .fill(MotionaryTheme.selected)
+                        .frame(width: displayWidth + selectionExtension * 2, height: height + 4)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: cornerRadius + 1, style: .continuous)
+                                .stroke(MotionaryTheme.selected, lineWidth: 2)
+                        }
+                        .allowsHitTesting(false)
+                        .zIndex(0)
+                }
 
-            TimelineItemVisualFill(
-                item: previewItem,
-                media: media,
-                mediaClip: mediaClip,
-                width: displayWidth,
-                height: height,
-                pixelsPerSecond: pixelsPerSecond,
-                sampleWidth: mediaSampleWidth,
-                sampleOffsetX: mediaSampleOffsetX,
-                visibleTimelineRange: visibleTimelineRange
-            )
-            .frame(width: displayWidth, height: height)
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .foregroundStyle(Color.black.opacity(0.88))
-            .background {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(timelineItemTint(for: previewItem))
+                TimelineItemVisualFill(
+                    item: previewItem,
+                    media: media,
+                    mediaClip: mediaClip,
+                    width: displayWidth,
+                    height: height,
+                    pixelsPerSecond: pixelsPerSecond,
+                    sampleWidth: mediaSampleWidth,
+                    sampleOffsetX: mediaSampleOffsetX,
+                    visibleTimelineRange: visibleTimelineRange
+                )
+                .frame(width: displayWidth, height: height)
+                .foregroundStyle(Color.black.opacity(0.88))
+                .background(timelineItemTint(for: previewItem))
+                .overlay {
+                    TimelineClipEdgeShade(cornerRadius: cornerRadius)
+                        .fill(innerOutline, style: FillStyle(eoFill: true))
+                        .allowsHitTesting(false)
+                }
+                .compositingGroup()
+                .clipShape(clipShape)
+                .overlay {
+                    if isSelected && !isDragSourceHidden && isDragGhost {
+                        clipShape
+                            .stroke(MotionaryTheme.selected, lineWidth: 2)
+                            .padding(-1)
+                    }
+                }
+                .opacity(visualOpacity)
+                .shadow(color: .black.opacity(isDragGhost ? 0.24 : 0), radius: 10, y: 4)
+                .zIndex(1)
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(
-                        isSelected && !isDragSourceHidden && isDragGhost ? MotionaryTheme.selected : .clear,
-                        lineWidth: 2
-                    )
-            }
-            .opacity(visualOpacity)
-            .shadow(color: .black.opacity(isDragGhost ? 0.24 : 0), radius: 10, y: 4)
-            .zIndex(1)
 
             if !isDragSourceHidden && !isDragGhost {
                 if case .media(let mediaItem) = previewItem,
@@ -178,20 +191,20 @@ struct TimelineItemBlock: View {
         }
         .frame(width: displayWidth, height: height)
         .overlay(alignment: .leading) {
-            if isSelected && allowsClipInteraction && !isDragSourceHidden {
+            if isSelected && allowsClipInteraction && !isDragSourceHidden && !previewItem.isHapticImpact {
                 TrimHandle(edge: .leading, height: height, visibleWidth: selectionExtension)
                     .overlay { trimInteraction(isStart: true) }
                     .offset(x: -(TrimHandle.hitWidth + selectionExtension) * 0.5)
             }
         }
         .overlay(alignment: .trailing) {
-            if isSelected && allowsClipInteraction && !isDragSourceHidden {
+            if isSelected && allowsClipInteraction && !isDragSourceHidden && !previewItem.isHapticImpact {
                 TrimHandle(edge: .trailing, height: height, visibleWidth: selectionExtension)
                     .overlay { trimInteraction(isStart: false) }
                     .offset(x: (TrimHandle.hitWidth + selectionExtension) * 0.5)
             }
         }
-        .offset(x: displayOffsetX)
+        .offset(x: displayOffsetX - (previewItem.isHapticImpact ? displayWidth / 2 : 0))
         .zIndex(isDragGhost ? 120 : (isSelected ? 100 : (isEditing ? 80 : 0)))
         .transaction { transaction in
             if isEditing || isDragSourceHidden || isDragGhost {
@@ -207,23 +220,36 @@ struct TimelineItemBlock: View {
         }
     }
 
+    private var impactMarker: some View {
+        ZStack {
+            Capsule()
+                .fill(MotionaryTheme.haptics)
+                .overlay {
+                    Capsule().strokeBorder(innerOutline, lineWidth: 0.5)
+                }
+                .frame(width: 2, height: max(18, height - 4))
+            Image(systemName: "bolt.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 18, height: 18)
+                .background(MotionaryTheme.haptics, in: Circle())
+                .overlay {
+                    Circle().strokeBorder(innerOutline, lineWidth: 1)
+                    if isSelected {
+                        Circle().strokeBorder(MotionaryTheme.selected, lineWidth: 2)
+                            .padding(-2)
+                    }
+                }
+        }
+        .accessibilityHidden(true)
+    }
+
     private var displayedItem: TimelineItem {
         trimPreview?.item ?? item
     }
 
     private func displayedKeyframeTimes(for item: TimelineItem) -> [Double] {
         trimBaseline == nil ? keyframeTimes : item.allKeyframeTimes
-    }
-
-    private func timelineDisplayDuration(for item: TimelineItem) -> Double {
-        switch item {
-        case .media(let mediaItem): mediaItem.timelineDuration
-        case .shape(let shapeItem): shapeItem.sourceRange.duration
-        case .text(let textItem): textItem.duration
-        case .caption(let caption): caption.duration
-        case .adjustment(let adjustment): adjustment.duration
-        case .compound(let compound): compound.duration
-        }
     }
 
     private func trimInteraction(isStart: Bool) -> some View {
@@ -489,8 +515,14 @@ struct TimelineItemVisualFill: View {
                     sampleOffsetX: sampleOffsetX,
                     visibleTimelineRange: visibleTimelineRange
                 )
+                .overlay {
+                    TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
+                }
             } else {
                 Color.orange
+                    .overlay {
+                        TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
+                    }
             }
         case .media(let mediaItem):
             if let mediaClip, let media {
@@ -508,8 +540,30 @@ struct TimelineItemVisualFill: View {
             } else {
                 TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
             }
+        case .haptic(let haptic):
+            TimelineHapticWaveformView(
+                item: haptic, pixelsPerSecond: pixelsPerSecond, visibleTimelineRange: visibleTimelineRange
+            )
+            .padding(.vertical, 5)
+            .accessibilityHidden(true)
         case .text, .caption, .adjustment, .compound:
             TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
+        }
+    }
+}
+
+private struct TimelineClipEdgeShade: Shape {
+    let cornerRadius: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            // Extend the shade past the mask so the final clip defines the only outer edge.
+            path.addRect(rect.insetBy(dx: -2, dy: -2))
+            path.addPath(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .inset(by: 1)
+                    .path(in: rect)
+            )
         }
     }
 }
@@ -528,6 +582,8 @@ func timelineItemTint(for item: TimelineItem) -> Color {
         Color(red: 0.38, green: 0.82, blue: 0.64)
     case .compound:
         Color(red: 0.48, green: 0.70, blue: 0.96)
+    case .haptic:
+        MotionaryTheme.haptics
     }
 }
 
@@ -539,6 +595,7 @@ private func timelineItemIcon(for item: TimelineItem) -> String {
     case .caption: "captions.bubble"
     case .adjustment: "slider.horizontal.3"
     case .compound: "rectangle.stack"
+    case .haptic: "waveform.path"
     }
 }
 
@@ -550,6 +607,7 @@ private func timelineItemTitle(for item: TimelineItem) -> String {
     case .caption(let caption): timelineFirstLine(of: caption.text)
     case .adjustment(let adjustment): adjustment.name
     case .compound(let compound): compound.name
+    case .haptic(let haptic): haptic.style == .impact ? "Impact" : "Haptic"
     }
 }
 
@@ -580,8 +638,6 @@ struct TimelineClipFill: View {
     var body: some View {
         let thumbnailWidth = timelineThumbnailWidth
         let secondsPerThumbnail = Double(thumbnailWidth / thumbnailSamplingPixelsPerSecond)
-        let waveformCount = quantizedWaveformSampleCount
-
         ZStack {
             if clip.shape != nil {
                 Color.orange
@@ -593,6 +649,16 @@ struct TimelineClipFill: View {
                     .offset(x: sampleOffsetX)
                     .frame(width: width, height: height, alignment: .leading)
                     .clipped()
+                    .task(id: waveformTaskID) {
+                        let samples = await TimelineAudioWaveformLoader.samples(
+                            for: clip,
+                            media: media,
+                            speedMap: speedMap,
+                            targetCount: quantizedWaveformSampleCount
+                        )
+                        guard !Task.isCancelled, !samples.isEmpty else { return }
+                        waveformSamples = samples
+                    }
             } else {
                 ZStack(alignment: .leading) {
                     ForEach(visibleThumbnailIndices, id: \.self) { index in
@@ -614,19 +680,6 @@ struct TimelineClipFill: View {
                 .clipped()
             }
 
-        }
-        .task(id: taskID) {
-            let requestID = taskID
-            if clip.mediaType == .audio {
-                let samples = await TimelineAudioWaveformLoader.samples(
-                    for: clip,
-                    media: media,
-                    speedMap: speedMap,
-                    targetCount: waveformCount
-                )
-                guard !Task.isCancelled, requestID == taskID else { return }
-                waveformSamples = samples
-            }
         }
     }
 
@@ -673,13 +726,10 @@ struct TimelineClipFill: View {
         return first..<max(first, end)
     }
 
-    private var taskID: String {
+    private var waveformTaskID: String {
         [
             clip.id.uuidString,
-            "\(Int(ceil(width / max(timelineThumbnailWidth, 1))))",
-            "\(Int(timelineThumbnailWidth.rounded()))",
             "\(quantizedWaveformSampleCount)",
-            "\(Int(displayScale.rounded()))",
             media.mediaID.rawValue.uuidString,
             "\(speedMap.topologySignature)",
             String(format: "%.3f", clip.sourceRange.start),
@@ -725,7 +775,7 @@ private struct TimelinePlayheadKeyframes: View {
             onMove: context.itemID == item.id ? { section, from, to in
                 context.viewModel?.moveTimelineKeyframes(itemID: item.id, section: section, effectID: context.activeEffectID, from: from, to: to, interactive: true) ?? false
             } : nil,
-            onEndMove: { context.viewModel?.finishInteractiveEdit() }
+            onEndMove: { context.viewModel?.finishInteractiveEdit(rebuild: context.activeSection != .haptics) }
         )
     }
 }

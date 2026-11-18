@@ -344,7 +344,7 @@ extension EditorViewModel {
                     ? referenceRange.start / media.speedMap.constantSpeed : availableBefore,
                 availableBefore
             )
-        case .shape:
+        case .shape, .haptic:
             maxBackward = -min(referenceRange.start, availableBefore)
         default:
             maxBackward = -availableBefore
@@ -426,7 +426,7 @@ extension EditorViewModel {
                     ? referenceRange.start / media.speedMap.constantSpeed : availableBefore,
                 availableBefore
             )
-        case .shape:
+        case .shape, .haptic:
             maxBackward = -min(referenceRange.start, availableBefore)
         default:
             maxBackward = -availableBefore
@@ -590,6 +590,8 @@ extension EditorViewModel {
             return sourceDuration / media.speedMap.speed(at: range.duration)
         case .shape, .text, .caption, .adjustment, .compound:
             return Double.greatestFiniteMagnitude / 4
+        case .haptic(let item):
+            return item.style == .impact ? 0 : Double.greatestFiniteMagnitude / 4
         }
     }
 

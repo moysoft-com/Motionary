@@ -566,7 +566,7 @@ struct MaskWorkspaceView: View {
                     renderScale: 1,
                     at: max(playbackState.currentTime - text.timelineStart, 0)
                 ).layerSize
-        case .caption, .adjustment, .compound:
+        case .caption, .adjustment, .compound, .haptic:
             size = canvasSize
         }
         return EditorUnitSpace(size: size)
@@ -696,6 +696,6 @@ private func supportsMask(_ item: TimelineItem) -> Bool {
     switch item {
     case .media(let item): item.mediaType != .audio
     case .shape, .text, .adjustment: true
-    case .caption, .compound: false
+    case .caption, .compound, .haptic: false
     }
 }

@@ -124,7 +124,7 @@ extension EditorViewModel {
             return visualDuration
         case .shape, .text:
             return visibleInsertionTime(at: currentTime)
-        case .audio:
+        case .audio, .haptic:
             return min(currentTime, max(project.duration, currentTime))
         }
     }
@@ -162,6 +162,7 @@ extension EditorViewModel {
         persistChanges: Bool = true,
         touchUpdatedAt: Bool = true,
         refreshTimeline: Bool = true,
+        liveTimelineContent: Bool = false,
         _ mutation: (inout EditorProject) -> Void
     ) {
         if !rebuild, !recordHistory, !persistChanges, !touchUpdatedAt {
@@ -211,7 +212,7 @@ extension EditorViewModel {
                 }
             }
             if refreshTimeline {
-                if isTransientInteractiveEdit {
+                if isTransientInteractiveEdit && !liveTimelineContent {
                     deferTimelineContentInvalidation(transientScope)
                 } else {
                     invalidateTimelineContent(transientScope)
@@ -313,6 +314,7 @@ extension EditorViewModel {
             finishInteractiveEdit(rebuild: false, delayRebuild: false)
             isTransientInteractiveEdit = false
         }
+        let historyBaseline = recordHistory ? project : nil
         let previousTracks = project.tracks
         let previousSelectedTrackID = selectedTrackID
         if !isTransientInteractiveEdit {
@@ -366,7 +368,7 @@ extension EditorViewModel {
                 invalidateTimelineContent(scope)
             }
         }
-        if recordHistory {
+        if let historyBaseline, historyBaseline != project {
             undoStack.append(command as? AnyEditorCommand ?? AnyEditorCommand(command))
             if undoStack.count > 80 {
                 undoStack.removeFirst()

@@ -24,6 +24,8 @@ enum MotionaryTheme {
     static let accent = Color(red: 0.44, green: 0.84, blue: 1)
     static let foregroundOnAccent = Color.black
     static let audio = Color(red: 0.64, green: 0.38, blue: 1)
+    static let haptics = Color(red: 0.78, green: 0.24, blue: 0.26)
+    static let hapticsWaveform = Color(red: 0.32, green: 0.08, blue: 0.11)
     static let video = Color(red: 0.44, green: 0.84, blue: 1)
     static let selected = Color.primary
 }
@@ -111,6 +113,15 @@ extension View {
     func motionaryGlassEffect<S: Shape>(in shape: S) -> some View {
         if #available(iOS 26.0, *) {
             glassEffect(.regular, in: shape)
+        } else {
+            background(.regularMaterial, in: shape)
+        }
+    }
+    
+    @ViewBuilder
+    func motionaryInteractiveGlassEffect<S: Shape>(in shape: S) -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.regular.interactive(), in: shape)
         } else {
             background(.regularMaterial, in: shape)
         }

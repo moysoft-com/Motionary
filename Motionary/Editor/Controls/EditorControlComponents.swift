@@ -15,6 +15,7 @@ struct CoreToolButton: View {
             action()
         } label: {
             CoreToolButtonContent(systemName: systemName, title: title, isProminent: isSelected)
+                .contentShape(.interaction, RoundedRectangle(cornerRadius: MotionaryDesign.Radius.button))
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)

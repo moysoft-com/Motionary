@@ -233,6 +233,7 @@ struct LivePreviewRenderSnapshot: Sendable {
     let overrides: [UUID: LivePreviewClipOverride]
     let usesInteractiveQuality: Bool
     let isScrubbing: Bool
+    let screenRecordingEffectDimension: Int?
     let revision: UInt64
 
     func override(for clipID: UUID) -> LivePreviewClipOverride? {
@@ -245,6 +246,7 @@ final class LivePreviewRenderState: @unchecked Sendable {
     private var overrides: [UUID: LivePreviewClipOverride] = [:]
     private var forcesInteractiveQuality = false
     private var isScrubbing = false
+    private var screenRecordingEffectDimension: Int?
     private var revision: UInt64 = 0
     private let composedFrames = PreviewFrameCache()
     private var pausedFrameRenderer: ((
@@ -532,6 +534,14 @@ final class LivePreviewRenderState: @unchecked Sendable {
         lock.unlock()
     }
 
+    func setScreenRecordingEffectDimension(_ dimension: Int?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard screenRecordingEffectDimension != dimension else { return }
+        screenRecordingEffectDimension = dimension
+        advanceRevision()
+    }
+
     var usesInteractiveQuality: Bool {
         lock.lock()
         let isInteractive = forcesInteractiveQuality
@@ -545,6 +555,7 @@ final class LivePreviewRenderState: @unchecked Sendable {
             overrides: overrides,
             usesInteractiveQuality: forcesInteractiveQuality,
             isScrubbing: isScrubbing,
+            screenRecordingEffectDimension: screenRecordingEffectDimension,
             revision: revision
         )
         lock.unlock()
@@ -636,12 +647,24 @@ struct FrameRenderPlan: @unchecked Sendable {
     let livePreviewState: LivePreviewRenderState?
     let livePreviewSnapshot: LivePreviewRenderSnapshot?
 
-    var scrubEffectScale: CGFloat {
-        guard quality != .export, livePreviewSnapshot?.isScrubbing == true else { return 1 }
-        // Effect stacks normally run in authored pixels, even on a small
-        // preview. Limit their scratch surfaces while the playhead is moving.
+    private var previewEffectScale: CGFloat {
+        guard quality != .export, let limit = livePreviewSnapshot?.screenRecordingEffectDimension else { return 1 }
+        return scaleForEffectDimension(CGFloat(limit))
+    }
+
+    var effectScale: CGFloat {
+        guard quality != .export, livePreviewSnapshot?.isScrubbing == true else { return previewEffectScale }
+        return min(previewEffectScale, scaleForEffectDimension(720))
+    }
+
+    // Recording-quality playback frames are valid until the recording budget changes.
+    var isScrubFrame: Bool {
+        effectScale < previewEffectScale
+    }
+
+    private func scaleForEffectDimension(_ limit: CGFloat) -> CGFloat {
         let authoredDimension = max(renderSize.width, renderSize.height) / max(renderScale, 0.000_001)
-        return min(1, 720 / authoredDimension)
+        return min(1, limit / authoredDimension)
     }
 
     init(

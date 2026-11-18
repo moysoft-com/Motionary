@@ -214,7 +214,7 @@ struct VideoExportService {
                     effectStack = textItem.visuals.effectStack
                 case .adjustment(let adjustmentItem) where adjustmentItem.duration > 0:
                     effectStack = adjustmentItem.visuals.effectStack
-                case .media, .shape, .text, .caption, .adjustment, .compound:
+                case .media, .shape, .text, .caption, .adjustment, .compound, .haptic:
                     continue
                 }
                 try EffectRenderRegistry.shared.validate(effectStack)

@@ -154,10 +154,12 @@ struct AdjustmentEditorTestScene: View {
         let shape = ShapeTimelineItem(name: "Rectangle", mediaID: MediaID(),
             shape: ClipShape(kind: .rectangle, color: .white, width: 400, height: 400),
             timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
-        content = ProjectContent(editorProject: EditorProject(title: "Adjustment inspection", tracks: [
-            TimelineTrack(name: "Adjustment", kind: .visual, items: [.adjustment(adjustment)]),
-            TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)])
-        ]))
+        var tracks = [TimelineTrack(name: "Adjustment", kind: .visual, items: [.adjustment(adjustment)])]
+        if ProcessInfo.processInfo.arguments.contains("--scroll-workspace-tests") {
+            tracks += (1...7).map { TimelineTrack(name: "Layer \($0)", kind: .visual) }
+        }
+        tracks.append(TimelineTrack(name: "Shape", kind: .shape, items: [.shape(shape)]))
+        content = ProjectContent(editorProject: EditorProject(title: "Adjustment inspection", tracks: tracks))
     }
 
     var body: some View {

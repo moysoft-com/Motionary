@@ -208,6 +208,12 @@ struct TimelineTracksContent: View {
         }
     }
 
+    private var hapticVisibleRange: ClosedRange<Double> {
+        let range = viewportState.window.timeRange
+        let margin = Double(TimelineItemBlock.impactHitWidth / 2 / max(pixelsPerSecond, 1))
+        return (range.lowerBound - margin)...(range.upperBound + margin)
+    }
+
     private func trackRow(track: TimelineTrack, index: Int) -> some View {
         let retainedItemIDs = Set(
             [
@@ -220,7 +226,7 @@ struct TimelineTracksContent: View {
             trackSnapshot: snapshot.trackSnapshotsByID[track.id],
             items: snapshot.items(
                 in: track.id,
-                intersecting: viewportState.window.timeRange,
+                intersecting: track.kind == .haptic ? hapticVisibleRange : viewportState.window.timeRange,
                 retaining: retainedItemIDs
             ),
             trackIndex: index,
@@ -239,6 +245,7 @@ struct TimelineTracksContent: View {
             rowStride: trackHeight + rowSpacing,
             onSelectTrack: { viewModel.selectClip(nil, trackID: track.id) },
             onTapEmptySpace: { viewModel.deselectTimeline() },
+            onToggleTrackMuted: { viewModel.toggleLayerMuted(track.id) },
             onDeleteTrack: { viewModel.deleteLayer(track.id) },
             onCopyTrack: { viewModel.copyLayer(track.id) },
             onCutTrack: { viewModel.cutLayer(track.id) },
@@ -396,8 +403,22 @@ struct TimelineTracksContent: View {
         }
         guard let drag = activeClipDrag else { return }
         if commit {
-            _ = viewModel.placeClip(drag.clipID, using: drag.resolvedPlacement, interactive: true)
+            let placement = viewModel.placeClip(drag.clipID, using: drag.resolvedPlacement, interactive: true)
+            let edgeScrollTime = abs(clipDragScrollOffset.width) > 0.01
+                ? Double(scrollPresentationState.horizontalOffset / max(pixelsPerSecond, 1))
+                : nil
+            if let edgeScrollTime {
+                // The centered playhead and the native scroll view must agree
+                // before the drag releases control back to timeline layout.
+                viewModel.updateCurrentTime(edgeScrollTime)
+            }
             viewModel.finishInteractiveEdit()
+            if let edgeScrollTime,
+                placement == nil || (placement?.start == drag.startTimelineStart
+                    && placement?.trackIndex == drag.sourceTrackIndex)
+            {
+                viewModel.seek(to: edgeScrollTime)
+            }
             viewModel.selectClip(drag.clipID)
             EditorHaptics.editCommit()
         } else {

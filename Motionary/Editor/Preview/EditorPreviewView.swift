@@ -49,11 +49,13 @@ struct CorePreviewSection: View {
                     .clipped()
                     .position(x: canvasRect.midX, y: canvasRect.midY)
 
-                    PreviewTransformCanvas(
-                        viewModel: viewModel,
-                        canvasFrame: canvasRect
-                    )
-                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    if !viewModel.screenRecordingPreview.hidesCanvasOverlays {
+                        PreviewTransformCanvas(
+                            viewModel: viewModel,
+                            canvasFrame: canvasRect
+                        )
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                    }
 
                     Rectangle()
                         .stroke(.gray.opacity(0.3), lineWidth: 0.5)

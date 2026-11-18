@@ -40,7 +40,7 @@ extension TextTimelineItem {
                 targets += [.textBackgroundPadding, .textBackgroundCornerRadius]
             }
             return targets
-        case .shape, .adjust, .effects, .audio, .speed:
+        case .shape, .adjust, .effects, .audio, .haptics, .speed:
             return []
         }
     }
@@ -86,7 +86,7 @@ extension TextTimelineItem {
             .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
             .textStyle
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectMix, .effectParameter, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume, .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength:
             .transform
         }
     }
@@ -156,7 +156,7 @@ extension TextTimelineItem {
                 style.background?.cornerRadius ?? propertyAnimations.backgroundCornerRadius.baseValue
             )
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectMix, .effectParameter, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume, .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength:
             nil
         }
     }
@@ -235,7 +235,7 @@ extension TextTimelineItem {
                 style.background?.cornerRadius = property.baseValue
             }
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectMix, .effectParameter, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume, .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength:
             break
         }
     }
@@ -426,7 +426,7 @@ extension TextTimelineItem {
         case .textBackgroundCornerRadius:
             textMetadata("Background Corners", "rectangle.roundedtop", .textStyle, 0...120, 1, 0)
         case .shapeWidth, .shapeHeight, .shapeCornerRadius, .brightness, .contrast,
-            .saturation, .exposure, .effectMix, .effectParameter, .volume:
+            .saturation, .exposure, .effectMix, .effectParameter, .volume, .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength:
             textMetadata("Property", "slider.horizontal.3", .textStyle, -1...1, 0.01, 2)
         }
     }
@@ -499,6 +499,8 @@ extension TimelineItem {
             visualEditingClip()?.keyframeTargets(in: section) ?? []
         case .text(let item):
             item.keyframeTargets(in: section)
+        case .haptic(let item):
+            section == .haptics ? item.keyframeTargets : []
         case .caption, .compound:
             []
         }
@@ -514,6 +516,8 @@ extension TimelineItem {
             )
         case .text(let item):
             return visibleKeyframeTimes(item.keyframeTimes(in: section, effectID: effectID))
+        case .haptic(let item):
+            return section == .haptics ? item.keyframeTimes : []
         case .caption, .compound:
             return []
         }
@@ -535,6 +539,8 @@ extension TimelineItem {
             return visibleKeyframeTimes(visualKeyframeTimes(item.visuals))
         case .caption:
             return []
+        case .haptic(let item):
+            return item.keyframeTimes
         }
     }
 

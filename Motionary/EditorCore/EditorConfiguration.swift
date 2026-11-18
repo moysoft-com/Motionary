@@ -65,6 +65,10 @@ enum KeyframeTarget: Hashable, Identifiable {
     case effectMix(UUID)
     case effectParameter(UUID, EffectParameterID, EffectValueComponent)
     case volume
+    case hapticIntensity
+    case hapticSharpness
+    case hapticRepeat
+    case hapticLength
     case textFontSize
     case textLetterSpacing
     case textLineSpacing
@@ -100,6 +104,10 @@ enum KeyframeTarget: Hashable, Identifiable {
         case .effectParameter(let id, let parameterID, let component):
             "effect.\(id.uuidString).\(parameterID.rawValue).\(component.rawValue)"
         case .volume: "audio.volume"
+        case .hapticIntensity: "haptics.intensity"
+        case .hapticSharpness: "haptics.sharpness"
+        case .hapticRepeat: "haptics.repeat"
+        case .hapticLength: "haptics.length"
         case .textFontSize: "text.type.fontSize"
         case .textLetterSpacing: "text.type.letterSpacing"
         case .textLineSpacing: "text.type.lineSpacing"
@@ -124,6 +132,7 @@ enum KeyframeSection: String, CaseIterable, Identifiable {
     case adjust = "Adjust"
     case effects = "Effects"
     case audio = "Audio"
+    case haptics = "Haptics"
     case speed = "Speed"
     case textType = "Type"
     case textStyle = "Style"
@@ -137,6 +146,7 @@ enum KeyframePropertyGroup: String, CaseIterable, Identifiable {
     case adjustments = "Adjustments"
     case effects = "Effects"
     case audio = "Audio"
+    case haptics = "Haptics"
     case textType = "Type"
     case textStyle = "Style"
 
@@ -151,15 +161,19 @@ struct KeyframePropertyMetadata {
     let step: Double
     let fractionDigits: Int
     var isAngle = false
+    var usesSeconds = false
+    var zeroLabel: String?
 
     func formattedValue(_ value: Double) -> String {
         if isAngle {
             return AngleScrubberFormat.string(for: value)
         }
+        if let zeroLabel, value == 0 { return zeroLabel }
+        if usesSeconds { return value.formatted(.number.precision(.fractionLength(fractionDigits))) + " s" }
         switch group {
         case .shape:
             return "\(Int(value.rounded())) px"
-        case .audio:
+        case .audio, .haptics:
             return "\(Int((value * 100).rounded()))%"
         default:
             return value.formatted(

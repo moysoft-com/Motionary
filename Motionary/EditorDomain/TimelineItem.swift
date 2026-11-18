@@ -314,6 +314,7 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
     case caption(CaptionTimelineItem)
     case adjustment(AdjustmentTimelineItem)
     case compound(CompoundTimelineItem)
+    case haptic(HapticTimelineItem)
 
     var id: UUID {
         switch self {
@@ -323,6 +324,7 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
         case .caption(let item): item.id
         case .adjustment(let item): item.id
         case .compound(let item): item.id
+        case .haptic(let item): item.id
         }
     }
 
@@ -334,7 +336,13 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
         case .caption: .caption
         case .adjustment: .adjustment
         case .compound: .compound
+        case .haptic: .haptic
         }
+    }
+
+    var isHapticImpact: Bool {
+        if case .haptic(let item) = self { return item.style == .impact }
+        return false
     }
 
     var isAdjustmentLayer: Bool {
@@ -351,6 +359,7 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
             case .caption(let item): item.timelineStart
             case .adjustment(let item): item.timelineStart
             case .compound(let item): item.timelineStart
+            case .haptic(let item): item.timelineStart
             }
         }
         set {
@@ -373,6 +382,9 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
             case .compound(var item):
                 item.timelineStart = newValue
                 self = .compound(item)
+            case .haptic(var item):
+                item.timelineStart = newValue
+                self = .haptic(item)
             }
         }
     }
@@ -385,6 +397,7 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
         case .caption(let item): item.timelineEnd
         case .adjustment(let item): item.timelineEnd
         case .compound(let item): item.timelineEnd
+        case .haptic(let item): item.timelineEnd
         }
     }
 
@@ -398,6 +411,8 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
             .text
         case .caption, .adjustment, .compound:
             .visual
+        case .haptic:
+            .haptic
         }
     }
 
@@ -409,6 +424,7 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
         case .caption(let item): item.duration
         case .adjustment(let item): item.duration
         case .compound(let item): item.duration
+        case .haptic(let item): item.style == .impact ? 0 : item.duration
         }
     }
 
@@ -474,7 +490,7 @@ enum TimelineItem: Identifiable, Codable, Equatable, Sendable {
                 volume: item.visuals.volume,
                 shape: item.shape
             )
-        case .text, .caption, .adjustment, .compound:
+        case .text, .caption, .adjustment, .compound, .haptic:
             nil
         }
     }
@@ -513,7 +529,7 @@ extension TimelineItem {
             case .text(let item): item.visuals
             case .adjustment(let item): item.visuals
             case .compound(let item): item.visuals
-            case .caption: nil
+            case .caption, .haptic: nil
             }
         }
         set {
@@ -534,7 +550,7 @@ extension TimelineItem {
             case .compound(var item):
                 item.visuals = newValue
                 self = .compound(item)
-            case .caption:
+            case .caption, .haptic:
                 break
             }
         }
@@ -548,6 +564,7 @@ extension TimelineItem {
         case .caption(let item): TimeRangeValue(start: 0, duration: item.duration)
         case .adjustment(let item): TimeRangeValue(start: 0, duration: item.duration)
         case .compound(let item): TimeRangeValue(start: 0, duration: item.duration)
+        case .haptic(let item): TimeRangeValue(start: item.sourceStart, duration: placementDuration)
         }
     }
 
@@ -714,6 +731,16 @@ extension TimelineItem {
             second.timelineStart = timelineStart + offset
             second.duration = originalDuration - offset
             return (.compound(item), .compound(second))
+        case .haptic(var item):
+            guard item.style != .impact else { return nil }
+            item.envelopeEnd = item.envelopeEnd ?? item.sourceEnd
+            var second = item
+            second.id = UUID()
+            second.timelineStart += offset
+            second.sourceStart += offset
+            second.duration -= offset
+            item.duration = offset
+            return (.haptic(item), .haptic(second))
         }
     }
 
@@ -777,6 +804,14 @@ extension TimelineItem {
             item.timelineStart += delta
             item.duration -= delta
             result = .compound(item)
+        case .haptic(var item):
+            guard item.style != .impact else { return self }
+            item.envelopeEnd = item.envelopeEnd ?? item.sourceEnd
+            let change = min(max(delta, -item.sourceStart), max(0, item.duration - 0.1))
+            item.timelineStart += change
+            item.sourceStart += change
+            item.duration -= change
+            result = .haptic(item)
         }
         return result
     }
@@ -844,6 +879,11 @@ extension TimelineItem {
         case .compound(var item):
             item.duration += delta
             result = .compound(item)
+        case .haptic(var item):
+            guard item.style != .impact else { return self }
+            if delta < 0 { item.envelopeEnd = item.envelopeEnd ?? item.sourceEnd }
+            item.duration = max(item.duration + delta, min(item.duration, 0.1))
+            result = .haptic(item)
         }
         return result
     }
@@ -873,6 +913,9 @@ extension TimelineItem {
             item.id = UUID()
             item.name += " copy"
             self = .compound(item)
+        case .haptic(var item):
+            item.id = UUID()
+            self = .haptic(item)
         }
     }
 
@@ -897,6 +940,8 @@ extension TimelineItem {
             self = .adjustment(try container.decode(AdjustmentTimelineItem.self, forKey: .payload))
         case .compound:
             self = .compound(try container.decode(CompoundTimelineItem.self, forKey: .payload))
+        case .haptic:
+            self = .haptic(try container.decode(HapticTimelineItem.self, forKey: .payload))
         }
     }
 
@@ -915,6 +960,8 @@ extension TimelineItem {
         case .adjustment(let item):
             try container.encode(item, forKey: .payload)
         case .compound(let item):
+            try container.encode(item, forKey: .payload)
+        case .haptic(let item):
             try container.encode(item, forKey: .payload)
         }
     }

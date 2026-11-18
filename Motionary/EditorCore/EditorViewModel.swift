@@ -57,6 +57,7 @@ final class EditorViewModel: ObservableObject {
     var depthPreparationEffectID: UUID?
     var cancelledDepthPreparationID: UUID?
     @Published var player: AVPlayer?
+    let hapticPlayback = HapticPlayback()
     var hasRenderedInitialPreviewFrame = false
     var currentTime: Double {
         get { playbackState.currentTime }
@@ -203,6 +204,7 @@ final class EditorViewModel: ObservableObject {
     var rebuildTask: Task<Void, Never>?
     var previewGeneration = 0
     var previewQuality: PreviewQuality = .balanced
+    @Published var screenRecordingPreview = ScreenRecordingPreviewConfiguration()
     /// Physical preview-surface size in device pixels, published by the preview
     /// view. Preview rendering sizes itself to this surface (never above the
     /// 960 budget) so older devices with small surfaces skip fill rate that
@@ -346,7 +348,7 @@ final class EditorViewModel: ObservableObject {
                         media.mediaType != .audio
                     case .shape, .text:
                         true
-                    case .caption, .adjustment, .compound:
+                    case .caption, .adjustment, .compound, .haptic:
                         false
                     }
                 }

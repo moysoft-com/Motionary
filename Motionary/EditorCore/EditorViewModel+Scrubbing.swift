@@ -23,9 +23,16 @@ extension EditorViewModel {
         // A stale decoder graph cannot answer source-time requests after a
         // split, trim or ripple edit. The rebuild resumes this gesture at its
         // latest position as soon as the new graph is installed.
-        guard !pendingPreviewInvalidation.contains(.compositionTopology) else { return }
-        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
+        guard !screenRecordingPreview.freezesScrubPreview,
+            !pendingPreviewInvalidation.contains(.compositionTopology) else { return }
         let target = currentScrubPresentationTime()
+        if screenRecordingPreview.scrubFrameRateLimit != nil {
+            // During a cadence experiment, cached frames use the same pacing as new renders.
+            pendingScrubSeekTime = target
+            scheduleLatestScrubSeek()
+            return
+        }
+        let frameDuration = 1 / Double(max(project.renderSettings.frameRate, 1))
         if let frame = renderService.livePreviewState.cachedFrame(at: target,
                                                                   sessionID: previewRenderSessionID) {
             pendingScrubSeekTime = nil
@@ -103,13 +110,19 @@ extension EditorViewModel {
     }
 
     private func issueLatestScrubSeek() {
-        guard let target = pendingScrubSeekTime else { return }
-        guard let player else { return }
+        guard !screenRecordingPreview.freezesScrubPreview,
+            !pendingPreviewInvalidation.contains(.compositionTopology),
+            let target = pendingScrubSeekTime, let player else { return }
         pendingScrubSeekTime = nil
-        isScrubSeekInFlight = true
-
         lastScrubUIUpdate = CFAbsoluteTimeGetCurrent()
         lastIssuedScrubSeekTime = target
+        if screenRecordingPreview.scrubFrameRateLimit != nil,
+            let cached = renderService.livePreviewState.cachedFrame(at: target, sessionID: previewRenderSessionID)
+        {
+            livePreviewPresentation.setFrame(cached, at: target)
+            return
+        }
+        isScrubSeekInFlight = true
         scrubSeekGeneration &+= 1
         let seekGeneration = scrubSeekGeneration
         let sessionGeneration = scrubSessionGeneration
@@ -128,11 +141,11 @@ extension EditorViewModel {
             at: target, sessionID: previewRenderSessionID,
             completion: { [weak self, weak player] frame in
                 Task { @MainActor in
+                    os_signpost(.end, log: TimelinePerformanceSignposts.log,
+                                name: "Scrub Seek", signpostID: signpostID)
                     guard let self, let player, self.player === player,
                         self.scrubSeekGeneration == seekGeneration,
                         self.scrubSessionGeneration == sessionGeneration else { return }
-                    os_signpost(.end, log: TimelinePerformanceSignposts.log,
-                                name: "Scrub Seek", signpostID: signpostID)
                     self.isScrubSeekInFlight = false
                     guard self.isScrubbing else { return }
                     if let frame {
@@ -191,6 +204,7 @@ extension EditorViewModel {
 
     func presentScrubFrame(_ frame: CVPixelBuffer, at time: Double) {
         guard !pendingPreviewInvalidation.contains(.compositionTopology) else { return }
+        guard !screenRecordingPreview.freezesScrubPreview || scrubIsFinishing else { return }
         let target = currentScrubPresentationTime()
         if let exact = renderService.livePreviewState.cachedFrame(at: target, sessionID: previewRenderSessionID) {
             livePreviewPresentation.setFrame(exact, at: target)
@@ -212,9 +226,11 @@ extension EditorViewModel {
 
     private func scrubSeekMinimumInterval() -> CFTimeInterval {
         // Pace new decoder work to the actual display, with a single seek in
-        // flight. Cached frames bypass this path entirely. Layer-count guesses
+        // flight. Cached frames normally bypass this path. Layer-count guesses
         // must not force a capable device down to 24/30/45 Hz.
-        1 / Double(max(livePreviewPresentation.maximumFramesPerSecond, 1))
+        let native = livePreviewPresentation.maximumFramesPerSecond
+        let limit = screenRecordingPreview.scrubFrameRateLimit ?? native
+        return 1 / Double(max(min(native, limit), 1))
     }
 
 }

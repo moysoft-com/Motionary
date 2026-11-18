@@ -33,17 +33,16 @@ struct TimelineThumbnailTile: View {
         .frame(width: tileWidth, height: height)
         .clipped()
         .task(id: taskID) {
-            if let loaded = await loadImage() {
+            let retryDelays: [Duration] = [.zero, .milliseconds(150), .milliseconds(450), .seconds(1)]
+            for delay in retryDelays {
+                if delay > .zero {
+                    try? await Task.sleep(for: delay)
+                }
+                guard !Task.isCancelled else { return }
+                guard let loaded = await loadImage() else { continue }
                 guard !Task.isCancelled else { return }
                 image = loaded
                 return
-            }
-
-            try? await Task.sleep(for: .milliseconds(220))
-            guard !Task.isCancelled else { return }
-            if let loaded = await loadImage() {
-                guard !Task.isCancelled else { return }
-                image = loaded
             }
         }
     }
@@ -70,6 +69,7 @@ struct TimelineThumbnailTile: View {
             "\(Int((displayScale * 100).rounded()))",
             String(format: "%.6f", secondsPerTile),
             media.mediaID.rawValue.uuidString,
+            media.url.absoluteString,
             clip.mediaType.rawValue,
             "\(speedMap.topologySignature)",
             String(format: "%.3f", clip.sourceRange.start),
@@ -269,8 +269,8 @@ actor TimelineThumbnailTileCache {
     }
 
     func trimForMemoryPressure() {
-        inFlight.values.forEach { $0.task.cancel() }
-        inFlight.removeAll()
+        // Active loads still have visible consumers. Their cancellation is
+        // driven by the last waiter leaving, including when a panel closes.
         tileCache.removeAllObjects()
     }
 
@@ -367,63 +367,60 @@ enum TimelineThumbnailLoader {
         targetSize: CGSize,
         displayScale: CGFloat
     ) async -> UIImage? {
+        guard !Task.isCancelled else { return nil }
         let url = media.url
         if media.mediaType == .image {
-            return await Task<UIImage?, Never>.detached(priority: .utility) {
-                guard let image = try? MediaConversionHelper.downsampledImage(
-                    at: url,
-                    maxPixelSize: max(
-                        targetSize.width * displayScale,
-                        targetSize.height * displayScale,
-                        24
-                    )
-                ), let cgImage = image.cgImage else { return nil }
-                return UIImage(
-                    cgImage: cgImage,
-                    scale: max(displayScale, 1),
-                    orientation: .up
+            guard let image = try? MediaConversionHelper.downsampledImage(
+                at: url,
+                maxPixelSize: max(
+                    targetSize.width * displayScale,
+                    targetSize.height * displayScale,
+                    24
                 )
-            }.value
+            ), let cgImage = image.cgImage else { return nil }
+            return UIImage(
+                cgImage: cgImage,
+                scale: max(displayScale, 1),
+                orientation: .up
+            )
         }
         let sourceStart = clip.sourceRange.start
         let sourceEnd = clip.sourceRange.end
-        return await Task<UIImage?, Never>.detached(priority: .utility) {
-            let generator = TimelineThumbnailGeneratorPool.shared.checkout(url: url)
-            defer { TimelineThumbnailGeneratorPool.shared.checkin(generator, url: url) }
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(
-                width: max(targetSize.width * displayScale, 24),
-                height: max(targetSize.height * displayScale, 24)
+        let generator = TimelineThumbnailGeneratorPool.shared.checkout(url: url)
+        defer { TimelineThumbnailGeneratorPool.shared.checkin(generator, url: url) }
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(
+            width: max(targetSize.width * displayScale, 24),
+            height: max(targetSize.height * displayScale, 24)
+        )
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.08, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.08, preferredTimescale: 600)
+        // Deduped while preserving order: a tile needs the first (nearest)
+        // candidate only; duplicate times would only repeat a failed
+        // decode.
+        var fallbacks: [Double] = []
+        var seen: Set<Int64> = []
+        for seconds in [
+            sourceTime,
+            min(max(sourceTime + 0.04, sourceStart), sourceEnd),
+            max(sourceStart, min(sourceEnd, sourceStart + max(clip.sourceRange.duration, 0.001) * 0.5)),
+            sourceStart,
+            0
+        ] {
+            guard seconds.isFinite else { continue }
+            let key = Int64((max(seconds, 0) * 600).rounded())
+            guard seen.insert(key).inserted else { continue }
+            fallbacks.append(seconds)
+        }
+        guard
+            let cgImage = await copyImage(
+                using: generator,
+                fallbackSeconds: fallbacks
             )
-            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.08, preferredTimescale: 600)
-            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.08, preferredTimescale: 600)
-            // Deduped while preserving order: a tile needs the first (nearest)
-            // candidate only; duplicate times would only repeat a failed
-            // decode.
-            var fallbacks: [Double] = []
-            var seen: Set<Int64> = []
-            for seconds in [
-                sourceTime,
-                min(max(sourceTime + 0.04, sourceStart), sourceEnd),
-                max(sourceStart, min(sourceEnd, sourceStart + max(clip.sourceRange.duration, 0.001) * 0.5)),
-                sourceStart,
-                0
-            ] {
-                guard seconds.isFinite else { continue }
-                let key = Int64((max(seconds, 0) * 600).rounded())
-                guard seen.insert(key).inserted else { continue }
-                fallbacks.append(seconds)
-            }
-            guard
-                let cgImage = await copyImage(
-                    using: generator,
-                    fallbackSeconds: fallbacks
-                )
-            else {
-                return nil
-            }
-            return UIImage(cgImage: cgImage, scale: max(displayScale, 1), orientation: .up)
-        }.value
+        else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage, scale: max(displayScale, 1), orientation: .up)
     }
 
     private static func copyImage(
@@ -431,7 +428,7 @@ enum TimelineThumbnailLoader {
         fallbackSeconds: [Double]
     ) async -> CGImage? {
         for seconds in fallbackSeconds {
-            guard seconds.isFinite else { continue }
+            guard !Task.isCancelled else { return nil }
             let time = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
             if let cgImage = try? await generator.image(at: time).image {
                 return cgImage
@@ -441,7 +438,7 @@ enum TimelineThumbnailLoader {
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.35, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.35, preferredTimescale: 600)
         for seconds in fallbackSeconds {
-            guard seconds.isFinite else { continue }
+            guard !Task.isCancelled else { return nil }
             let time = CMTime(seconds: max(seconds, 0), preferredTimescale: 600)
             if let cgImage = try? await generator.image(at: time).image {
                 return cgImage

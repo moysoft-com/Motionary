@@ -51,6 +51,41 @@ struct PlayerFrameProbe {
 
 @Suite(.serialized)
 struct SourceTimingRenderTests {
+    @Test func timelineThumbnailRequestsSurviveMemoryPressure() async throws {
+        let url = try await makeVideo()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = ClipSource(url: url, mediaType: .video, originalDuration: 4)
+        let clip = TimelineClip(
+            name: "Thumbnail colors", source: source, timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 4)
+        )
+        let media = ClipMediaDescriptor(asset: MediaAsset(id: clip.mediaID, source: source))
+        let cache = TimelineThumbnailTileCache()
+
+        @Sendable func loadTile(_ index: Int) async -> UIImage? {
+            await cache.tileImage(
+                for: clip, media: media, speedMap: .constant(speed: 1),
+                tileIndex: index, tileWidth: 160, tileHeight: 96, secondsPerTile: 1, displayScale: 1
+            )
+        }
+
+        async let first = loadTile(0)
+        async let second = loadTile(1)
+        async let third = loadTile(2)
+        for _ in 0..<5 {
+            try await Task.sleep(for: .milliseconds(5))
+            await cache.trimForMemoryPressure()
+        }
+        let tiles = await [first, second, third]
+        for (index, tile) in tiles.enumerated() {
+            let channels = pixel(try #require(tile?.cgImage))
+            let dominant = Int(channels[index])
+            for (channel, value) in channels.prefix(3).enumerated() where channel != index {
+                #expect(dominant - Int(value) > 100, "Unexpected colors for tile \(index): \(channels)")
+            }
+        }
+    }
+
     @Test func proxyPreservesNativeSourceColor() async throws {
         let url = try await makeVideo(width: 320, height: 192)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("color-proxy-\(UUID())")

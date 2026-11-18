@@ -718,7 +718,7 @@ private struct PreviewTopology: Equatable {
                     case .shape(let shape):
                         mediaID = shape.mediaID
                         mediaType = .image
-                    case .text, .caption, .adjustment, .compound:
+                    case .text, .caption, .adjustment, .compound, .haptic:
                         mediaID = nil
                         mediaType = nil
                     }
@@ -1194,7 +1194,7 @@ final class CompositionRenderService {
         case .compound(var compound):
             compound.visuals.transform.opacity = AnimatableProperty(baseValue: 0)
             hiddenItem = .compound(compound)
-        case .caption:
+        case .caption, .haptic:
             return nil
         }
         backgroundProject.replaceItem(id: itemID, with: hiddenItem)
@@ -1377,7 +1377,7 @@ final class CompositionRenderService {
                         )
                     )
                     renderOrder += 1
-                case .caption, .compound:
+                case .caption, .compound, .haptic:
                     continue
                 }
             }
@@ -2607,7 +2607,7 @@ final class CompositionRenderService {
                         )
                     )
                     renderOrder += 1
-                case .caption, .compound:
+                case .caption, .compound, .haptic:
                     continue
                 }
             }

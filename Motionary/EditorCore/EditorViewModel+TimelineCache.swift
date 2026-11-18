@@ -49,7 +49,7 @@ struct TimelineRenderTrackSnapshot: Equatable {
 
         var shortest: (id: UUID, duration: Double)?
         var secondShortest: Double?
-        for renderItem in renderItems {
+        for renderItem in renderItems where !renderItem.item.isHapticImpact {
             let duration = renderItem.item.placementDuration
             if shortest == nil || duration < shortest!.duration {
                 secondShortest = shortest?.duration
@@ -222,7 +222,7 @@ struct TimelineEvaluationIndex {
                 switch track.kind {
                 case .visual, .shape, .text:
                     break
-                case .undefined, .audio:
+                case .undefined, .audio, .haptic:
                     continue
                 }
                 let cost = Self.previewCost(for: item, keyframeCount: localKeyframeTimes.count)
@@ -413,6 +413,8 @@ struct TimelineEvaluationIndex {
             return 2 + effectCost + maskCost + animationCost
         case .caption:
             return 1
+        case .haptic:
+            return 0
         }
     }
 }
@@ -560,7 +562,7 @@ extension EditorViewModel {
         currentTracks: [TimelineTrack]
     ) {
         let isPreviewTrack: (TimelineTrack) -> Bool = {
-            $0.kind != .audio
+            $0.kind != .audio && $0.kind != .haptic
         }
         let affectsPreview: Bool
         if scope.invalidatesAllTracks {

@@ -256,7 +256,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             let frameDuration = max(plan.frameDuration, 1 / 600)
             let frameIndex = Int64((safeTime / frameDuration).rounded(.toNearestOrAwayFromZero))
             let canvasRect = CGRect(origin: .zero, size: plan.renderSize)
-            let effectScale = plan.scrubEffectScale
+            let effectScale = plan.effectScale
             let authoredCanvasSize = CGSize(
                 width: plan.renderSize.width / plan.renderScale,
                 height: plan.renderSize.height / plan.renderScale
@@ -998,7 +998,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
             isGeneratedLayer: true,
             outputScale: plan.renderScale,
             rasterScaleCorrection: CGSize(width: 1, height: 1),
-            effectScale: plan.scrubEffectScale
+            effectScale: plan.effectScale
         )
         var processed = try effectRegistry.render(
             clip.effectStack,

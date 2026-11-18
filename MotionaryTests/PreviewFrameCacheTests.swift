@@ -132,4 +132,33 @@ struct PreviewFrameCacheTests {
         state.invalidateComposedFrames()
         #expect(state.cachedFrame(at: 7.5, sessionID: session) == nil)
     }
+
+    @Test func recordingEffectBudgetAppliesToPreviewAndInvalidatesOldPixels() throws {
+        let state = LivePreviewRenderState()
+        let session = UUID()
+        let frame = try buffer()
+        let revision = state.snapshot().revision
+        state.cacheFrame(frame, at: 0.5, sessionID: session, revision: revision)
+
+        func plan(quality: RenderQualityProfile = .balanced) -> FrameRenderPlan {
+            FrameRenderPlan(renderSize: CGSize(width: 720, height: 720), renderScale: 2 / 3,
+                            backgroundColor: .black, frameDuration: 1 / 60, clips: [],
+                            quality: quality, failurePolicy: .failOnUnavailableEffects, livePreviewState: state)
+        }
+        #expect(plan().effectScale == 1)
+        state.setScreenRecordingEffectDimension(540)
+        #expect(plan().effectScale == 0.5)
+        #expect(!plan().isScrubFrame)
+        #expect(state.cachedFrame(at: 0.5, sessionID: session) == nil)
+        state.cacheFrame(frame, at: 0.5, sessionID: session, revision: revision)
+        #expect(state.cachedFrame(at: 0.5, sessionID: session) == nil)
+
+        state.setScrubbing(true)
+        #expect(plan().effectScale == 0.5)
+        #expect(!plan().isScrubFrame)
+        #expect(plan(quality: .export).effectScale == 1)
+        state.setScreenRecordingEffectDimension(nil)
+        #expect(abs(plan().effectScale - 2.0 / 3.0) < 0.0001)
+        #expect(plan().isScrubFrame)
+    }
 }

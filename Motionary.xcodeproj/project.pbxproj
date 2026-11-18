@@ -7,13 +7,27 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1E0146AF1000000000000001 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E0146AF1000000000000004 /* ShareViewController.swift */; };
+		1E0146AF1000000000000002 /* Motionary/Shared/MotionaryShareInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E0146AF1000000000000005 /* Motionary/Shared/MotionaryShareInbox.swift */; };
+		1E0146AF1000000000000003 /* MotionaryShare.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 1E0146AF1000000000000006 /* MotionaryShare.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		8CA5E5813004020800A91E5F /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 8CA5E5803004020800A91E5F /* FirebaseAuth */; };
 		8CD7881D3003FA4A00E1D88F /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = 8CD7881C3003FA4A00E1D88F /* FirebaseFirestore */; };
 		8CF00101300A000100F00101 /* FirebaseAppCheck in Frameworks */ = {isa = PBXBuildFile; productRef = 8CF00100300A000100F00101 /* FirebaseAppCheck */; };
 		8CF00201300A000100F00101 /* Shimmer in Frameworks */ = {isa = PBXBuildFile; productRef = 8CF00200300A000100F00101 /* Shimmer */; };
+		A071D6B50000000000000001 /* MotionaryThumbnails.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A071D6B50000000000000005 /* MotionaryThumbnails.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A071D6B50000000000000002 /* ThumbnailProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A071D6B50000000000000006 /* ThumbnailProvider.swift */; };
+		A071D6B50000000000000003 /* MotionaryVideoContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A071D6B50000000000000007 /* MotionaryVideoContainer.swift */; };
+		A071D6B50000000000000004 /* DocumentIcons.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A071D6B50000000000000008 /* DocumentIcons.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
+		1E0146AF1000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 8C70C7B32D7225A60070BD08 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1E0146AF1000000000000008;
+			remoteInfo = MotionaryShare;
+		};
 		8C70C7CC2D7225A80070BD08 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 8C70C7B32D7225A60070BD08 /* Project object */;
@@ -28,12 +42,44 @@
 			remoteGlobalIDString = 8C70C7BA2D7225A60070BD08;
 			remoteInfo = Motionary;
 		};
+		A071D6B50000000000000009 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 8C70C7B32D7225A60070BD08 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A071D6B5000000000000000A;
+			remoteInfo = MotionaryThumbnails;
+		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		1E0146AF1000000000000009 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				1E0146AF1000000000000003 /* MotionaryShare.appex in Embed App Extensions */,
+				A071D6B50000000000000001 /* MotionaryThumbnails.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
+		1E0146AF1000000000000004 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		1E0146AF1000000000000005 /* Motionary/Shared/MotionaryShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Motionary/Shared/MotionaryShareInbox.swift; sourceTree = SOURCE_ROOT; };
+		1E0146AF1000000000000006 /* MotionaryShare.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MotionaryShare.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		1E0146AF100000000000000A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		1E0146AF100000000000000B /* MotionaryShare.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MotionaryShare.entitlements; sourceTree = "<group>"; };
 		8C70C7BB2D7225A60070BD08 /* Motionary.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Motionary.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		8C70C7CB2D7225A80070BD08 /* MotionaryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MotionaryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		8C70C7D52D7225A80070BD08 /* MotionaryUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MotionaryUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A071D6B50000000000000005 /* MotionaryThumbnails.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MotionaryThumbnails.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A071D6B50000000000000006 /* ThumbnailProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailProvider.swift; sourceTree = "<group>"; };
+		A071D6B50000000000000007 /* MotionaryVideoContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MotionaryVideoContainer.swift; path = Motionary/Shared/MotionaryVideoContainer.swift; sourceTree = SOURCE_ROOT; };
+		A071D6B50000000000000008 /* DocumentIcons.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = DocumentIcons.xcassets; path = Motionary/DocumentIcons.xcassets; sourceTree = SOURCE_ROOT; };
+		A071D6B5000000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -98,12 +144,25 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		1E0146AF100000000000000C /* MotionaryShare */ = {
+			isa = PBXGroup;
+			children = (
+				1E0146AF1000000000000004 /* ShareViewController.swift */,
+				1E0146AF1000000000000005 /* Motionary/Shared/MotionaryShareInbox.swift */,
+				1E0146AF100000000000000A /* Info.plist */,
+				1E0146AF100000000000000B /* MotionaryShare.entitlements */,
+			);
+			path = MotionaryShare;
+			sourceTree = "<group>";
+		};
 		8C70C7B22D7225A60070BD08 = {
 			isa = PBXGroup;
 			children = (
 				8CA5E52D3003FCA500A91E5F /* Motionary */,
 				8C70C7CE2D7225A80070BD08 /* MotionaryTests */,
 				8C70C7D82D7225A80070BD08 /* MotionaryUITests */,
+				1E0146AF100000000000000C /* MotionaryShare */,
+				A071D6B5000000000000000C /* MotionaryThumbnails */,
 				8CA5E57F3004020800A91E5F /* Frameworks */,
 				8C70C7BC2D7225A60070BD08 /* Products */,
 			);
@@ -112,6 +171,8 @@
 		8C70C7BC2D7225A60070BD08 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				1E0146AF1000000000000006 /* MotionaryShare.appex */,
+				A071D6B50000000000000005 /* MotionaryThumbnails.appex */,
 				8C70C7BB2D7225A60070BD08 /* Motionary.app */,
 				8C70C7CB2D7225A80070BD08 /* MotionaryTests.xctest */,
 				8C70C7D52D7225A80070BD08 /* MotionaryUITests.xctest */,
@@ -126,9 +187,35 @@
 			name = Frameworks;
 			sourceTree = "<group>";
 		};
+		A071D6B5000000000000000C /* MotionaryThumbnails */ = {
+			isa = PBXGroup;
+			children = (
+				A071D6B50000000000000006 /* ThumbnailProvider.swift */,
+				A071D6B50000000000000007 /* MotionaryVideoContainer.swift */,
+				A071D6B50000000000000008 /* DocumentIcons.xcassets */,
+				A071D6B5000000000000000B /* Info.plist */,
+			);
+			path = MotionaryThumbnails;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		1E0146AF1000000000000008 /* MotionaryShare */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1E0146AF100000000000000E /* Build configuration list for PBXNativeTarget "MotionaryShare" */;
+			buildPhases = (
+				1E0146AF100000000000000F /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MotionaryShare;
+			productName = MotionaryShare;
+			productReference = 1E0146AF1000000000000006 /* MotionaryShare.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 		8C70C7BA2D7225A60070BD08 /* Motionary */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 8C70C7DF2D7225A80070BD08 /* Build configuration list for PBXNativeTarget "Motionary" */;
@@ -136,10 +223,13 @@
 				8C70C7B72D7225A60070BD08 /* Sources */,
 				8C70C7B82D7225A60070BD08 /* Frameworks */,
 				8C70C7B92D7225A60070BD08 /* Resources */,
+				1E0146AF1000000000000009 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				1E0146AF100000000000000D /* PBXTargetDependency */,
+				A071D6B5000000000000000F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				8CA5E52D3003FCA500A91E5F /* Motionary */,
@@ -201,6 +291,22 @@
 			productReference = 8C70C7D52D7225A80070BD08 /* MotionaryUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		A071D6B5000000000000000A /* MotionaryThumbnails */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A071D6B50000000000000010 /* Build configuration list for PBXNativeTarget "MotionaryThumbnails" */;
+			buildPhases = (
+				A071D6B5000000000000000D /* Sources */,
+				A071D6B5000000000000000E /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MotionaryThumbnails;
+			productName = MotionaryThumbnails;
+			productReference = A071D6B50000000000000005 /* MotionaryThumbnails.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -211,8 +317,20 @@
 				LastSwiftUpdateCheck = 1620;
 				LastUpgradeCheck = 2720;
 				TargetAttributes = {
+					1E0146AF1000000000000008 = {
+						SystemCapabilities = {
+							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+						};
+					};
 					8C70C7BA2D7225A60070BD08 = {
 						CreatedOnToolsVersion = 16.2;
+						SystemCapabilities = {
+							com.apple.ApplicationGroups.iOS = {
+								enabled = 1;
+							};
+						};
 					};
 					8C70C7CA2D7225A80070BD08 = {
 						CreatedOnToolsVersion = 16.2;
@@ -242,6 +360,8 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				1E0146AF1000000000000008 /* MotionaryShare */,
+				A071D6B5000000000000000A /* MotionaryThumbnails */,
 				8C70C7BA2D7225A60070BD08 /* Motionary */,
 				8C70C7CA2D7225A80070BD08 /* MotionaryTests */,
 				8C70C7D42D7225A80070BD08 /* MotionaryUITests */,
@@ -271,9 +391,26 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A071D6B5000000000000000E /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A071D6B50000000000000004 /* DocumentIcons.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		1E0146AF100000000000000F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1E0146AF1000000000000001 /* ShareViewController.swift in Sources */,
+				1E0146AF1000000000000002 /* Motionary/Shared/MotionaryShareInbox.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		8C70C7B72D7225A60070BD08 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -295,9 +432,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A071D6B5000000000000000D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A071D6B50000000000000002 /* ThumbnailProvider.swift in Sources */,
+				A071D6B50000000000000003 /* MotionaryVideoContainer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		1E0146AF100000000000000D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1E0146AF1000000000000008 /* MotionaryShare */;
+			targetProxy = 1E0146AF1000000000000007 /* PBXContainerItemProxy */;
+		};
 		8C70C7CD2D7225A80070BD08 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 8C70C7BA2D7225A60070BD08 /* Motionary */;
@@ -308,9 +459,218 @@
 			target = 8C70C7BA2D7225A60070BD08 /* Motionary */;
 			targetProxy = 8C70C7D62D7225A80070BD08 /* PBXContainerItemProxy */;
 		};
+		A071D6B5000000000000000F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A071D6B5000000000000000A /* MotionaryThumbnails */;
+			targetProxy = A071D6B50000000000000009 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		1E0146AF1000000000000010 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MotionaryShare/MotionaryShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MotionaryShare/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		1E0146AF1000000000000011 /* Screen Recording Performance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MotionaryShare/MotionaryShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MotionaryShare/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = "Screen Recording Performance";
+		};
+		1E0146AF1000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = MotionaryShare/MotionaryShare.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MotionaryShare/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary.share;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		6151A012E33041019C4C9EE1 /* Screen Recording Performance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 84TRSZD4QB;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = "Screen Recording Performance";
+		};
+		6151A012E33041019C4C9EE2 /* Screen Recording Performance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = MotionaryBW;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = Motionary/Motionary.debug.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				DEVELOPMENT_ASSET_PATHS = "\"Motionary/Preview Content\"";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Motionary/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Motionary;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Motionary saves exported videos to your Photos library.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MOTIONARY_SCREEN_REC_PERFORMANCE";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = "Screen Recording Performance";
+		};
+		6151A012E33041019C4C9EE3 /* Screen Recording Performance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = lian.MotionaryTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Motionary.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Motionary";
+			};
+			name = "Screen Recording Performance";
+		};
+		6151A012E33041019C4C9EE4 /* Screen Recording Performance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = lian.MotionaryUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Motionary;
+			};
+			name = "Screen Recording Performance";
+		};
 		8C70C7DD2D7225A80070BD08 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -453,7 +813,7 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -488,7 +848,7 @@
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -572,13 +932,75 @@
 			};
 			name = Release;
 		};
+		A071D6B50000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MotionaryThumbnails/Info.plist;
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary.thumbnails;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		A071D6B50000000000000012 /* Screen Recording Performance */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MotionaryThumbnails/Info.plist;
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary.thumbnails;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = "Screen Recording Performance";
+		};
+		A071D6B50000000000000013 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 81;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = MotionaryThumbnails/Info.plist;
+				MARKETING_VERSION = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.moysoft.motionary.thumbnails;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		1E0146AF100000000000000E /* Build configuration list for PBXNativeTarget "MotionaryShare" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1E0146AF1000000000000010 /* Debug */,
+				1E0146AF1000000000000011 /* Screen Recording Performance */,
+				1E0146AF1000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		8C70C7B62D7225A60070BD08 /* Build configuration list for PBXProject "Motionary" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				8C70C7DD2D7225A80070BD08 /* Debug */,
+				6151A012E33041019C4C9EE1 /* Screen Recording Performance */,
 				8C70C7DE2D7225A80070BD08 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
@@ -588,6 +1010,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				8C70C7E02D7225A80070BD08 /* Debug */,
+				6151A012E33041019C4C9EE2 /* Screen Recording Performance */,
 				8C70C7E12D7225A80070BD08 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
@@ -597,6 +1020,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				8C70C7E32D7225A80070BD08 /* Debug */,
+				6151A012E33041019C4C9EE3 /* Screen Recording Performance */,
 				8C70C7E42D7225A80070BD08 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
@@ -606,7 +1030,18 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				8C70C7E62D7225A80070BD08 /* Debug */,
+				6151A012E33041019C4C9EE4 /* Screen Recording Performance */,
 				8C70C7E72D7225A80070BD08 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A071D6B50000000000000010 /* Build configuration list for PBXNativeTarget "MotionaryThumbnails" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A071D6B50000000000000011 /* Debug */,
+				A071D6B50000000000000012 /* Screen Recording Performance */,
+				A071D6B50000000000000013 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

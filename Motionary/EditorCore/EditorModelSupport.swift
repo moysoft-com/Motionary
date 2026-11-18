@@ -158,6 +158,8 @@ extension TimelineClip {
                 parameterID: parameterID,
                 component: component
             )
+        case .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength:
+            return target.hapticMetadata
         case .volume:
             return KeyframePropertyMetadata(
                 title: "Volume",
@@ -268,7 +270,7 @@ extension TimelineClip {
         case .audio:
             guard mediaType == .audio || mediaType == .video else { return [] }
             return [.volume]
-        case .speed, .textType, .textStyle:
+        case .speed, .haptics, .textType, .textStyle:
             return []
         }
     }
@@ -312,6 +314,8 @@ extension TimelineClip {
             .effects
         case .volume:
             .audio
+        case .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength:
+            .haptics
         case .textFontSize, .textLetterSpacing, .textLineSpacing:
             .textType
         case .textFill, .textWidthFraction, .textStroke, .textStrokeWidth,
@@ -342,7 +346,7 @@ extension TimelineClip {
             effectStack.effects.first(where: { $0.id == effectID })?
                 .property(for: parameterID, component: component)
         case .volume: volume
-        case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
+        case .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength, .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
             .textWidthFraction, .textStroke, .textStrokeWidth, .textShadow,
             .textShadowOffsetX, .textShadowOffsetY, .textShadowBlur,
             .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:
@@ -393,7 +397,7 @@ extension TimelineClip {
             )
         case .volume:
             volume = property
-        case .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
+        case .hapticIntensity, .hapticSharpness, .hapticRepeat, .hapticLength, .textFontSize, .textLetterSpacing, .textLineSpacing, .textFill,
             .textWidthFraction, .textStroke, .textStrokeWidth, .textShadow,
             .textShadowOffsetX, .textShadowOffsetY, .textShadowBlur,
             .textBackground, .textBackgroundPadding, .textBackgroundCornerRadius:

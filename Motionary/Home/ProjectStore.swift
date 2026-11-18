@@ -43,6 +43,27 @@ final class ProjectStore: ObservableObject {
         warmRecentProjectContent()
     }
 
+    @MainActor
+    func importArchive(at url: URL, id: UUID = UUID()) async throws {
+        guard !projects.contains(where: { $0.id == id }) else { return }
+        let accessible = url.startAccessingSecurityScopedResource()
+        defer { if accessible { url.stopAccessingSecurityScopedResource() } }
+        let folder = projectFolderURL(for: id)
+        do {
+            var imported = try await Task.detached(priority: .userInitiated) {
+                try ProjectArchive.extract(url: url, to: folder, projectID: id)
+            }.value
+            imported.editorProject.updatedAt = Date()
+            try await repository.save(imported, projectID: id)
+            recordSavedContent(imported, projectID: id)
+            notePosterChanged()
+            schedulePosterRender(for: imported.editorProject, projectID: id)
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
+    }
+
     func addProject(title: String? = nil) -> Project {
         let newProject = Project(title: title ?? "Project #\(projects.count + 1)")
         projects.append(newProject)

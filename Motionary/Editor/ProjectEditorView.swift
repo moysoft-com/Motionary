@@ -21,6 +21,7 @@ enum CoreEditorPanel: Hashable {
     case adjust
     case effects
     case audio
+    case haptic
     case speed
     case mask
     case removeBackground
@@ -49,6 +50,8 @@ struct ProjectEditorView: View {
     @State private var isAudioFileImporterPresented = false
     @State private var isExportSettingsPresented = false
     @State private var exportRecoveryShare: ExportRecoveryShare?
+    @State private var sharedMotionaryVideoDirectory: URL?
+    @State private var timelineVerticalPosition = TimelineVerticalScrollPosition()
     @State private var activePanel: CoreEditorPanel = .timeline
     @State private var pixelsPerSecond: CGFloat = 88
     @State private var miniTimelinePixelsPerSecond: CGFloat = 88
@@ -81,6 +84,13 @@ struct ProjectEditorView: View {
     var body: some View {
         GeometryReader { geometry in
             editorCanvas(geometry: geometry)
+        }
+        .overlay(alignment: .topTrailing) {
+            if ScreenRecordingDebugPanel.isEnabled {
+                ScreenRecordingDebugPanel(viewModel: viewModel)
+                    .padding(.top, 6)
+                    .padding(.trailing, 10)
+            }
         }
         .toolbar(.hidden, for: .tabBar)
         .navigationTitle(viewModel.project.title)
@@ -152,7 +162,7 @@ struct ProjectEditorView: View {
                         let panelToCheck = activePanel == .graph ? graphReturnPanel : activePanel
                         var isSupported = true
                         switch panelToCheck {
-                        case .text, .textType, .textStyle, .textMotion, .textMotionGraph:
+                        case .text, .textType, .textStyle, .textMotion, .textMotionGraph, .haptic:
                             isSupported = false
                         case .shape:
                             isSupported = clip.shape != nil
@@ -188,6 +198,12 @@ struct ProjectEditorView: View {
                         case .timeline, .transform, .adjust, .effects, .mask, .blend, .adjustmentTargets:
                             break
                         default:
+                            activePanel = .timeline
+                        }
+                    } else if case .haptic = viewModel.project.item(id: clipID) {
+                        if activePanel == .graph && graphReturnPanel == .haptic {
+                            if viewModel.graphSegment == nil { activePanel = .haptic }
+                        } else if activePanel != .haptic {
                             activePanel = .timeline
                         }
                     } else if case .text = viewModel.project.item(id: clipID) {
@@ -301,11 +317,19 @@ struct ProjectEditorView: View {
         )
         .onChange(of: viewModel.exportedVideoURL) { _, url in
             if let url {
+                if url.pathExtension == MotionaryVideoArchive.fileExtension {
+                    sharedMotionaryVideoDirectory = url.deletingLastPathComponent()
+                }
                 exportRecoveryShare = ExportRecoveryShare(url: url)
                 viewModel.exportedVideoURL = nil
             }
         }
-        .sheet(item: $exportRecoveryShare) { export in
+        .sheet(item: $exportRecoveryShare, onDismiss: {
+            if let directory = sharedMotionaryVideoDirectory {
+                try? FileManager.default.removeItem(at: directory)
+                sharedMotionaryVideoDirectory = nil
+            }
+        }) { export in
             ActivityView(activityItems: [export.url])
         }
         .sheet(isPresented: $isExportSettingsPresented) {
@@ -314,9 +338,14 @@ struct ProjectEditorView: View {
                 onSettingsChanged: { settings in
                     viewModel.saveExportSettings(settings)
                 },
-                onExport: { settings in
+                onExport: { settings, format in
                     isExportSettingsPresented = false
-                    viewModel.exportProject(settings: settings)
+                    switch format {
+                    case .standardVideo:
+                        viewModel.exportProject(settings: settings)
+                    case .motionaryVideo(let includeHaptics):
+                        viewModel.exportProject(settings: settings, includeHaptics: includeHaptics, packageAsMotionaryVideo: true)
+                    }
                 }
             )
         }
@@ -367,7 +396,8 @@ struct ProjectEditorView: View {
                                 CoreTimelineView(
                                     viewModel: viewModel,
                                     pixelsPerSecond: $pixelsPerSecond,
-                                    workspaceContext: usesSideWorkspace ? workspaceTimelineContext : nil
+                                    workspaceContext: usesSideWorkspace ? workspaceTimelineContext : nil,
+                                    verticalPosition: timelineVerticalPosition
                                 )
                                 .frame(height: wideTimelineHeight)
                             }
@@ -497,7 +527,8 @@ struct ProjectEditorView: View {
         case .timeline:
             CoreTimelineView(
                 viewModel: viewModel,
-                pixelsPerSecond: $pixelsPerSecond
+                pixelsPerSecond: $pixelsPerSecond,
+                verticalPosition: timelineVerticalPosition
             )
         case .text:
             TextWorkspaceView(
@@ -560,6 +591,11 @@ struct ProjectEditorView: View {
                 viewModel: viewModel,
                 clip: propertyContextClip
             )
+        case .haptic:
+            if case .haptic(let item) = propertyContextTimelineItem {
+                HapticsWorkspaceView(viewModel: viewModel, item: item)
+                    .id(item.id)
+            }
         case .speed:
             SpeedWorkspaceView(
                 viewModel: viewModel,
@@ -655,6 +691,7 @@ struct ProjectEditorView: View {
 private struct EditorPlaybackControlBar: View {
     @ObservedObject var viewModel: EditorViewModel
     @ObservedObject private var playbackState: PlaybackState
+    @ObservedObject private var timelineState: TimelineState
     @Binding var activePanel: CoreEditorPanel
     @Binding var graphReturnPanel: CoreEditorPanel
     @Binding var activeEffectWorkspaceID: UUID?
@@ -670,6 +707,7 @@ private struct EditorPlaybackControlBar: View {
     ) {
         self.viewModel = viewModel
         _playbackState = ObservedObject(wrappedValue: viewModel.playbackState)
+        _timelineState = ObservedObject(wrappedValue: viewModel.timelineState)
         _activePanel = activePanel
         _graphReturnPanel = graphReturnPanel
         _activeEffectWorkspaceID = activeEffectWorkspaceID
@@ -755,14 +793,14 @@ private struct EditorPlaybackControlBar: View {
                 CompactIconButton(
                     systemName: "arrow.uturn.backward",
                     title: "Undo",
-                    isDisabled: !viewModel.canUndo,
+                    isDisabled: !timelineState.canUndo,
                     action: { viewModel.undo() },
                     isBordered: false
                 )
                 CompactIconButton(
                     systemName: "arrow.uturn.forward",
                     title: "Redo",
-                    isDisabled: !viewModel.canRedo,
+                    isDisabled: !timelineState.canRedo,
                     action: { viewModel.redo() },
                     isBordered: false
                 )
@@ -829,7 +867,7 @@ private struct EditorPlaybackControlBar: View {
 extension CoreEditorPanel {
     var isPropertyPanel: Bool {
         isTextPanel || self == .shape || self == .transform || self == .adjust || self == .effects
-            || self == .audio || self == .speed || self == .mask || self == .removeBackground
+            || self == .audio || self == .haptic || self == .speed || self == .mask || self == .removeBackground
             || self == .blend || self == .autoBeats || self == .adjustmentTargets
     }
 
@@ -860,6 +898,8 @@ extension CoreEditorPanel {
             .effects
         case .audio:
             .audio
+        case .haptic:
+            .haptics
         case .speed:
             .speed
         case .mask, .removeBackground, .blend, .adjustmentTargets, .autoBeats, .canvas, .timeline, .graph:
