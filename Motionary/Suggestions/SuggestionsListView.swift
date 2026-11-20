@@ -13,6 +13,11 @@ struct SuggestionsListView: View {
     @State private var selectedSort: SuggestionSort = .mostVotes
     @State private var editingSuggestion: Suggestion?
     @State private var pendingDeletion: Suggestion?
+    @State private var confirmsAccountDeletion = false
+
+    init(opensComposer: Bool = false) {
+        _presentedSheet = State(initialValue: opensComposer ? .add : nil)
+    }
 
     private var suggestionsRevision: [SuggestionRevision] {
         viewModel.suggestions.map(SuggestionRevision.init)
@@ -27,9 +32,7 @@ struct SuggestionsListView: View {
 
     var body: some View {
         presentedContent
-            .onAppear {
-                viewModel.listenToSuggestions()
-            }
+            .task { await viewModel.openFeedback() }
             .onChange(of: suggestionsRevision, initial: true) { _, _ in
                 stageSuggestionUpdate(feedSuggestions)
             }
@@ -42,15 +45,19 @@ struct SuggestionsListView: View {
             .onChange(of: viewModel.blockedOwnerIDs) { _, _ in
                 stageSuggestionUpdate(feedSuggestions)
             }
+            .onChange(of: viewModel.currentUserID) { _, userID in
+                if userID.isEmpty && selectedFilter == .mine { selectedFilter = .active }
+                stageSuggestionUpdate(feedSuggestions)
+            }
             .onDisappear {
                 reorderTask?.cancel()
             }
             .confirmationDialog(
-                "Delete this suggestion?",
+                "Delete this feedback?",
                 isPresented: deletionConfirmationBinding,
                 titleVisibility: .visible
             ) {
-                Button("Delete Suggestion", role: .destructive) {
+                Button("Delete Feedback", role: .destructive) {
                     guard let pendingDeletion else { return }
                     viewModel.deleteSuggestion(pendingDeletion)
                     self.pendingDeletion = nil
@@ -58,6 +65,13 @@ struct SuggestionsListView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("This cannot be undone.")
+            }
+            .confirmationDialog("Delete your feedback account?", isPresented: $confirmsAccountDeletion) {
+                Button("Request Deletion", role: .destructive) {
+                    Task { await viewModel.requestAccountDeletion() }
+                }
+            } message: {
+                Text("We’ll delete your feedback account, posts, votes, and reports within 30 days. Open Feedback for confirmation. Your projects stay on your device.")
             }
             .alert(item: $viewModel.notice) { notice in
                 Alert(
@@ -74,7 +88,26 @@ struct SuggestionsListView: View {
                 SuggestionFilterBar(selectedFilter: $selectedFilter)
                     .padding(.bottom, 2)
 
-                if displayedSuggestions.isEmpty {
+                if viewModel.deletionPending {
+                    ContentUnavailableView {
+                        Label("Deletion Requested", systemImage: "clock")
+                    } description: {
+                        Text("We’ll process your request within 30 days.")
+                    } actions: {
+                        Button("Check Status") { Task { await viewModel.openFeedback() } }
+                    }
+                } else if viewModel.isRequestingDeletion {
+                    ProgressView("Submitting request…")
+                } else if viewModel.feedUnavailable && displayedSuggestions.isEmpty {
+                    ContentUnavailableView {
+                        Label("Feedback Unavailable", systemImage: "wifi.exclamationmark")
+                    } actions: {
+                        Button("Try Again") { viewModel.listenToSuggestions() }
+                    }
+                } else if viewModel.isLoadingFeed && displayedSuggestions.isEmpty {
+                    ProgressView("Loading feedback…")
+                        .frame(maxWidth: .infinity, minHeight: 220)
+                } else if displayedSuggestions.isEmpty {
                     emptyState
                         .transition(.scale(scale: 0.96).combined(with: .opacity))
                 } else {
@@ -88,6 +121,7 @@ struct SuggestionsListView: View {
                             onEdit: { editingSuggestion = suggestion },
                             onDelete: { pendingDeletion = suggestion }
                         )
+                        .disabled(viewModel.currentUserID.isEmpty)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
@@ -96,8 +130,9 @@ struct SuggestionsListView: View {
             .padding(.vertical, 18)
         }
         .scrollIndicators(.hidden)
+        .refreshable { await viewModel.openFeedback() }
         .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
-        .navigationTitle("Suggestions")
+        .navigationTitle("Feedback")
         .toolbar { suggestionsToolbar }
     }
 
@@ -109,14 +144,15 @@ struct SuggestionsListView: View {
             } label: {
                 Image(systemName: "arrow.up.arrow.down")
             }
-            .accessibilityLabel("Sort suggestions")
+            .accessibilityLabel("Sort feedback")
         }
 
         ToolbarItem(placement: .topBarTrailing) {
             Button { presentedSheet = .add } label: {
                 Image(systemName: "plus")
             }
-            .accessibilityLabel("Add suggestion")
+            .accessibilityLabel("Send feedback")
+            .disabled(viewModel.currentUserID.isEmpty)
         }
     }
 
@@ -148,6 +184,10 @@ struct SuggestionsListView: View {
                 ShareLink(item: viewModel.currentUserID) {
                     Label("Share My Anonymous ID", systemImage: "person.text.rectangle")
                 }
+                Button("Delete Feedback Account", systemImage: "trash", role: .destructive) {
+                    confirmsAccountDeletion = true
+                }
+                .disabled(viewModel.isRequestingDeletion || viewModel.deletionPending)
             }
         }
     }
@@ -176,6 +216,7 @@ struct SuggestionsListView: View {
     }
 
     private func stageSuggestionUpdate(_ latest: [Suggestion]) {
+        reorderTask?.cancel()
         guard !displayedSuggestions.isEmpty else {
             withAnimation(.smooth) {
                 displayedSuggestions = latest
@@ -199,7 +240,6 @@ struct SuggestionsListView: View {
             displayedSuggestions = updatedInPlace
         }
 
-        reorderTask?.cancel()
         reorderTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(320))
             guard !Task.isCancelled else { return }
@@ -221,8 +261,8 @@ struct SuggestionsListView: View {
 
             Text(
                 displayedSuggestions.isEmpty && !viewModel.suggestions.isEmpty
-                    ? "No suggestions match the selected filter."
-                    : "Share an idea for Motionary and let the community vote on it."
+                    ? "No feedback matches the selected filter."
+                    : "Share an idea or report a bug and let the community vote on it."
             )
                 .font(.subheadline)
                 .foregroundStyle(MotionaryTheme.textSecondary)
@@ -378,6 +418,8 @@ private struct SuggestionRevision: Equatable {
     let title: String
     let description: String
     let votes: Int
+    let ownerID: String?
+    let normalizationKey: String?
     let votedUsers: [String]
     let status: SuggestionStatus
 
@@ -386,6 +428,8 @@ private struct SuggestionRevision: Equatable {
         title = suggestion.title
         description = suggestion.description
         votes = suggestion.votes
+        ownerID = suggestion.ownerID
+        normalizationKey = suggestion.normalizationKey
         votedUsers = suggestion.legacyVotedUsers
         status = suggestion.resolvedStatus
     }
@@ -445,7 +489,7 @@ private struct SuggestionCard: View {
                 .contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .accessibilityHint("Opens the full suggestion")
+            .accessibilityHint("Opens the full feedback")
             Spacer()
             VStack(alignment: .trailing) {
                 if isOwned {

@@ -9,6 +9,13 @@ final class SuggestionsViewModel {
     var notice: SuggestionNotice?
     private(set) var currentUserID = Auth.auth().currentUser?.uid ?? ""
 
+    private(set) var isLoadingFeed = false
+    private(set) var feedUnavailable = false
+
+    private(set) var isRequestingDeletion = false
+    private(set) var deletionPending = UserDefaults.standard.string(forKey: SuggestionsViewModel.receiptKey) != nil
+    private static let receiptKey = "motionary.feedback.deletionReceipt"
+
     private let db = Firestore.firestore()
     private var suggestionsListener: ListenerRegistration?
     private var votedSuggestionIDs: Set<String> = []
@@ -22,8 +29,81 @@ final class SuggestionsViewModel {
         blockedOwnerIDs = Set(UserDefaults.standard.stringArray(forKey: Self.blockedOwnersKey) ?? [])
     }
 
+    deinit { suggestionsListener?.remove() }
+
+    @MainActor
+    func openFeedback() async {
+        if let receipt = UserDefaults.standard.string(forKey: Self.receiptKey) {
+            do {
+                try clearFeedbackSession()
+                let confirmation = try await db.collection("suggestionDeletionReceipts")
+                    .document(receipt).getDocument(source: .server)
+                guard confirmation.get("completed") as? Bool == true else { return }
+                UserDefaults.standard.removeObject(forKey: Self.receiptKey)
+                unblockAllOwners()
+                deletionPending = false
+                notice = SuggestionNotice(title: "Feedback Account Deleted", message: "Your feedback account and its associated data were deleted.")
+            } catch {
+                presentError(error, fallback: "Couldn’t check your deletion request. Try again.")
+            }
+            return
+        }
+        listenToSuggestions()
+    }
+
+    @MainActor
+    func requestAccountDeletion() async {
+        guard !currentUserID.isEmpty, !deletionPending, !isRequestingDeletion else { return }
+        isRequestingDeletion = true
+        defer { isRequestingDeletion = false }
+        let request = db.collection("suggestionAccountDeletions").document(currentUserID)
+        let newReceipt = UUID().uuidString
+        do {
+            let result = try await db.runTransaction { transaction, errorPointer in
+                do {
+                    let existing = try transaction.getDocument(request)
+                    if let receipt = existing.get("receipt") as? String { return receipt }
+                    transaction.setData([
+                        "receipt": newReceipt, "requestedAt": FieldValue.serverTimestamp()
+                    ], forDocument: request)
+                    return newReceipt
+                } catch {
+                    errorPointer?.pointee = error as NSError
+                    return nil
+                }
+            }
+            guard let receipt = result as? String else { throw URLError(.cannotParseResponse) }
+            UserDefaults.standard.set(receipt, forKey: Self.receiptKey)
+        } catch {
+            presentError(error, fallback: "Couldn’t request account deletion.")
+            return
+        }
+        deletionPending = true
+        do {
+            try clearFeedbackSession()
+        } catch {
+            AppLogger.lifecycle.error("Could not clear the pending feedback session")
+        }
+        notice = SuggestionNotice(title: "Deletion Requested", message: "We’ll process your request within 30 days. Open Feedback to check for completion.")
+    }
+
+    private func clearFeedbackSession() throws {
+        if Auth.auth().currentUser != nil { try Auth.auth().signOut() }
+        suggestionsListener?.remove()
+        suggestionsListener = nil
+        suggestions = []
+        currentUserID = ""
+        votedSuggestionIDs.removeAll()
+        checkedVoteSuggestionIDs.removeAll()
+        voteOverrides.removeAll()
+        isLoadingFeed = false
+        feedUnavailable = false
+    }
+
     func listenToSuggestions() {
-        guard suggestionsListener == nil else { return }
+        guard suggestionsListener == nil, !isLoadingFeed, !deletionPending else { return }
+        isLoadingFeed = true
+        feedUnavailable = false
 
         if let user = Auth.auth().currentUser {
             finishAuthentication(userID: user.uid)
@@ -31,7 +111,8 @@ final class SuggestionsViewModel {
             Auth.auth().signInAnonymously { [weak self] result, error in
                 guard let self else { return }
                 guard let userID = result?.user.uid, error == nil else {
-                    self.presentError(error, fallback: "Couldn’t connect to suggestions.")
+                    self.isLoadingFeed = false
+                    self.feedUnavailable = true
                     return
                 }
                 self.finishAuthentication(userID: userID)
@@ -52,7 +133,7 @@ final class SuggestionsViewModel {
         guard requireAuthenticatedUser() else { return }
 
         if let message = SuggestionContentPolicy.validationError(title: title, description: description) {
-            notice = SuggestionNotice(title: "Suggestion Not Submitted", message: message)
+            notice = SuggestionNotice(title: "Feedback Not Submitted", message: message)
             return
         }
 
@@ -134,7 +215,7 @@ final class SuggestionsViewModel {
         }) { [weak self] result, error in
             guard let self else { return }
             if let error {
-                self.presentError(error, fallback: "Couldn’t submit the suggestion.")
+                self.presentError(error, fallback: "Couldn’t submit the feedback.")
                 return
             }
 
@@ -145,13 +226,13 @@ final class SuggestionsViewModel {
             }
             if response?["duplicate"] == true {
                 self.notice = SuggestionNotice(
-                    title: "Suggestion Already Exists",
+                    title: "Feedback Already Exists",
                     message: response?["voteAdded"] == true
                         ? "Your vote was added to the existing suggestion."
                         : "You already voted for the existing suggestion."
                 )
             } else {
-                self.notice = SuggestionNotice(title: "Suggestion Submitted", message: "Thanks for helping improve Motionary.")
+                self.notice = SuggestionNotice(title: "Feedback Submitted", message: "Thanks for helping improve Motionary.")
             }
         }
     }
@@ -216,7 +297,7 @@ final class SuggestionsViewModel {
         guard let suggestionID = suggestion.id else { return }
         if isVoted(suggestion) {
             notice = SuggestionNotice(
-                title: "Suggestion Already Exists",
+                title: "Feedback Already Exists",
                 message: "You already voted for the existing suggestion."
             )
             return
@@ -251,7 +332,7 @@ final class SuggestionsViewModel {
                 self.presentError(error, fallback: "Couldn’t add your vote.")
             } else {
                 self.notice = SuggestionNotice(
-                    title: "Suggestion Already Exists",
+                    title: "Feedback Already Exists",
                     message: (alreadyVoted as? Bool) == true
                         ? "You already voted for the existing suggestion."
                         : "Your vote was added to the existing suggestion."
@@ -264,7 +345,7 @@ final class SuggestionsViewModel {
         guard requireAuthenticatedUser(), suggestion.ownerID == currentUserID, let id = suggestion.id else { return }
 
         if let message = SuggestionContentPolicy.validationError(title: title, description: description) {
-            notice = SuggestionNotice(title: "Suggestion Not Saved", message: message)
+            notice = SuggestionNotice(title: "Feedback Not Saved", message: message)
             return
         }
 
@@ -310,7 +391,7 @@ final class SuggestionsViewModel {
             }
         }) { [weak self] _, error in
             if let error {
-                self?.presentError(error, fallback: "Couldn’t save the suggestion.")
+                self?.presentError(error, fallback: "Couldn’t save the feedback.")
             }
         }
     }
@@ -322,7 +403,7 @@ final class SuggestionsViewModel {
         suggestionRef.collection("votes").getDocuments { [weak self] snapshot, error in
             guard let self else { return }
             if let error {
-                self.presentError(error, fallback: "Couldn’t delete the suggestion.")
+                self.presentError(error, fallback: "Couldn’t delete the feedback.")
                 return
             }
 
@@ -334,7 +415,7 @@ final class SuggestionsViewModel {
             batch.deleteDocument(suggestionRef)
             batch.commit { error in
                 if let error {
-                    self.presentError(error, fallback: "Couldn’t delete the suggestion.")
+                    self.presentError(error, fallback: "Couldn’t delete the feedback.")
                 }
             }
         }
@@ -373,7 +454,7 @@ final class SuggestionsViewModel {
         guard let ownerID = suggestion.ownerID, ownerID != currentUserID else { return }
         blockedOwnerIDs.insert(ownerID)
         persistBlockedOwners()
-        notice = SuggestionNotice(title: "User Blocked", message: "Suggestions from this user are now hidden on this device.")
+        notice = SuggestionNotice(title: "User Blocked", message: "Feedback from this user are now hidden on this device.")
     }
 
     func unblockAllOwners() {
@@ -400,10 +481,17 @@ final class SuggestionsViewModel {
             .limit(to: 50)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self else { return }
+                self.isLoadingFeed = false
                 guard let documents = snapshot?.documents else {
-                    self.presentError(error, fallback: "Couldn’t load suggestions.")
+                    if let failure = error as NSError? {
+                        AppLogger.lifecycle.error("Feedback feed failed (\(failure.domain, privacy: .public), \(failure.code, privacy: .public))")
+                    }
+                    self.suggestionsListener?.remove()
+                    self.suggestionsListener = nil
+                    self.feedUnavailable = true
                     return
                 }
+                self.feedUnavailable = false
                 self.suggestions = documents.compactMap { try? $0.data(as: Suggestion.self) }
                 self.loadVoteStates(for: self.suggestions)
                 self.reconcileVoteOverrides()

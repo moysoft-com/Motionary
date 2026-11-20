@@ -12,4 +12,4 @@ build/
 
 # Swift tooling
 .build/
-
+/scripts/feedback-admin/node_modules/

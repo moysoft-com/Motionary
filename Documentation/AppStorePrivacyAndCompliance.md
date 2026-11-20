@@ -9,6 +9,7 @@ Review these answers for every release. The final selection depends on Apple's c
 - Declare **User Content** for suggestion titles, descriptions, and report details.
 - Declare **User ID** for the persistent pseudonymous Firebase UID.
 - Declare technical identifiers or diagnostics used by Firebase Authentication and App Check where Apple's questionnaire requires them.
+- Review technical connection data processed by Firebase against the actual collection, retention, and use. The app does not call Cloud Functions.
 - Mark suggestion data and the UID as linked to the same pseudonymous user unless Apple's current definitions clearly permit a different answer.
 - State that the data is used for app functionality, fraud prevention, security, and moderation—not advertising or tracking.
 - Use `https://moysoft.com/privacy` as the privacy-policy URL.
@@ -23,6 +24,14 @@ Review these answers for every release. The final selection depends on Apple's c
 - Keep Firebase Data Processing and Security Terms and current subprocessor information in the compliance records.
 - Restrict Firebase project owners/editors and enable multi-factor authentication on administrator Google accounts.
 - Review Firebase Authentication users and Firestore administrators periodically.
+
+## Feedback
+
+- Firebase creates an anonymous account when a person first opens Feedback. The app reads the existing Firestore collection directly.
+- Publish the Firestore rules and wait for the `votes.userID` collection-group index. Test a new request and its completion on a test account before release.
+- Install the local admin tool with `npm ci --prefix scripts/feedback-admin`. It uses Google Application Default Credentials with Firestore and Firebase Authentication administration permissions. No Cloud Functions or Blaze plan is needed.
+- Check the queue regularly with `node scripts/feedback-admin/admin.mjs motionary-9e87f list`. Process each pending request within 30 days with `node scripts/feedback-admin/admin.mjs motionary-9e87f delete UID`. The app shows confirmation when the user checks Feedback. Re-run an interrupted deletion with the same UID.
+- Run `node scripts/feedback-admin/admin.mjs motionary-9e87f prune` during routine maintenance to remove completed UID markers after 24 hours. Keep the opaque completion receipts available for people returning to the app.
 
 ## Netlify legal-notice form
 
