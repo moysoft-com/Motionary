@@ -1,6 +1,7 @@
 // Speed and mask workspaces for typed timeline items.
 
 import SwiftUI
+import TipKit
 
 struct AdjustmentTargetsWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
@@ -325,7 +326,10 @@ private struct TimingWorkspaceOptions: View {
             title: "Ripple following clips",
             isOn: viewModel.isRippleEditingEnabled,
             isEnabled: isEnabled
-        ) { viewModel.isRippleEditingEnabled = $0 }
+        ) {
+            RippleEditingTip().invalidate(reason: .actionPerformed)
+            viewModel.isRippleEditingEnabled = $0
+        }
 
         if item.speedMap.timeRemap == nil {
             Text(
@@ -356,10 +360,11 @@ struct MaskWorkspaceView: View {
             viewModel: viewModel,
             item: item,
             title: "Mask",
-            systemImage: "circle.dashed"
+            systemImage: "circle.dashed",
+            keyframeSection: .mask
         ) { item, isEnabled in
             if let visuals = item.editableVisuals, supportsMask(item) {
-                let mask = visuals.mask
+                let mask = visuals.mask?.value(at: playbackState.currentTime - item.timelineStart)
                 let unitSpace = maskUnitSpace(for: item)
                 VStack(spacing: 14) {
                     EditorWorkspaceSection(title: "Preset") {
@@ -667,6 +672,7 @@ private struct TimelineItemWorkspaceShell<Content: View>: View {
     let item: TimelineItem?
     let title: String
     let systemImage: String
+    var keyframeSection: KeyframeSection? = nil
     @ViewBuilder let content: (TimelineItem, Bool) -> Content
 
     var body: some View {
@@ -677,16 +683,25 @@ private struct TimelineItemWorkspaceShell<Content: View>: View {
             isEnabled: isEnabled,
             emptyState: item == nil
                 ? EditorWorkspaceEmptyState(title: "Select a clip", systemImage: "cursorarrow.click.2")
-                : nil
-        ) {
-            if let item {
-                content(item, isEnabled)
+                : nil,
+            accessory: {
+                if let item, let keyframeSection, supportsMask(item), item.editableVisuals?.mask != nil {
+                    SectionKeyframeButton(
+                        viewModel: viewModel, itemID: item.id, section: keyframeSection, isEnabled: isEnabled
+                    )
+                }
+            },
+            content: {
+                if let item {
+                    content(item, isEnabled)
+                }
             }
-        }
+        )
     }
 
     private func isWorkspaceEnabled(_ item: TimelineItem) -> Bool {
         viewModel.selectedTimelineItemID == item.id
+            && viewModel.project.itemLocation(id: item.id).map { !viewModel.project.tracks[$0.track].isLocked } == true
             && viewModel.currentTime >= item.timelineStart
             && viewModel.currentTime < item.timelineEnd
     }

@@ -4,6 +4,7 @@
 import AVFoundation
 import CoreImage
 import SwiftUI
+import TipKit
 import UIKit
 
 struct PreviewClipInfo: Identifiable {
@@ -764,6 +765,7 @@ struct PreviewTransformCanvas: View {
                 .gesture(dragGesture(for: clip, frame: frame))
                 .simultaneousGesture(scaleGesture(for: clip))
                 .simultaneousGesture(rotationGesture(for: clip))
+                .popoverTip(PreviewGesturesTip(), arrowEdge: .top)
                 .id(clip.id)
             }
 
@@ -793,6 +795,7 @@ struct PreviewTransformCanvas: View {
                 .gesture(dragGesture(for: text, frame: frame))
                 .simultaneousGesture(scaleGesture(for: text))
                 .simultaneousGesture(rotationGesture(for: text))
+                .popoverTip(PreviewGesturesTip(), arrowEdge: .top)
                 .id(text.id)
             }
 
@@ -915,6 +918,7 @@ struct PreviewTransformCanvas: View {
                         order: index,
                         select: {
                             viewModel.selectClip(clipInfo.clip.id, trackID: clipInfo.trackID)
+                            MotionaryTipEvents.previewSelection.sendDonation()
                         }
                     )
 
@@ -930,6 +934,7 @@ struct PreviewTransformCanvas: View {
                                 textInfo.item.id,
                                 trackID: textInfo.trackID
                             )
+                            MotionaryTipEvents.previewSelection.sendDonation()
                         }
                     )
 
@@ -2046,6 +2051,9 @@ struct PreviewTransformCanvas: View {
         guard interactionClipID == itemID else { return }
         guard activeTransformGestures.remove(gesture) != nil else { return }
         guard activeTransformGestures.isEmpty else { return }
+        if !editedTransformComponents.isEmpty {
+            PreviewGesturesTip().invalidate(reason: .actionPerformed)
+        }
         resetPreviewInteraction(finishEdit: true)
     }
 

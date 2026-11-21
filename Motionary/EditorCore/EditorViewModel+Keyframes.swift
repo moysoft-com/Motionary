@@ -74,6 +74,12 @@ extension EditorViewModel {
     }
 
     func hasKeyframe(atPlayhead section: KeyframeSection) -> Bool {
+        if section == .mask {
+            guard let item = selectedTimelineItem, let mask = item.editableVisuals?.mask else { return false }
+            return KeyframeMergeSupport.frame(
+                in: mask.keyframes, at: maskKeyframeTime(for: item), tolerance: keyframeTimeTolerance
+            ) != nil
+        }
         if selectedTextItem != nil {
             return textHasKeyframe(atPlayhead: section)
         }
@@ -154,6 +160,11 @@ extension EditorViewModel {
         in section: KeyframeSection,
         effectID: UUID? = nil
     ) -> KeyframeSegment? {
+        if section == .mask {
+            guard let item = selectedTimelineItem, currentTime >= item.timelineStart,
+                  currentTime <= item.timelineEnd else { return nil }
+            return maskGraphSegment(item, at: currentTime - item.timelineStart)
+        }
         if section == .speed {
             guard case .media(let item) = selectedTimelineItem else { return nil }
             return timeRemapGraphSegment(for: item)
@@ -197,6 +208,13 @@ extension EditorViewModel {
                     abs($0.time - time) <= self.keyframeTimeTolerance
                 }?.interpolation
             }.first
+        }
+    }
+
+    private func maskGraphSegment(_ item: TimelineItem, at time: Double) -> KeyframeSegment? {
+        guard let mask = item.editableVisuals?.mask else { return nil }
+        return graphSegment(clipID: item.id, section: .mask, times: item.keyframeTimes(in: .mask), localTime: time) { time in
+            KeyframeMergeSupport.frame(in: mask.keyframes, at: time)?.interpolation
         }
     }
 
@@ -250,8 +268,8 @@ extension EditorViewModel {
 
     func refreshGraphSegment() {
         guard let segment = graphSegment else { return }
-        if segment.section == .speed {
-            graphSegment = candidateGraphSegment(in: .speed)
+        if segment.section == .speed || segment.section == .mask {
+            graphSegment = candidateGraphSegment(in: segment.section)
             if let graphSegment { displayedGraphSegment = graphSegment }
             return
         }
@@ -406,6 +424,10 @@ extension EditorViewModel {
     }
 
     func toggleKeyframeSection(_ section: KeyframeSection) {
+        if section == .mask {
+            toggleSelectedMaskKeyframe()
+            return
+        }
         if section == .haptics, case .haptic(let item) = selectedTimelineItem {
             toggleHapticKeyframes(for: item)
             return
@@ -556,6 +578,20 @@ extension EditorViewModel {
                     ) {
                         item[keyPath: property].keyframes[index].interpolation = interpolation
                     }
+                }
+            }
+            refreshGraphSegment()
+            return
+        }
+        if section == .mask {
+            if interactive { beginInteractiveEdit() }
+            updateSelectedVisuals(interactive: interactive) { visuals in
+                visuals.mask = visuals.mask?.mappingAnimations { property in
+                    var property = property
+                    if let index = property.keyframeIndex(at: startTime, tolerance: KeyframeMergeSupport.timeTolerance) {
+                        property.keyframes[index].interpolation = interpolation
+                    }
+                    return property
                 }
             }
             refreshGraphSegment()
@@ -946,6 +982,14 @@ extension EditorViewModel {
                     )
                 }
             }
+        } else if section == .mask {
+            updateSelectedVisuals(interactive: interactive) { visuals in
+                visuals.mask = visuals.mask?.mappingAnimations { property in
+                    var property = property
+                    moveTimelineKeyframe(&property.keyframes, from: from, to: destination)
+                    return property
+                }
+            }
         } else if section == .speed {
             mutateProject(rebuild: !interactive, recordHistory: !interactive, persistChanges: !interactive, touchUpdatedAt: !interactive) { project in
                 guard let location = project.itemLocation(id: itemID),
@@ -997,7 +1041,7 @@ extension EditorViewModel {
             }
         }
         refreshGraphSegmentAfterKeyframeMove(itemID: itemID, section: section, from: from, to: destination)
-        if interactive && section != .haptics {
+        if interactive && section != .haptics && section != .mask {
             scheduleInteractivePreviewRebuild(invalidation: section == .speed ? [.previewFrame, .compositionTopology, .audioMix] : (section == .audio ? [.audioMix] : [.previewFrame]))
         }
         return true
@@ -1017,7 +1061,9 @@ extension EditorViewModel {
         let start = min(times[index], times[neighbour])
         let end = max(times[index], times[neighbour])
         let candidate: KeyframeSegment?
-        if section == .speed, case .media(let media) = item,
+        if section == .mask {
+            candidate = maskGraphSegment(item, at: (start + end) / 2)
+        } else if section == .speed, case .media(let media) = item,
            let frames = media.speedMap.timeRemap?.keyframes,
            let left = frames.first(where: { abs($0.time - start) < 0.000001 }) {
             candidate = KeyframeSegment(clipID: itemID, section: section, startTime: start, endTime: end, interpolation: left.interpolation)

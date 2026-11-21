@@ -187,6 +187,7 @@ struct SuggestionsListView: View {
                 Button("Delete Feedback Account", systemImage: "trash", role: .destructive) {
                     confirmsAccountDeletion = true
                 }
+                .tint(.red)
                 .disabled(viewModel.isRequestingDeletion || viewModel.deletionPending)
             }
         }

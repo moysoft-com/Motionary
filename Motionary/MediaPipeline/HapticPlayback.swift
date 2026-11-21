@@ -59,12 +59,14 @@ final class HapticPlayback {
         stopEngine()
     }
 
-    func audition(_ track: HapticTrack) {
+    @discardableResult
+    func audition(_ track: HapticTrack) -> ContinuousClock.Instant? {
         detach()
-        guard !track.events.isEmpty, let engine = prepareEngine() else { return }
+        guard !track.events.isEmpty, let engine = prepareEngine() else { return nil }
         self.track = track
         isAuditioning = true
         let start = engine.currentTime + 0.045
+        let presentationStart = ContinuousClock.now.advanced(by: .milliseconds(45))
         let end = track.events.map(\.end).max() ?? 0
         tickTask = Task { [weak self] in
             while !Task.isCancelled, let self, self.isAuditioning, self.engine === engine {
@@ -78,6 +80,7 @@ final class HapticPlayback {
                 try? await Task.sleep(for: .milliseconds(30))
             }
         }
+        return presentationStart
     }
 
     func stopAudition() {

@@ -83,6 +83,7 @@ struct SuggestionDetailView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .disabled(viewModel.currentUserID.isEmpty)
                     .animation(.snappy, value: isVoted)
                     .sensoryFeedback(.impact(weight: .medium), trigger: hapticTrigger)
                 }
@@ -90,7 +91,7 @@ struct SuggestionDetailView: View {
             }
             .sensoryFeedback(.success, trigger: copyHapticTrigger)
             .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
-            .navigationTitle("Suggestion")
+            .navigationTitle("Feedback")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if currentSuggestion.ownerID != viewModel.currentUserID {
@@ -132,14 +133,14 @@ struct SuggestionDetailView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("All suggestions from this user will be hidden on this device. You can undo this from the suggestions sort menu.")
+                Text("Feedback from this author will be hidden on this device.")
             }
             .alert(item: $reportResult) { result in
                 Alert(
                     title: Text(result.succeeded ? "Report Submitted" : "Couldn’t Submit Report"),
                     message: Text(
                         result.succeeded
-                            ? "Thanks. We’ll review this suggestion."
+                            ? "Thanks. We’ll review this feedback."
                             : "Please try again later."
                     ),
                     dismissButton: .default(Text("OK"))
@@ -168,18 +169,9 @@ private struct SuggestionMetadataFooter: View {
         suggestion.id ?? "Unavailable"
     }
 
-    private var authorID: String {
-        suggestion.ownerID ?? "Unknown"
-    }
-
     private var publishedText: String {
         guard let date = suggestion.createdAt?.dateValue() else { return "Publish date unavailable" }
         return "Published \(date.formatted(date: .abbreviated, time: .shortened))"
-    }
-
-    private var compactAuthorID: String {
-        guard authorID.count > 12 else { return authorID }
-        return "\(authorID.prefix(5))…\(authorID.suffix(5))"
     }
 
     var body: some View {
@@ -190,29 +182,19 @@ private struct SuggestionMetadataFooter: View {
             Spacer(minLength: 8)
 
             Menu {
-                Section("Author ID") {
-                    Text(authorID)
-                    if suggestion.ownerID != nil {
-                        Button("Copy Author ID", systemImage: "doc.on.doc") {
-                            onCopy(authorID)
-                        }
-                    }
-                }
-
-                Section("Suggestion ID") {
+                Section("Feedback ID") {
                     Text(suggestionID)
                     if suggestion.id != nil {
-                        Button("Copy Suggestion ID", systemImage: "doc.on.doc") {
+                        Button("Copy Feedback ID", systemImage: "doc.on.doc") {
                             onCopy(suggestionID)
                         }
                     }
                 }
             } label: {
-                Label(compactAuthorID, systemImage: "person.crop.circle")
-                    .fontDesign(.monospaced)
+                Label("Feedback ID", systemImage: "info.circle")
                     .lineLimit(1)
             }
-            .accessibilityLabel("Suggestion metadata")
+            .accessibilityLabel("Feedback details")
         }
         .font(.caption2.weight(.medium))
         .foregroundStyle(MotionaryTheme.textSecondary)
@@ -233,7 +215,7 @@ private struct SuggestionActionsView: View {
     var body: some View {
         NavigationStack {
             List {
-                Button("Report Suggestion", systemImage: "exclamationmark.bubble") {
+                Button("Report Feedback", systemImage: "exclamationmark.bubble") {
                     dismiss()
                     DispatchQueue.main.async { onReport() }
                 }
@@ -288,7 +270,7 @@ private struct ReportSuggestionView: View {
                     Text("Use the formal notice form when you believe content violates the law.")
                 }
             }
-            .navigationTitle("Report Suggestion")
+            .navigationTitle("Report Feedback")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

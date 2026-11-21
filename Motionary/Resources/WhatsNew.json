@@ -1,0 +1,24 @@
+{
+  "1.0": {
+    "title": "Motionary 1.0",
+    "subtitle": "First public release",
+    "features": [
+      "Multitrack editing for video, audio, and text",
+      "Keyframe animation with editable curves",
+      "Speed ramps and beat markers",
+      "Masks, effects, and adjustment layers",
+      "Add a new dimension to your edits with haptics."
+    ],
+    "sections": [
+      {
+        "title": "Share a project",
+        "body": "Send an editable .mpj file via Share Project in the project menu to let others continue your work in Motionary."
+      },
+      {
+        "title": "Bugs and ideas",
+        "body": "Shake to send feedback, or go to Settings → Feedback. If reporting a bug, briefly describe what happened."
+      }
+    ],
+    "buttonTitle": "Start Editing"
+  }
+}

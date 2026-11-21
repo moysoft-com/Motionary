@@ -134,6 +134,7 @@ enum KeyframeSection: String, CaseIterable, Identifiable {
     case audio = "Audio"
     case haptics = "Haptics"
     case speed = "Speed"
+    case mask = "Mask"
     case textType = "Type"
     case textStyle = "Style"
 

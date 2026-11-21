@@ -40,6 +40,14 @@ Behavioral changes require focused unit tests. Refactors must run the complete `
 contains unit, launch, and UI tests. Timeline tests should assert placement, ordering, snapping, trimming, selection,
 and persistence outcomes rather than implementation details.
 
+## What’s New sheet
+
+Add an entry to [WhatsNew.json](../Motionary/Resources/WhatsNew.json) with the exact Xcode marketing version as its key. Copy the 1.0 entry as a template. Supply the title, feature bullets, and button label. The subtitle and text sections are optional. Section bodies support inline Markdown.
+
+The sheet appears on a regular launch until the user taps its button. Use the same version key for every build of a release. Omit the entry for an update that should skip the sheet.
+
+Add `--preview-whats-new` to the Debug scheme’s launch arguments to preview the current release on every regular launch without marking it as seen. Remove the argument before resuming normal testing.
+
 ## Compatibility constraints
 
 - Do not change persisted coding keys without a migration.

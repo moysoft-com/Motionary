@@ -3,6 +3,7 @@
 import FirebaseAppCheck
 import FirebaseCore
 import SwiftUI
+import TipKit
 import UIKit
 
 private final class MotionaryAppAttestProviderFactory: NSObject, AppCheckProviderFactory {
@@ -62,6 +63,11 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             AppCheck.setAppCheckProviderFactory(MotionaryAppAttestProviderFactory())
         #endif
         FirebaseApp.configure()
+        do {
+            try Tips.configure([.displayFrequency(.hourly)])
+        } catch {
+            AppLogger.lifecycle.error("TipKit configuration failed: \(error.localizedDescription, privacy: .public)")
+        }
         if let shortcut = launchOptions?[.shortcutItem] as? UIApplicationShortcutItem {
             HomeScreenActions.shared.receive(shortcut)
         }
@@ -121,6 +127,10 @@ struct MainView: App {
     @State private var openedVideo: MotionaryVideoArchive.Movie?
     @State private var presentedVideo: MotionaryVideoArchive.Movie?
     @State private var documentError: String?
+    @State private var whatsNewRelease: WhatsNewRelease?
+    @State private var checkedWhatsNewThisLaunch = false
+    @AppStorage("motionary.whatsNew.acknowledgedVersions")
+    private var acknowledgedReleases = ""
     private struct IncomingDocument {
         let url: URL
         var sharedProjectID: UUID?
@@ -168,6 +178,7 @@ struct MainView: App {
         .sheet(isPresented: $iconPickerPresented) {
             AppIconPickerView()
         }
+        .modifier(SuggestionsShakeShortcut(surface: selectedTab == 1 ? .settings : isEditorPresented ? .editor : .projects))
         .onOpenURL { url in
             guard url.isFileURL, ["mpj", MotionaryVideoArchive.fileExtension].contains(url.pathExtension.lowercased()) else { return }
             guard openingDocumentURL != url, !documentQueue.contains(where: { $0.url == url }) else { return }
@@ -181,6 +192,12 @@ struct MainView: App {
             openNextDocument()
         }) { movie in
             MotionaryVideoPlayer(movie: movie)
+        }
+        .fullScreenCover(item: $whatsNewRelease, onDismiss: {
+            openNextDocument()
+            handlePendingAction()
+        }) { release in
+            WhatsNewView(release: release, onAcknowledge: { acknowledgeWhatsNew(release) })
         }
         .alert("Couldn’t Open File", isPresented: Binding(
             get: { documentError != nil },
@@ -203,6 +220,12 @@ struct MainView: App {
             if phase == .active { collectSharedProjects() }
         }
         .onDisappear { rootViewAppeared = false }
+        .task(id: rootViewAppeared && scenePhase == .active) {
+            // Let the root collect shared projects and receive any launch intent first.
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            presentWhatsNewIfNeeded()
+        }
         .task(id: rootViewAppeared && scenePhase == .active ? actions.pendingAction?.rawValue : nil) {
             // Cold-launch actions can arrive before SwiftUI has a presenter.
             // Keep the action queued until the root is attached and active.
@@ -332,7 +355,7 @@ struct MainView: App {
 
     private func openNextDocument() {
         guard rootViewAppeared, openingDocumentURL == nil, presentedVideo == nil, documentError == nil,
-            !documentQueue.isEmpty
+            whatsNewRelease == nil, !documentQueue.isEmpty
         else { return }
         let document = documentQueue.removeFirst()
         let url = document.url
@@ -366,7 +389,9 @@ struct MainView: App {
     }
 
     private func handlePendingAction() {
-        guard rootViewAppeared, scenePhase == .active, let action = actions.pendingAction else { return }
+        guard rootViewAppeared, scenePhase == .active, whatsNewRelease == nil,
+            let action = actions.pendingAction
+        else { return }
         AppLogger.lifecycle.info("Presenting Home Screen action: \(action.rawValue, privacy: .public)")
         actions.pendingAction = nil
         switch action {
@@ -380,6 +405,37 @@ struct MainView: App {
             iconPickerPresented = false
             selectedTab = 1
         }
+    }
+
+    private func presentWhatsNewIfNeeded() {
+        guard rootViewAppeared, scenePhase == .active, !checkedWhatsNewThisLaunch else { return }
+        checkedWhatsNewThisLaunch = true
+
+        #if DEBUG
+            let arguments = ProcessInfo.processInfo.arguments
+            guard !arguments.contains("--skip-whats-new") else { return }
+            let preview = arguments.contains("--preview-whats-new")
+        #else
+            let preview = false
+        #endif
+
+        guard selectedTab == 0, actions.pendingAction == nil, newProjectRequest == nil,
+            !isProjectSearchPresented, !isEditorPresented, !iconPickerPresented,
+            incomingProjectID == nil, documentQueue.isEmpty, openingDocumentURL == nil,
+            presentedVideo == nil, documentError == nil,
+            let release = WhatsNewRelease.current(),
+            preview || !acknowledgedReleases.split(separator: ",").contains(Substring(release.version))
+        else { return }
+        whatsNewRelease = release
+    }
+
+    private func acknowledgeWhatsNew(_ release: WhatsNewRelease) {
+        #if DEBUG
+            guard !ProcessInfo.processInfo.arguments.contains("--preview-whats-new") else { return }
+        #endif
+        var versions = Set(acknowledgedReleases.split(separator: ",").map(String.init))
+        versions.insert(release.version)
+        acknowledgedReleases = versions.sorted().joined(separator: ",")
     }
 }
 

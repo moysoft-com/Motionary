@@ -28,17 +28,17 @@ struct EditSuggestionView: View {
         NavigationStack {
             Form {
                 Section("Title") {
-                    TextField("Suggestion title", text: $title)
+                    TextField("Feedback title", text: $title)
                 }
                 Section("Details") {
-                    TextField("Describe your suggestion", text: $description, axis: .vertical)
+                    TextField("Describe your feedback", text: $description, axis: .vertical)
                         .lineLimit(5...9)
                 }
             }
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
             .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
-            .navigationTitle("Edit Suggestion")
+            .navigationTitle("Edit Feedback")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

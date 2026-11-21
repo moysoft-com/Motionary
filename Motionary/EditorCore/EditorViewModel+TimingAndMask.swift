@@ -275,6 +275,40 @@ extension EditorViewModel {
 
     func setSelectedMask(_ mask: ItemMask?) {
         updateSelectedVisuals { visuals in
+            guard var mask else {
+                visuals.mask = nil
+                return
+            }
+            if let previous = visuals.mask, !previous.keyframes.isEmpty,
+               let item = self.selectedTimelineItem {
+                mask.animations = previous.animations
+                mask.setGeometryKeyframe(
+                    at: self.maskKeyframeTime(for: item), value: mask,
+                    tolerance: self.keyframeTimeTolerance
+                )
+            }
+            visuals.mask = mask
+        }
+    }
+
+    func maskKeyframeTime(for item: TimelineItem) -> Double {
+        let frameRate = Double(max(project.renderSettings.frameRate, 1))
+        let localTime = currentTime - item.timelineStart
+        return min(max((localTime * frameRate).rounded() / frameRate, 0), item.placementDuration)
+    }
+
+    func toggleSelectedMaskKeyframe() {
+        guard let item = selectedTimelineItem, currentTime >= item.timelineStart,
+              currentTime < item.timelineEnd else { return }
+        let time = maskKeyframeTime(for: item)
+        updateSelectedVisuals { visuals in
+            guard var mask = visuals.mask else { return }
+            let tolerance = self.keyframeTimeTolerance
+            if KeyframeMergeSupport.frame(in: mask.keyframes, at: time, tolerance: tolerance) != nil {
+                mask.removeGeometryKeyframe(at: time, tolerance: tolerance)
+            } else {
+                mask.setGeometryKeyframe(at: time, value: mask.value(at: time), tolerance: tolerance)
+            }
             visuals.mask = mask
         }
     }
@@ -285,12 +319,10 @@ extension EditorViewModel {
         featherScale: Double? = nil,
         interactive: Bool = false
     ) {
-        updateSelectedVisuals(interactive: interactive) { visuals in
-            var mask = visuals.mask ?? ItemMask()
+        updateSelectedMaskGeometry(interactive: interactive) { mask in
             if let widthScale, widthScale.isFinite { mask.widthScale = min(max(widthScale, 0), 1) }
             if let heightScale, heightScale.isFinite { mask.heightScale = min(max(heightScale, 0), 1) }
             if let featherScale, featherScale.isFinite { mask.featherScale = min(max(featherScale, 0), 1) }
-            visuals.mask = mask
         }
     }
 
@@ -303,8 +335,7 @@ extension EditorViewModel {
         isInverted: Bool? = nil,
         interactive: Bool = false
     ) {
-        updateSelectedVisuals(interactive: interactive) { visuals in
-            var mask = visuals.mask ?? ItemMask()
+        updateSelectedMaskGeometry(interactive: interactive) { mask in
             if let roundnessScale, roundnessScale.isFinite {
                 mask.roundnessScale = min(max(roundnessScale, 0), 1)
             }
@@ -317,16 +348,42 @@ extension EditorViewModel {
             if let offsetX, offsetX.isFinite { mask.offsetX = min(max(offsetX, -1), 1) }
             if let offsetY, offsetY.isFinite { mask.offsetY = min(max(offsetY, -1), 1) }
             if let isInverted { mask.isInverted = isInverted }
+        }
+    }
+
+    private func updateSelectedMaskGeometry(
+        interactive: Bool,
+        _ update: @escaping (inout ItemMask) -> Void
+    ) {
+        guard let item = selectedTimelineItem else { return }
+        let time = maskKeyframeTime(for: item)
+        updateSelectedVisuals(interactive: interactive) { visuals in
+            var mask = visuals.mask ?? ItemMask()
+            if mask.keyframes.isEmpty {
+                update(&mask)
+            } else {
+                let current = mask.value(at: time)
+                var resolved = current
+                update(&resolved)
+                mask.isInverted = resolved.isInverted
+                if ItemMask.Channel.allCases.contains(where: {
+                    resolved[keyPath: $0.keyPath] != current[keyPath: $0.keyPath]
+                }) {
+                    mask.setGeometryKeyframe(at: time, value: resolved, tolerance: self.keyframeTimeTolerance)
+                }
+            }
             visuals.mask = mask
         }
     }
 
-    private func updateSelectedVisuals(
+    func updateSelectedVisuals(
         interactive: Bool = false,
         _ update: @escaping (inout TimelineItemVisuals) -> Void
     ) {
         applyTimingAndMaskMutation(interactive: interactive) { project in
             guard let selectedTimelineItemID = self.selectedTimelineItemID,
+                let location = project.itemLocation(id: selectedTimelineItemID),
+                !project.tracks[location.track].isLocked,
                 var item = project.item(id: selectedTimelineItemID),
                 var visuals = item.editableVisuals
             else { return }

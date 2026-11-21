@@ -135,16 +135,31 @@ struct EditorCancelTaskPopover: View {
 
 struct MotionaryConfirmationToast: View {
     let message: String
+    let systemImage: String
+    let showsChevron: Bool
+
+    init(message: String, systemImage: String = "checkmark.circle.fill", showsChevron: Bool = false) {
+        self.message = message
+        self.systemImage = systemImage
+        self.showsChevron = showsChevron
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "checkmark.circle.fill")
+            Image(systemName: systemImage)
                 .foregroundStyle(MotionaryTheme.accent)
+                .accessibilityHidden(true)
             Text(message)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(MotionaryTheme.textPrimary)
                 .lineLimit(2)
             Spacer(minLength: 0)
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(MotionaryTheme.textSecondary)
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 13)

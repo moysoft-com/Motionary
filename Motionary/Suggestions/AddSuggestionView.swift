@@ -29,6 +29,7 @@ struct AddSuggestionView: View {
         (4...100).contains(trimmedTitle.count)
             && (10...2_000).contains(trimmedDescription.count)
             && acceptsCommunityStandards
+            && !viewModel.currentUserID.isEmpty
     }
 
     var body: some View {
@@ -56,7 +57,7 @@ struct AddSuggestionView: View {
                 } header: {
                     Text("Details")
                 } footer: {
-                    Text("10–2,000 characters. Your suggestion will be visible to everyone using Motionary.")
+                    Text("10–2,000 characters. Your feedback will be visible to everyone using Motionary.")
                 }
 
                 Section {
@@ -69,7 +70,7 @@ struct AddSuggestionView: View {
             .formStyle(.grouped)
             .scrollContentBackground(.hidden)
             .background { MotionaryTheme.background(for: colorScheme).opacity(0.75).ignoresSafeArea() }
-            .navigationTitle("New Suggestion")
+            .navigationTitle("Send Feedback")
             .navigationBarTitleDisplayMode(.inline)
             .tint(MotionaryTheme.accent)
             .toolbar {

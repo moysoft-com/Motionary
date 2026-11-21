@@ -6,7 +6,7 @@ final class PadTabBarProbeUITests: XCTestCase {
     @MainActor
     func testSearchBarAnimationProbe() {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["--skip-whats-new", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         XCTAssertTrue(app.staticTexts["Projects"].waitForExistence(timeout: 15))
         sleep(8)

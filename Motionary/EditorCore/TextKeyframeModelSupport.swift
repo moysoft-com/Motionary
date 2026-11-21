@@ -40,7 +40,7 @@ extension TextTimelineItem {
                 targets += [.textBackgroundPadding, .textBackgroundCornerRadius]
             }
             return targets
-        case .shape, .adjust, .effects, .audio, .haptics, .speed:
+        case .shape, .adjust, .effects, .audio, .haptics, .speed, .mask:
             return []
         }
     }
@@ -507,6 +507,9 @@ extension TimelineItem {
     }
 
     func keyframeTimes(in section: KeyframeSection, effectID: UUID? = nil) -> [Double] {
+        if section == .mask {
+            return visibleKeyframeTimes(editableVisuals?.mask?.keyframes.map(\.time) ?? [])
+        }
         switch self {
         case .media(let item) where section == .speed:
             return item.speedMap.timeRemap?.keyframes.map(\.time) ?? []
@@ -524,6 +527,11 @@ extension TimelineItem {
     }
 
     var allKeyframeTimes: [Double] {
+        let maskTimes = keyframeTimes(in: .mask)
+        return maskTimes.isEmpty ? nonMaskKeyframeTimes : KeyframeMergeSupport.mergedTimes([nonMaskKeyframeTimes, maskTimes])
+    }
+
+    private var nonMaskKeyframeTimes: [Double] {
         switch self {
         case .media:
             let visualTimes = visibleKeyframeTimes(legacyClip()?.allKeyframeTimes ?? [])

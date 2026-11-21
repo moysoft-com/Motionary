@@ -9,6 +9,7 @@ final class HomeScreenShortcutUITests: XCTestCase {
     @MainActor
     private func openShortcut(_ title: String, coldLaunch: Bool = false) {
         let app = XCUIApplication()
+        app.launchArguments = ["--skip-whats-new"]
         app.launch()
         if coldLaunch { app.terminate() }
         XCUIDevice.shared.press(.home)

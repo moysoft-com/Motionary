@@ -29,16 +29,19 @@ components described by the research report are still missing or unvalidated.
 
 `BeatThis.mlmodelc` is the FP16 `small0` conversion from
 [palmier-pro](https://github.com/palmier-io/palmier-pro/tree/5b806b35165da70d2834b53dfc022abc8e00a12e/models/beat_this).
-Its model README says the model and upstream weights are MIT licensed; the
-upstream license is included alongside it. The surrounding repository is
-GPL-3.0 and the converted artifact's distribution provenance should be
-independently reviewed. No palmier-pro application source was copied.
+The README in the pinned `models/beat_this` directory explicitly licenses
+that conversion under MIT, matching the original Beat This code and weights.
+The surrounding Palmier Pro application source at that revision has a separate
+GPL-3.0 license. The Motionary app does not include Palmier Pro application
+source. The original MIT notice is bundled and linked in Settings.
 SHA-256 of `weights/weight.bin`:
 `e4f80e477a99bfc8e838c90d625e8be5a8d2f63e711865c3445d778fb527be37`.
 The FP16 artifact remains in the repository for historical benchmarking, but
 is excluded from the app target; new analyses use the FP32 model exclusively.
-The FP32 conversion used for new analyses was generated from the same small0 checkpoint using
-the same external conversion workflow and passed its synthetic click gate.
+The FP32 conversion used for new analyses was generated from the same
+MIT-licensed `small0` checkpoint using that conversion workflow and passed
+its synthetic click gate. The stored hash identifies the bundled artifact.
+It does not independently reproduce the conversion.
 Its `weights/weight.bin` SHA-256 is
 `fffd124276272c39342f08bb83c05a647f99f58777406bb27d7ba6776db01b9f`.
 The graph consumes 661,059 mono samples at 22,050 Hz and returns 1,500

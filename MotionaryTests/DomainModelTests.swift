@@ -450,6 +450,34 @@ struct DomainModelTests {
         #expect(mask.feather == 0.25)
     }
 
+    @Test func animatedMaskSurvivesRoundTripAndClipSplit() throws {
+        let initial = ItemMask(shape: .ellipse, widthScale: 0.25, heightScale: 0.5)
+        var final = initial
+        final.widthScale = 0.75
+        final.offsetX = 0.5
+
+        var mask = initial
+        let tolerance = KeyframeMergeSupport.timeTolerance
+        mask.setGeometryKeyframe(at: 0, value: initial, tolerance: tolerance)
+        mask.setGeometryKeyframe(at: 4, value: final, tolerance: tolerance)
+        let decoded = try JSONDecoder().decode(ItemMask.self, from: JSONEncoder().encode(mask))
+        #expect(decoded == mask)
+        #expect(decoded.value(at: 2).widthScale == 0.5)
+        #expect(decoded.value(at: 2).offsetX == 0.25)
+
+        var visuals = TimelineItemVisuals()
+        visuals.mask = decoded
+        let split = visuals.splittingAnimations(at: 2)
+        #expect(split.left.mask?.value(at: 2) == split.right.mask?.value(at: 0))
+        #expect(split.right.mask?.value(at: 1).offsetX == 0.375)
+        #expect(split.right.mask?.keyframes.map(\.time) == [0, 2])
+
+        mask.removeGeometryKeyframe(at: 0, tolerance: tolerance)
+        mask.removeGeometryKeyframe(at: 4, tolerance: tolerance)
+        #expect(mask.keyframes.isEmpty)
+        #expect(mask == final)
+    }
+
     @Test func maskSizeAndFeatherRoundTripWithinInputBounds() throws {
         let mask = ItemMask(
             shape: .bar,

@@ -1,6 +1,7 @@
 // Contextual transform, adjustment, and effect workspaces.
 
 import SwiftUI
+import TipKit
 import UIKit
 
 struct CanvasWorkspaceView: View {
@@ -568,7 +569,8 @@ struct EffectsGraphWorkspaceView: View {
     var body: some View {
         ZStack {
             EffectsWorkspaceView(
-                viewModel: viewModel, clip: clip, activeEffectID: $activeEffectID
+                viewModel: viewModel, clip: clip, activeEffectID: $activeEffectID,
+                allowsTips: !showsGraph
             )
                 .opacity(showsGraph ? 0 : 1)
                 .allowsHitTesting(!showsGraph)
@@ -586,6 +588,7 @@ struct EffectsWorkspaceView: View {
     @ObservedObject var viewModel: EditorViewModel
     let clip: TimelineClip?
     @Binding var activeEffectID: UUID?
+    var allowsTips = true
     var onPullProgressChanged: ((CGFloat) -> Void)? = nil
 
     @State private var isLibraryPresented = false
@@ -856,9 +859,12 @@ struct EffectsWorkspaceView: View {
                             index: item.displayIndex,
                             totalCount: clip.effectStack.effects.count,
                             isEnabled: isEnabled,
+                            allowsTip: allowsTips && visibleEffectID == nil && !isLibraryPresented
+                                && !isPagerTransitioning,
                             dragState: effectDrag,
                             dragTranslation: effectDragTranslation,
                             onToggleExpanded: {
+                                MotionaryTipEvents.effectOpened.sendDonation()
                                 openEffectDetail(item.effect.id)
                             },
                             onDragChanged: { translation in
@@ -1216,6 +1222,7 @@ private struct EffectKeyframeButton: View {
         Button {
             guard let effectID else { return }
             viewModel.toggleEffectKeyframe(effectID)
+            MotionaryTipEvents.keyframeEdited.sendDonation()
             EditorHaptics.tap()
         } label: {
             KeyframeDiamondShape()
@@ -1393,6 +1400,7 @@ private struct EffectStackDisclosureRow: View {
     let index: Int
     let totalCount: Int
     let isEnabled: Bool
+    let allowsTip: Bool
     let dragState: EffectListDragState?
     let dragTranslation: CGFloat
     let onToggleExpanded: () -> Void
@@ -1516,17 +1524,28 @@ private struct EffectStackDisclosureRow: View {
         .zIndex(isDragging ? 10 : 0)
         .animation(isDragging ? nil : .snappy(duration: 0.18, extraBounce: 0), value: rowOffset)
         .contextMenu {
-            Button("Cut", systemImage: "scissors") { viewModel.cutEffect(effect.id) }
+            Button("Cut", systemImage: "scissors") {
+                EffectOptionsTip().invalidate(reason: .actionPerformed)
+                viewModel.cutEffect(effect.id)
+            }
                 .disabled(!isEnabled)
-            Button("Copy", systemImage: "doc.on.doc") { viewModel.copyEffect(effect.id) }
-            Button("Paste", systemImage: "doc.on.clipboard") { viewModel.pasteEffect() }
+            Button("Copy", systemImage: "doc.on.doc") {
+                EffectOptionsTip().invalidate(reason: .actionPerformed)
+                viewModel.copyEffect(effect.id)
+            }
+            Button("Paste", systemImage: "doc.on.clipboard") {
+                EffectOptionsTip().invalidate(reason: .actionPerformed)
+                viewModel.pasteEffect()
+            }
                 .disabled(!isEnabled)
             Divider()
             DeleteMenuButton {
+                EffectOptionsTip().invalidate(reason: .actionPerformed)
                 viewModel.removeEffect(effect.id)
             }
             .disabled(!isEnabled)
         }
+        .popoverTip(index == 0 && isEnabled && allowsTip ? EffectOptionsTip() : nil, arrowEdge: .top)
     }
 }
 
@@ -2407,11 +2426,8 @@ struct SectionKeyframeButton: View {
         let isCurrent = isSelectedItem && hasKeyframeAtCurrentTime
 
         Button {
-            if let item, case .text = item {
-                viewModel.toggleTextKeyframeSection(section)
-            } else {
-                viewModel.toggleKeyframeSection(section)
-            }
+            viewModel.toggleKeyframeSection(section)
+            MotionaryTipEvents.keyframeEdited.sendDonation()
             EditorHaptics.tap()
         } label: {
             KeyframeDiamondShape()
@@ -2444,11 +2460,13 @@ struct SectionKeyframeButton: View {
         if section == .speed, case .media(let media) = item {
             return media.speedMap.timeRemap == nil ? 0 : 1
         }
+        if section == .mask { return item.editableVisuals?.mask == nil ? 0 : 1 }
         return item.keyframeTargets(in: section).count
     }
 
     private var hasKeyframeAtCurrentTime: Bool {
         guard let item else { return false }
+        if section == .mask { return viewModel.hasKeyframe(atPlayhead: .mask) }
         switch item {
         case .media(let media) where section == .speed:
             return media.speedMap.timeRemap?.keyframeIndex(

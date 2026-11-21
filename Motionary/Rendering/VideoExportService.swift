@@ -34,6 +34,7 @@ struct VideoExportSettings: Codable, Equatable {
     var codec: ExportVideoCodec
     var container: ExportContainer
     var watermarkEnabled: Bool = true
+    var resolutionPreset: ExportResolutionPreset? = nil
 
     static func recommended(for project: EditorProject) -> VideoExportSettings {
         recommended(for: project.renderSettings)
@@ -69,7 +70,7 @@ struct VideoExportSettings: Codable, Equatable {
 
 extension VideoExportSettings {
     private enum CodingKeys: String, CodingKey {
-        case width, height, frameRate, videoBitrate, audioBitrate, codec, container, watermarkEnabled
+        case width, height, frameRate, videoBitrate, audioBitrate, codec, container, watermarkEnabled, resolutionPreset
     }
 
     init(from decoder: Decoder) throws {
@@ -82,6 +83,7 @@ extension VideoExportSettings {
         codec = try values.decode(ExportVideoCodec.self, forKey: .codec)
         container = try values.decode(ExportContainer.self, forKey: .container)
         watermarkEnabled = try values.decodeIfPresent(Bool.self, forKey: .watermarkEnabled) ?? true
+        resolutionPreset = try values.decodeIfPresent(ExportResolutionPreset.self, forKey: .resolutionPreset)
     }
 }
 
@@ -893,11 +895,15 @@ private final class ExportWatermark: @unchecked Sendable {
         }
         // Bounds of the visible animation across all frames, normalized to the
         // source video. Its transparent canvas is substantially larger than the logo.
-        let visibleTop: CGFloat = 1 - 0.425
+        let visibleCenterY: CGFloat = 1 - 547.5 / 1080
         let visibleWidth: CGFloat = 0.566
         let shortEdge = CGFloat(min(width, height))
-        // Use the short edge for consistent, balanced margins in any aspect ratio.
-        let inset = shortEdge * 0.03
+        // Anchor at a quarter of the height in 9:16. In wider frames,
+        // move toward the lower edge while keeping a minimum clearance.
+        let frameHeight = CGFloat(height)
+        let portraitFactor = (frameHeight / CGFloat(width)) * (9.0 / 16.0)
+        let referenceInset = frameHeight * portraitFactor * 0.25
+        let watermarkCenterY = min(max(referenceInset, frameHeight * 0.12), frameHeight * 0.25)
         let scale = shortEdge * 0.40 / (CGFloat(frame.width) * visibleWidth)
         let overlay = CIImage(cgImage: frame)
             .applyingFilter("CIColorMatrix", parameters: [
@@ -906,7 +912,7 @@ private final class ExportWatermark: @unchecked Sendable {
             .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             .transformed(by: CGAffineTransform(
                 translationX: (CGFloat(width) - CGFloat(frame.width) * scale) * 0.5,
-                y: CGFloat(height) - inset - CGFloat(frame.height) * visibleTop * scale
+                y: watermarkCenterY - CGFloat(frame.height) * visibleCenterY * scale
             ))
         let result = overlay.composited(over: CIImage(cvPixelBuffer: source))
         context.render(result, to: destination, bounds: CGRect(x: 0, y: 0, width: width, height: height), colorSpace: CGColorSpaceCreateDeviceRGB())

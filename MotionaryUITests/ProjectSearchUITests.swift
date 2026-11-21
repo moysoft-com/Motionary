@@ -11,7 +11,7 @@ final class ProjectSearchUITests: XCTestCase {
     @MainActor
     func testOpeningSearchResultClosesOverlay() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["--skip-whats-new", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         XCTAssertTrue(app.staticTexts["Projects"].waitForExistence(timeout: 15))
 
@@ -42,7 +42,7 @@ final class ProjectSearchUITests: XCTestCase {
     @MainActor
     func testColdLaunchAndRepeatedSearchFromSettingsAndHome() {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["--skip-whats-new", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.terminate()
         app.launch()
 

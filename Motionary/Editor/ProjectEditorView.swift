@@ -2,6 +2,7 @@
 
 import PhotosUI
 import SwiftUI
+import TipKit
 import UniformTypeIdentifiers
 
 private struct ExportRecoveryShare: Identifiable {
@@ -85,6 +86,7 @@ struct ProjectEditorView: View {
         GeometryReader { geometry in
             editorCanvas(geometry: geometry)
         }
+        .suggestionsToastBoundary(.editor, alignment: .top)
         .overlay(alignment: .topTrailing) {
             if ScreenRecordingDebugPanel.isEnabled {
                 ScreenRecordingDebugPanel(viewModel: viewModel)
@@ -754,9 +756,13 @@ private struct EditorPlaybackControlBar: View {
                         systemName: "point.topleft.down.curvedto.point.bottomright.up",
                         title: "Edit \(activeTextMotionPhase.shortTitle) graph",
                         isProminent: true,
-                        action: { activePanel = .textMotionGraph },
+                        action: {
+                            GraphTip().invalidate(reason: .actionPerformed)
+                            activePanel = .textMotionGraph
+                        },
                         isBordered: false
                     )
+                    .popoverTip(GraphTip(), arrowEdge: .top)
                 } else if let section = activeGraphSection,
                     viewModel.candidateGraphSegment(in: section, effectID: activeEffectWorkspaceID) != nil
                 {
@@ -765,6 +771,7 @@ private struct EditorPlaybackControlBar: View {
                         title: "Graph",
                         isProminent: true,
                         action: {
+                            GraphTip().invalidate(reason: .actionPerformed)
                             graphReturnPanel = activePanel
                             viewModel.openCandidateGraphSegment(
                                 in: section,
@@ -776,6 +783,7 @@ private struct EditorPlaybackControlBar: View {
                         },
                         isBordered: false
                     )
+                    .popoverTip(GraphTip(), arrowEdge: .top)
                 } else if activePanel == .timeline {
                     CompactIconButton(
                         systemName: "link",
@@ -784,11 +792,13 @@ private struct EditorPlaybackControlBar: View {
                             : "Enable ripple editing",
                         isProminent: viewModel.isRippleEditingEnabled,
                         action: {
+                            RippleEditingTip().invalidate(reason: .actionPerformed)
                             viewModel.isRippleEditingEnabled.toggle()
                         },
                         isBordered: false,
                         tintsProminentIcon: true
                     )
+                    .popoverTip(RippleEditingTip(), arrowEdge: .top)
                 }
                 CompactIconButton(
                     systemName: "arrow.uturn.backward",
@@ -902,7 +912,9 @@ extension CoreEditorPanel {
             .haptics
         case .speed:
             .speed
-        case .mask, .removeBackground, .blend, .adjustmentTargets, .autoBeats, .canvas, .timeline, .graph:
+        case .mask:
+            .mask
+        case .removeBackground, .blend, .adjustmentTargets, .autoBeats, .canvas, .timeline, .graph:
             nil
         }
     }

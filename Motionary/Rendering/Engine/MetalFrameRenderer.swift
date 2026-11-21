@@ -464,7 +464,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                         ).transformed(by: inverse)
                     }
                     let colorAdjusted = applyAdjustments(clip.adjustments, to: source, at: localTime)
-                    let adjusted = hasObjectMotionBlur ? applyMask(clip.mask, to: colorAdjusted) : colorAdjusted
+                    let adjusted = hasObjectMotionBlur ? applyMask(clip.mask?.value(at: localTime), to: colorAdjusted) : colorAdjusted
                     guard !clip.contentEffects.effects.isEmpty else { return adjusted }
                     return try effectRegistry.render(
                         clip.contentEffects, to: adjusted.transformed(by: coordinates.inputTransform),
@@ -476,7 +476,7 @@ final class MetalFrameRenderer: @unchecked Sendable {
                     if let textSample = sourceResult.textAnimationSample {
                         transformed = applyClipReveal(textSample.clipReveal, to: transformed)
                     }
-                    if !hasObjectMotionBlur { transformed = applyMask(clip.mask, to: transformed) }
+                    if !hasObjectMotionBlur { transformed = applyMask(clip.mask?.value(at: localTime), to: transformed) }
                     transformed = place(
                         transformed,
                         placementExtent: placementExtent,
@@ -1037,7 +1037,8 @@ final class MetalFrameRenderer: @unchecked Sendable {
         let effectMask = adjustmentLayerMask(
             clip,
             canvasRect: canvasRect,
-            opacity: opacity
+            opacity: opacity,
+            at: localTime
         )
         return blend(processed, over: source, alphaMask: effectMask, in: canvasRect)
     }
@@ -1045,11 +1046,12 @@ final class MetalFrameRenderer: @unchecked Sendable {
     private func adjustmentLayerMask(
         _ clip: RenderClipDescriptor,
         canvasRect: CGRect,
-        opacity: Double
+        opacity: Double,
+        at localTime: Double
     ) -> CIImage {
         var mask = CIImage(color: CIColor(red: opacity, green: opacity, blue: opacity, alpha: opacity))
             .cropped(to: canvasRect)
-        mask = applyMask(clip.mask, to: mask)
+        mask = applyMask(clip.mask?.value(at: localTime), to: mask)
         return mask
             .composited(over: transparentImage(croppedTo: canvasRect))
             .cropped(to: canvasRect)

@@ -2,6 +2,7 @@
 
 import PhotosUI
 import SwiftUI
+import TipKit
 import UniformTypeIdentifiers
 
 private struct ProjectEditorSelection: Identifiable, Equatable {
@@ -30,6 +31,8 @@ struct HomeView: View {
     private let onEditorPresentationChange: (Bool) -> Void
     @State private var isMediaPickerPresented = false
     @State private var isHomeVisible = false
+    @State private var isDashboardHeaderVisible = false
+    @State private var openedProjectPicker = false
     @State private var lastPresentedNewProjectRequest: UUID?
     @State private var isCreatingProject = false
     @State private var errorMessage: String?
@@ -114,6 +117,7 @@ struct HomeView: View {
             .motionaryTopBar {
                 animatedDashboardHeader
                     .padding(18)
+                    .suggestionsToastBoundary(.projects)
             }
             .overlay {
                 if isCreatingProject || isTransferringProject {
@@ -124,6 +128,14 @@ struct HomeView: View {
                 guard !items.isEmpty else { return }
                 createProject(from: items)
                 newProjectMediaItems = []
+            }
+            .onChange(of: isMediaPickerPresented) { _, presented in
+                if presented {
+                    openedProjectPicker = true
+                } else if openedProjectPicker {
+                    openedProjectPicker = false
+                    MotionaryTipEvents.projectPicker.sendDonation()
+                }
             }
             .alert(
                 "Motionary",
@@ -156,6 +168,7 @@ struct HomeView: View {
             }
         }
         .onChange(of: selectedProject?.id, initial: true) { _, projectID in
+            if projectID != nil { MotionaryTipEvents.editorOpened.sendDonation() }
             onEditorPresentationChange(projectID != nil)
         }
         .onChange(of: incomingProjectID, initial: true) { _, projectID in
@@ -217,6 +230,8 @@ struct HomeView: View {
                             .transition(reduceMotion ? .opacity : .offset(y: 8).combined(with: .opacity))
                     } else {
                         dashboardHeader
+                            .onAppear { isDashboardHeaderVisible = true }
+                            .onDisappear { isDashboardHeaderVisible = false }
                             .transition(reduceMotion ? .opacity : .offset(y: -8).combined(with: .opacity))
                     }
                 }
@@ -282,10 +297,24 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("home-new-project")
+            .popoverTip(
+                isDashboardHeaderVisible && selectedProject == nil && !isMediaPickerPresented
+                    ? ProjectOptionsTip() : nil,
+                arrowEdge: .top
+            )
             .contextMenu {
-                Button("Empty Project", systemImage: "doc.badge.plus") { createEmptyProject() }
-                Button("Import Project", systemImage: "square.and.arrow.down") { isProjectImporterPresented = true }
-                Button("Choose from Library", systemImage: "photo.on.rectangle") { isMediaPickerPresented = true }
+                Button("Empty Project", systemImage: "doc.badge.plus") {
+                    ProjectOptionsTip().invalidate(reason: .actionPerformed)
+                    createEmptyProject()
+                }
+                Button("Import Project", systemImage: "square.and.arrow.down") {
+                    ProjectOptionsTip().invalidate(reason: .actionPerformed)
+                    isProjectImporterPresented = true
+                }
+                Button("Choose from Library", systemImage: "photo.on.rectangle") {
+                    ProjectOptionsTip().invalidate(reason: .actionPerformed)
+                    isMediaPickerPresented = true
+                }
             }
         }
     }

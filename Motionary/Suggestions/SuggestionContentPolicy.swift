@@ -21,7 +21,7 @@ enum SuggestionContentPolicy {
             + combined.components(separatedBy: "https://").count - 1
             + combined.components(separatedBy: "www.").count - 1
         if linkCount > 1 {
-            return "Suggestions may contain at most one link."
+            return "Feedback may contain at most one link."
         }
 
         if hasExcessiveRepetition(combined) {

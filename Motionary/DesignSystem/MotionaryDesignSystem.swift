@@ -149,6 +149,18 @@ extension View {
             }
         }
     }
+    
+    @ViewBuilder
+    func motionaryBottomBar<Bar: View>(@ViewBuilder content: () -> Bar) -> some View {
+        if #available(iOS 26.0, *) {
+            safeAreaBar(edge: .bottom, content: content)
+        } else {
+            safeAreaInset(edge: .bottom) {
+                content()
+                    .background(.bar)
+            }
+        }
+    }
 
     /// Wraps a view in the standard rounded Motionary glass surface.
     func motionaryGlass(cornerRadius: CGFloat = 18) -> some View {

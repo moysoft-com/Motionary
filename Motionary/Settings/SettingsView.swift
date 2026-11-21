@@ -103,7 +103,7 @@ struct SettingsView: View {
                     NavigationLink {
                         SuggestionsListView()
                     } label: {
-                        SettingsLabel("Suggestions", systemImage: "sparkles", colors: [.yellow, .orange])
+                        SettingsLabel("Feedback", systemImage: "sparkles", colors: [.yellow, .orange])
                     }
                 } header: {
                     Text("Feedback")
@@ -178,6 +178,7 @@ struct SettingsView: View {
                     Spacer()
                 }
                 .padding(18)
+                .suggestionsToastBoundary(.settings)
             }
             .tint(MotionaryTheme.accent)
             .confirmationDialog(

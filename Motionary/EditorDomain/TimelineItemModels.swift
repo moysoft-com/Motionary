@@ -199,6 +199,64 @@ struct ItemMask: Codable, Equatable, Sendable {
         self.isInverted = isInverted
     }
 
+    enum Channel: String, Codable, CaseIterable, Sendable {
+        case widthScale, heightScale, featherScale, roundnessScale, rotationDegrees
+        case offsetScale, offsetX, offsetY
+
+        var keyPath: WritableKeyPath<ItemMask, Double> {
+            switch self {
+            case .widthScale: \.widthScale
+            case .heightScale: \.heightScale
+            case .featherScale: \.featherScale
+            case .roundnessScale: \.roundnessScale
+            case .rotationDegrees: \.rotationDegrees
+            case .offsetScale: \.offsetScale
+            case .offsetX: \.offsetX
+            case .offsetY: \.offsetY
+            }
+        }
+    }
+
+    var animations: [Channel: AnimatableProperty<Double>] = [:]
+
+    var keyframes: [Keyframe<Double>] { animations[.widthScale]?.keyframes ?? [] }
+
+    func value(at time: Double) -> ItemMask {
+        guard !animations.isEmpty else { return self }
+        var resolved = self
+        resolved.animations = [:]
+        for (channel, property) in animations {
+            resolved[keyPath: channel.keyPath] = property.value(at: time)
+        }
+        return resolved
+    }
+
+    mutating func setGeometryKeyframe(at time: Double, value: ItemMask, tolerance: Double) {
+        for channel in Channel.allCases {
+            var property = animations[channel] ?? AnimatableProperty(baseValue: self[keyPath: channel.keyPath])
+            _ = property.setKeyframe(at: time, value: value[keyPath: channel.keyPath], tolerance: tolerance)
+            animations[channel] = property
+        }
+    }
+
+    mutating func removeGeometryKeyframe(at time: Double, tolerance: Double) {
+        let resolved = value(at: time)
+        for channel in Channel.allCases {
+            guard var property = animations[channel] else { continue }
+            property.keyframes.removeAll { abs($0.time - time) <= tolerance }
+            animations[channel] = property.keyframes.isEmpty ? nil : property
+            if property.keyframes.isEmpty {
+                self[keyPath: channel.keyPath] = resolved[keyPath: channel.keyPath]
+            }
+        }
+    }
+
+    func mappingAnimations(_ transform: (AnimatableProperty<Double>) -> AnimatableProperty<Double>) -> ItemMask {
+        var result = self
+        result.animations = animations.mapValues(transform)
+        return result
+    }
+
     var insetX: Double {
         (1 - widthScale) * 0.5
     }
@@ -222,6 +280,7 @@ struct ItemMask: Codable, Equatable, Sendable {
         case offsetX
         case offsetY
         case isInverted
+        case animations
         case insetX
         case insetY
         case feather
@@ -251,6 +310,7 @@ struct ItemMask: Codable, Equatable, Sendable {
                 feather: try container.decodeIfPresent(Double.self, forKey: .feather) ?? 0
             )
         }
+        animations = try container.decodeIfPresent([Channel: AnimatableProperty<Double>].self, forKey: .animations) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -265,6 +325,9 @@ struct ItemMask: Codable, Equatable, Sendable {
         try container.encode(offsetX, forKey: .offsetX)
         try container.encode(offsetY, forKey: .offsetY)
         try container.encode(isInverted, forKey: .isInverted)
+        if !animations.isEmpty {
+            try container.encode(animations, forKey: .animations)
+        }
     }
 
     private static func bounded(
@@ -522,22 +585,25 @@ struct TimelineItemVisuals: Codable, Equatable, Sendable {
 extension TimelineItemVisuals {
     func splittingAnimations(at time: Double) -> (left: TimelineItemVisuals, right: TimelineItemVisuals) {
         let split = animationCarrier.splittingAnimations(at: time)
-        return (
-            left: applyingAnimations(from: split.left),
-            right: applyingAnimations(from: split.right)
-        )
+        var left = applyingAnimations(from: split.left)
+        var right = applyingAnimations(from: split.right)
+        left.mask = mask?.mappingAnimations { $0.split(at: time).left }
+        right.mask = mask?.mappingAnimations { $0.split(at: time).right }
+        return (left, right)
     }
 
     mutating func trimAnimationsAtStart(by delta: Double, oldDuration: Double) {
         var carrier = animationCarrier
         carrier.trimAnimationsAtStart(by: delta, oldDuration: oldDuration)
         self = applyingAnimations(from: carrier)
+        mask = mask?.mappingAnimations { $0.trimmedStart(by: delta, oldDuration: oldDuration) }
     }
 
     mutating func trimAnimationsAtEnd(newDuration: Double, oldDuration: Double) {
         var carrier = animationCarrier
         carrier.trimAnimationsAtEnd(newDuration: newDuration, oldDuration: oldDuration)
         self = applyingAnimations(from: carrier)
+        mask = mask?.mappingAnimations { $0.trimmedEnd(newDuration: newDuration, oldDuration: oldDuration) }
     }
 
     private var animationCarrier: TimelineClip {

@@ -270,7 +270,7 @@ extension TimelineClip {
         case .audio:
             guard mediaType == .audio || mediaType == .video else { return [] }
             return [.volume]
-        case .speed, .haptics, .textType, .textStyle:
+        case .speed, .mask, .haptics, .textType, .textStyle:
             return []
         }
     }

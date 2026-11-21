@@ -55,10 +55,9 @@ struct ExportSettingsView: View {
                     ?? AppPreferences.defaultExportContainer
             ) ?? .mp4
         }
-        _settings = State(initialValue: initialSettings.normalized)
-        _resolutionPreset = State(
-            initialValue: Self.resolutionPreset(for: initialSettings, project: project)
-        )
+        let preset = Self.resolutionPreset(for: initialSettings, project: project)
+        _settings = State(initialValue: preset.settings(initialSettings, for: project.renderSettings))
+        _resolutionPreset = State(initialValue: preset)
     }
 
     var body: some View {
@@ -74,7 +73,7 @@ struct ExportSettingsView: View {
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: resolutionPreset) { _, preset in
-                            applyResolutionPreset(preset)
+                            settings = preset.settings(settings, for: project.renderSettings)
                         }
                     }
                     VStack(alignment: .leading) {
@@ -250,16 +249,17 @@ struct ExportSettingsView: View {
         for settings: VideoExportSettings,
         project: EditorProject
     ) -> ExportResolutionPreset {
-        if settings.width == project.renderSettings.width,
-            settings.height == project.renderSettings.height
-        {
+        if let preset = settings.resolutionPreset { return preset }
+        let canvas = VideoExportSettings.recommended(for: project).normalized
+        let saved = settings.normalized
+        if saved.width == canvas.width, saved.height == canvas.height {
             return .project
         }
-        return switch max(settings.width, settings.height) {
+        return switch max(saved.width, saved.height) {
         case 1280: .hd
         case 1920: .fullHD
         case 3840: .uhd
-        default: .custom
+        default: .project
         }
     }
 
@@ -279,34 +279,9 @@ struct ExportSettingsView: View {
         return String(format: "~%.1f MB", megabytes)
     }
 
-    private func applyResolutionPreset(_ preset: ExportResolutionPreset) {
-        guard preset != .custom else { return }
-        if preset == .project {
-            settings.width = project.renderSettings.width
-            settings.height = project.renderSettings.height
-            return
-        }
-
-        let sourceWidth = max(project.renderSettings.width, 1)
-        let sourceHeight = max(project.renderSettings.height, 1)
-        let isLandscape = sourceWidth >= sourceHeight
-        let longEdge = preset.longEdge
-        let aspect = Double(sourceWidth) / Double(sourceHeight)
-        let shortEdge: Int
-        if isLandscape {
-            shortEdge = Int((Double(longEdge) / aspect).rounded())
-            settings.width = longEdge
-            settings.height = shortEdge
-        } else {
-            shortEdge = Int((Double(longEdge) * aspect).rounded())
-            settings.width = shortEdge
-            settings.height = longEdge
-        }
-        settings = settings.normalized
-    }
 }
 
-private enum ExportResolutionPreset: String, CaseIterable, Identifiable {
+enum ExportResolutionPreset: String, Codable, CaseIterable, Identifiable {
     case project
     case hd
     case fullHD
@@ -332,6 +307,25 @@ private enum ExportResolutionPreset: String, CaseIterable, Identifiable {
         case .hd: 1280
         case .project, .custom: 0
         }
+    }
+
+    func settings(_ current: VideoExportSettings, for canvas: RenderSettings) -> VideoExportSettings {
+        var updated = current
+        updated.resolutionPreset = self
+        switch self {
+        case .project:
+            updated.width = canvas.width
+            updated.height = canvas.height
+        case .hd, .fullHD, .uhd:
+            let width = Double(max(canvas.width, 1))
+            let height = Double(max(canvas.height, 1))
+            let scale = Double(longEdge) / max(width, height)
+            updated.width = Int((width * scale).rounded())
+            updated.height = Int((height * scale).rounded())
+        case .custom:
+            break
+        }
+        return updated.normalized
     }
 }
 

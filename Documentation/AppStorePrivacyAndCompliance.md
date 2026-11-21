@@ -30,7 +30,8 @@ Review these answers for every release. The final selection depends on Apple's c
 - Firebase creates an anonymous account when a person first opens Feedback. The app reads the existing Firestore collection directly.
 - Publish the Firestore rules and wait for the `votes.userID` collection-group index. Test a new request and its completion on a test account before release.
 - Install the local admin tool with `npm ci --prefix scripts/feedback-admin`. It uses Google Application Default Credentials with Firestore and Firebase Authentication administration permissions. No Cloud Functions or Blaze plan is needed.
-- Check the queue regularly with `node scripts/feedback-admin/admin.mjs motionary-9e87f list`. Process each pending request within 30 days with `node scripts/feedback-admin/admin.mjs motionary-9e87f delete UID`. The app shows confirmation when the user checks Feedback. Re-run an interrupted deletion with the same UID.
+- Check **Löschanfragen** in the Moysoft Motionary admin panel. Open a request and process it within 30 days. The app shows confirmation when the user checks Feedback. The local `list` and `delete UID` commands remain available when the website is unavailable.
+- Set `MOTIONARY_FIREBASE_ADMIN_JSON` as a secret scoped to production Functions in the Moysoft Netlify project, then deploy. Use a dedicated Motionary service account with Firestore data read/write access and Firebase Auth user lookup and deletion permissions. The endpoint verifies the caller's Firebase token and enabled admin record. Test against a real test request before relying on the panel.
 - Run `node scripts/feedback-admin/admin.mjs motionary-9e87f prune` during routine maintenance to remove completed UID markers after 24 hours. Keep the opaque completion receipts available for people returning to the app.
 
 ## Netlify legal-notice form

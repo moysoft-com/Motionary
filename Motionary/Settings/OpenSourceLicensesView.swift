@@ -19,6 +19,14 @@ struct OpenSourceLicensesView: View {
 
     var body: some View {
         List {
+            Section("Firebase and Dependencies") {
+                bundledLicenseLink("License Notices", resource: "Firebase-SDK-Licenses")
+            }
+            Section("Beat This!") {
+                Text("Beat This! by Francesco Foscarin, Jan Schlüter and Gerhard Widmer. The original model weights are licensed under the MIT License.")
+                Link("Source and model information", destination: URL(string: "https://github.com/CPJKU/beat_this")!)
+                bundledLicenseLink("MIT License", resource: "LICENSE")
+            }
             Section("SwiftUI-Shimmer") {
                 Text("SwiftUI-Shimmer by Vikram Kriplaney. Licensed under the MIT License.")
                 Link("Source", destination: URL(string: "https://github.com/markiv/SwiftUI-Shimmer")!)
@@ -43,5 +51,23 @@ struct OpenSourceLicensesView: View {
             }
         }
         .navigationTitle("Open Source Licenses")
+    }
+
+    private func bundledLicenseLink(_ title: String, resource: String) -> some View {
+        NavigationLink(title) {
+            ScrollView {
+                if let url = Bundle.main.url(forResource: resource, withExtension: "txt"),
+                   let text = try? String(contentsOf: url, encoding: .utf8) {
+                    Text(verbatim: text)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                } else {
+                    Text("License text unavailable.").padding()
+                }
+            }
+            .navigationTitle(title)
+        }
     }
 }

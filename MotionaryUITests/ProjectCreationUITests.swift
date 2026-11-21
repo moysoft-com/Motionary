@@ -4,7 +4,7 @@ final class ProjectCreationUITests: XCTestCase {
     @MainActor
     func testNewProjectContextMenuAndEmptyProject() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["--skip-whats-new", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
         let button = app.buttons["home-new-project"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 15))

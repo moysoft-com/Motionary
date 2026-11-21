@@ -1,6 +1,7 @@
 // Timeline track row presentation, selection, deletion, and reorder interactions.
 
 import SwiftUI
+import TipKit
 import UIKit
 
 enum TimelineTrackBackgroundRange {
@@ -38,6 +39,9 @@ struct TimelineTrackRow: View {
     let items: [TimelineRenderItem]
     let trackIndex: Int
     let trackCount: Int
+    @ObservedObject var selectionState: SelectionState
+    let trackTop: CGFloat
+    let viewportHeight: CGFloat
     let selectedClipID: UUID?
     let activeClipDrag: TimelineClipDragState?
     let activeTrackDrag: TimelineTrackDragState?
@@ -87,6 +91,9 @@ struct TimelineTrackRow: View {
         ZStack(alignment: .leading) {
             TimelineTrackHeader(
                 track: track,
+                isSelected: selectionState.trackID == track.id,
+                trackTop: trackTop,
+                viewportHeight: viewportHeight,
                 centerPadding: centerPadding,
                 height: height,
                 scrollPresentationState: scrollPresentationState,
@@ -251,6 +258,9 @@ struct TimelineTrackRow: View {
 
 private struct TimelineTrackHeader: View {
     let track: TimelineTrack
+    let isSelected: Bool
+    let trackTop: CGFloat
+    let viewportHeight: CGFloat
     let centerPadding: CGFloat
     let height: CGFloat
     @ObservedObject var scrollPresentationState: TimelineScrollPresentationState
@@ -270,7 +280,10 @@ private struct TimelineTrackHeader: View {
         trackLabel
             .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
             .contextMenu {
-                Button(action: onToggleTrackMuted) {
+                Button {
+                    LayerOptionsTip().invalidate(reason: .actionPerformed)
+                    onToggleTrackMuted()
+                } label: {
                     switch (track.kind == .audio, track.isMuted) {
                     case (true, true): Label("Unmute Layer", systemImage: "speaker.wave.2")
                     case (true, false): Label("Mute Layer", systemImage: "speaker.slash")
@@ -279,16 +292,34 @@ private struct TimelineTrackHeader: View {
                     }
                 }
                 Divider()
-                Button("Cut", systemImage: "scissors", action: onCutTrack)
-                Button("Copy", systemImage: "doc.on.doc", action: onCopyTrack)
-                Button("Paste", systemImage: "doc.on.clipboard", action: onPasteTrack)
+                Button("Cut", systemImage: "scissors") {
+                    LayerOptionsTip().invalidate(reason: .actionPerformed)
+                    onCutTrack()
+                }
+                Button("Copy", systemImage: "doc.on.doc") {
+                    LayerOptionsTip().invalidate(reason: .actionPerformed)
+                    onCopyTrack()
+                }
+                Button("Paste", systemImage: "doc.on.clipboard") {
+                    LayerOptionsTip().invalidate(reason: .actionPerformed)
+                    onPasteTrack()
+                }
                 Divider()
                 DeleteMenuButton {
+                    LayerOptionsTip().invalidate(reason: .actionPerformed)
                     isShowingDeleteConfirmation = true
                 }
             }
-            .onTapGesture(count: 2) { EditorHaptics.tap(); isShowingDeleteConfirmation = true }
-            .onTapGesture { onSelectTrack() }
+            .onTapGesture(count: 2) {
+                LayerOptionsTip().invalidate(reason: .actionPerformed)
+                EditorHaptics.tap()
+                isShowingDeleteConfirmation = true
+            }
+            .onTapGesture {
+                onSelectTrack()
+                MotionaryTipEvents.layerSelection.sendDonation()
+            }
+            .popoverTip(isSelected && isTrackVisible ? LayerOptionsTip() : nil, arrowEdge: .leading)
             .accessibilityValue(trackState)
             .accessibilityIdentifier("timeline-track-\(track.id.uuidString)")
             .position(
@@ -296,6 +327,11 @@ private struct TimelineTrackHeader: View {
                 y: height * 0.5
             )
             .transaction { $0.animation = nil }
+    }
+
+    private var isTrackVisible: Bool {
+        let visibleTop = trackTop - scrollPresentationState.verticalOffset
+        return visibleTop >= 0 && visibleTop + height <= viewportHeight
     }
 
     private var trackLabelOffset: CGFloat {
