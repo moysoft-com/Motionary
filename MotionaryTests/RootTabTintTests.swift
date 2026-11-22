@@ -11,7 +11,7 @@ struct RootTabTintTests {
     func rootAccentIsConfinedToTabsAndDoesNotReachHostedOrPresentedContent(style: UIUserInterfaceStyle) async throws {
         let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let content = ProjectTabController(
-            selection: .constant(0), isSearching: false, isEditorPresented: false,
+            selection: .constant(0), isSearchEnabled: true, isSearching: false, isEditorPresented: false,
             homeRevision: nil, onSearch: {}, onLeaveHome: {},
             home: { VStack { Text("Home"); RootTintProbe() } }, settings: { Text("Settings") }
         )

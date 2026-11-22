@@ -335,7 +335,8 @@ extension EditorViewModel {
     func playbackSeekTime(to time: Double, on player: AVPlayer) -> Double? {
         let target = livePreviewPresentationTime(clampedPlayableTime(time))
         let position = player.currentTime()
-        if playbackNeedsSeekAfterMixUpdate || isScrubSeekInFlight || isPreviewSeekInFlight || !position.isNumeric
+        if playbackNeedsSeekAfterMixUpdate || playbackNeedsSeekAfterNavigation
+            || isScrubSeekInFlight || isPreviewSeekInFlight || !position.isNumeric
             || abs(position.seconds - target) > 0.5 / 600
         {
             return target
@@ -354,9 +355,12 @@ extension EditorViewModel {
                     self.playbackState.isStartingPlayback = false
                 }
             }
+            await self.scratchAudio.finishBeforePlayback()
+            guard self.ownsPlaybackStart(for: player, generation: generation) else { return }
             async let audioSession: Void = self.preparePlaybackAudio()
             let needsInitialPosition = player.currentItem?.videoComposition != nil && self.lastPreviewRenderedFrameAt == 0
-            let target = time ?? (needsInitialPosition ? self.clampedPlayableTime(self.currentTime) : nil)
+            let target = time ?? (needsInitialPosition || self.playbackNeedsSeekAfterNavigation
+                ? self.livePreviewPresentationTime(self.clampedPlayableTime(self.currentTime)) : nil)
             if let target {
                 let result = await self.boundedSeek(
                     player: player, to: target, toleranceBefore: .zero,
@@ -395,6 +399,7 @@ extension EditorViewModel {
                 guard self.ownsPlaybackStart(for: player, generation: generation) else { return }
                 if let track { self.hapticPlayback.attach(to: player, track: track) }
             }
+            self.playbackNeedsSeekAfterNavigation = false
             self.isPlaying = true
             player.play()
             self.startPlaybackWatchdog()
@@ -672,6 +677,7 @@ extension EditorViewModel {
     }
 
     func seekPlayer(to time: Double, exact: Bool) {
+        playbackNeedsSeekAfterNavigation = true
         let clamped = clampedPlayableTime(time)
         let tolerance = exact ? 0 : 0.035
         let toleranceAfter = min(tolerance, lastPlayableTime - clamped)
@@ -724,6 +730,7 @@ extension EditorViewModel {
         player?.pause()
         isPlaying = false
         isScrubbing = true
+        playbackNeedsSeekAfterNavigation = true
         player?.currentItem?.seekingWaitsForVideoCompositionRendering = true
         let hasPendingAudio = !pendingPreviewInvalidation.intersection([.audioMix, .compositionTopology]).isEmpty
         if hasPendingAudio {

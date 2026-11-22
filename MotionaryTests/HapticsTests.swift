@@ -432,6 +432,33 @@ private final class PlaybackTestHapticEngine: HapticPlaybackEngine {
 }
 
 final class TimelineAudioWaveformTests: XCTestCase {
+    func testTrimmedAndSplitWaveformsRetainSourceLevels() {
+        let envelope = TimelineAudioEnvelope(
+            sourceStart: 2,
+            sourceDuration: 4,
+            levels: [0.1, 0.6, 0.2, 0.9]
+        )
+        let full = envelope.samples(
+            in: TimeRangeValue(start: 2, duration: 4), speedMap: .constant(speed: 2), count: 9
+        )
+        let left = envelope.samples(
+            in: TimeRangeValue(start: 2, duration: 2), speedMap: .constant(speed: 2), count: 5
+        )
+        let right = envelope.samples(
+            in: TimeRangeValue(start: 4, duration: 2), speedMap: .constant(speed: 2), count: 5
+        )
+        let trimmed = envelope.samples(
+            in: TimeRangeValue(start: 3, duration: 2), speedMap: .constant(speed: 2), count: 5
+        )
+        XCTAssertEqual(left, Array(full.prefix(5)))
+        XCTAssertEqual(right, Array(full.suffix(5)))
+        XCTAssertEqual(trimmed, Array(full[2...6]))
+        XCTAssertEqual(
+            envelope.samples(in: TimeRangeValue(start: 0, duration: 6), speedMap: .constant, count: 4),
+            [0.015, full[0], full[4], full[8]]
+        )
+    }
+
     func testScalingKeepsDetailInLoudAndQuietClips() {
         let loud = TimelineAudioWaveformLoader.scaledEnvelope([0, 0.50, 0.65, 0.90, 1])
         let quiet = TimelineAudioWaveformLoader.scaledEnvelope([0, 0.010, 0.013, 0.018, 0.020])

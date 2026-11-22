@@ -3,7 +3,9 @@ import CryptoKit
 
 /// AVPlayer schedules a separate rate change for each edit in a speed curve.
 /// Render those edits once, with their authored pitch, so playback and seeking
-/// only have to start a single PCM stream. Gain automation stays on the item.
+/// only have to start a single PCM stream. The same representation lets
+/// extracted movie audio seek by sample without relying on container edit lists.
+/// Gain automation stays on the item.
 enum PreviewRetimedAudio {
     private static let root: URL = {
         let folder = URL.cachesDirectory.appendingPathComponent("MotionaryRetimedAudio-v2", isDirectory: true)
@@ -32,14 +34,14 @@ enum PreviewRetimedAudio {
     }
 
     static func prepare(track: AVMutableCompositionTrack, clipID: UUID, source: URL, pitch: AVAudioTimePitchAlgorithm,
-                        coldSecondsRemaining: inout Double) async throws {
+                        needsSeekablePCM: Bool, coldSecondsRemaining: inout Double) async throws {
         let populated = track.segments.filter { !$0.isEmpty }
         guard let first = populated.first, let last = populated.last,
-            populated.contains(where: { $0.timeMapping.source.duration != $0.timeMapping.target.duration })
+            needsSeekablePCM || populated.contains(where: { $0.timeMapping.source.duration != $0.timeMapping.target.duration })
         else { return }
         let range = CMTimeRange(start: first.timeMapping.target.start, end: last.timeMapping.target.end)
         let values = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        var key = "\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(pitch.rawValue)"
+        var key = "complete-tail|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(pitch.rawValue)"
         let local = AVMutableComposition()
         guard let audio = local.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
         else { throw CocoaError(.fileReadCorruptFile) }
@@ -87,14 +89,14 @@ enum PreviewRetimedAudio {
             else { throw CocoaError(.fileReadCorruptFile) }
             let job = RenderJob(composition: snapshot, track: input, pitch: pitch, format: format,
                                 duration: range.duration, file: file)
-            // Never put an entire long project on the cold-open critical path.
-            // The native edits remain available while a serial worker warms
-            // the disk cache for the next graph.
-            guard range.duration.seconds <= coldSecondsRemaining else {
+            // Curve-only audio can use native edits while the cache warms.
+            // Extracted movie audio needs its sample-addressable stream on
+            // the first playback, which may start with a seek.
+            guard needsSeekablePCM || range.duration.seconds <= coldSecondsRemaining else {
                 await warmups.enqueue(job, for: clipID)
                 return
             }
-            coldSecondsRemaining -= range.duration.seconds
+            coldSecondsRemaining = max(0, coldSecondsRemaining - range.duration.seconds)
             try await foregroundWriter.materialize(job)
         }
         let asset = AVURLAsset(url: file)
@@ -215,7 +217,13 @@ enum PreviewRetimedAudio {
                 offset += count
             }
         }
-        guard reader.status == .completed, file.framePosition > 0 else { throw reader.error ?? CocoaError(.fileReadCorruptFile) }
+        guard reader.status == .completed, file.framePosition > 0 else {
+            throw reader.error ?? CocoaError(.fileReadCorruptFile)
+        }
+        // The requested range ends at the last populated edit. Permit small
+        // decoder rounding, but never publish a cache with a missing tail.
+        let tailTolerance = Int64(ceil(sampleRate * 0.05))
+        guard total - file.framePosition <= tailTolerance else { throw CocoaError(.fileReadCorruptFile) }
         try pad(to: total)
     }
 }

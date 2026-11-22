@@ -391,6 +391,18 @@ private final class ScratchAudioWorker: @unchecked Sendable {
         }
     }
 
+    func pauseBeforePlayback() async {
+        control.active.store(false, ordering: .releasing)
+        await withCheckedContinuation { continuation in
+            engineQueue.async { [self] in
+                if !control.active.load(ordering: .acquiring), engine?.isRunning == true {
+                    engine?.pause()
+                }
+                continuation.resume()
+            }
+        }
+    }
+
     func shutdown() {
         stop()
         invalidate(generation: bank.generation.load(ordering: .acquiring) &+ 1, around: 0)
@@ -661,6 +673,11 @@ final class TimelineScratchAudio {
     func end() {
         isGestureActive = false
         worker?.stop()
+    }
+
+    func finishBeforePlayback() async {
+        isGestureActive = false
+        await worker?.pauseBeforePlayback()
     }
 
     func shutdown() {

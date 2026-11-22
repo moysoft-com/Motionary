@@ -267,17 +267,17 @@ struct AutoBeatsWorkspaceView: View {
                         .accessibilityLabel("Beat subdivisions")
                     }
 
-                    if !suggestedCuts.isEmpty {
-                        Menu {
-                            ForEach(suggestedCuts) { cut in
-                                Button(String(format: "%.2f s", cut.timelineTime)) {
-                                    viewModel.seek(to: cut.timelineTime)
-                                }
-                            }
-                        } label: {
-                            Label("Suggested cuts", systemImage: "sparkles.2")
-                        }
-                    }
+//                    if !suggestedCuts.isEmpty {
+//                        Menu {
+//                            ForEach(suggestedCuts) { cut in
+//                                Button(String(format: "%.2f s", cut.timelineTime)) {
+//                                    viewModel.seek(to: cut.timelineTime)
+//                                }
+//                            }
+//                        } label: {
+//                            Label("Suggested cuts", systemImage: "sparkles.2")
+//                        }
+//                    }
 
                     EditorWorkspaceCommandButton(
                         title: "Add Haptics",

@@ -55,6 +55,11 @@ struct TimelineItemBlock: View {
 
     private let innerOutline = Color.black.opacity(0.42)
 
+    private var waveformSourceSpeedMap: SpeedMap? {
+        guard case .media(let baseline) = trimBaseline, baseline.mediaType == .audio else { return nil }
+        return baseline.speedMap
+    }
+
     var body: some View {
         let previewItem = displayedItem
         let mediaClip = trimBaseline?.legacyClip() ?? cachedMediaClip ?? previewItem.legacyClip()
@@ -101,7 +106,9 @@ struct TimelineItemBlock: View {
                     pixelsPerSecond: pixelsPerSecond,
                     sampleWidth: mediaSampleWidth,
                     sampleOffsetX: mediaSampleOffsetX,
-                    visibleTimelineRange: visibleTimelineRange
+                    waveformSourceSpeedMap: waveformSourceSpeedMap,
+                    visibleTimelineRange: visibleTimelineRange,
+                    thumbnailFocusTime: playbackState?.currentTime
                 )
                 .frame(width: displayWidth, height: height)
                 .foregroundStyle(Color.black.opacity(0.88))
@@ -497,7 +504,9 @@ struct TimelineItemVisualFill: View {
     let pixelsPerSecond: CGFloat
     let sampleWidth: CGFloat?
     let sampleOffsetX: CGFloat
+    var waveformSourceSpeedMap: SpeedMap? = nil
     var visibleTimelineRange: ClosedRange<Double>? = nil
+    var thumbnailFocusTime: Double? = nil
 
     @ViewBuilder
     var body: some View {
@@ -514,7 +523,8 @@ struct TimelineItemVisualFill: View {
                     sampleWidth: sampleWidth,
                     sampleOffsetX: sampleOffsetX,
                     timelineStart: item.timelineStart,
-                    visibleTimelineRange: visibleTimelineRange
+                    visibleTimelineRange: visibleTimelineRange,
+                    thumbnailFocusTime: thumbnailFocusTime
                 )
                 .overlay {
                     TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
@@ -530,14 +540,15 @@ struct TimelineItemVisualFill: View {
                 TimelineClipFill(
                     clip: mediaClip,
                     media: media,
-                    speedMap: mediaItem.speedMap,
+                    speedMap: waveformSourceSpeedMap ?? mediaItem.speedMap,
                     width: width,
                     height: height,
                     pixelsPerSecond: pixelsPerSecond,
                     sampleWidth: sampleWidth,
                     sampleOffsetX: sampleOffsetX,
                     timelineStart: item.timelineStart,
-                    visibleTimelineRange: visibleTimelineRange
+                    visibleTimelineRange: visibleTimelineRange,
+                    thumbnailFocusTime: thumbnailFocusTime
                 )
             } else {
                 TimelineItemLabel(icon: timelineItemIcon(for: item), title: timelineItemTitle(for: item))
@@ -634,13 +645,15 @@ struct TimelineClipFill: View {
     let sampleOffsetX: CGFloat
     let timelineStart: Double
     var visibleTimelineRange: ClosedRange<Double>? = nil
+    var thumbnailFocusTime: Double? = nil
 
     @Environment(\.displayScale) private var displayScale
-    @State private var waveformSamples: [CGFloat] = []
+    @State private var waveform: (mappingID: String, samples: [CGFloat])?
 
     var body: some View {
         let thumbnailWidth = timelineThumbnailWidth
         let secondsPerThumbnail = Double(thumbnailWidth / thumbnailSamplingPixelsPerSecond)
+        let focusX = CGFloat((thumbnailFocusTime ?? timelineStart) - timelineStart) * pixelsPerSecond
         ZStack {
             if clip.shape != nil {
                 Color.orange
@@ -660,7 +673,8 @@ struct TimelineClipFill: View {
                             .offset(x: waveformLayout.drawingRange.lowerBound)
                         }
                     }
-                    .task(id: waveformTaskID) {
+                    .task(id: "\(waveformMappingID)|\(quantizedWaveformSampleCount)") {
+                        let mappingID = waveformMappingID
                         let samples = await TimelineAudioWaveformLoader.samples(
                             for: clip,
                             media: media,
@@ -668,11 +682,14 @@ struct TimelineClipFill: View {
                             targetCount: quantizedWaveformSampleCount
                         )
                         guard !Task.isCancelled, !samples.isEmpty else { return }
-                        waveformSamples = samples
+                        waveform = (mappingID, samples)
                     }
             } else {
                 ZStack(alignment: .leading) {
-                    ForEach(visibleThumbnailIndices, id: \.self) { index in
+                    ForEach(visibleThumbnailIndices.sorted {
+                        thumbnailDistance($0, width: thumbnailWidth, focusX: focusX)
+                            < thumbnailDistance($1, width: thumbnailWidth, focusX: focusX)
+                    }, id: \.self) { index in
                         TimelineThumbnailTile(
                             clip: clip,
                             media: media,
@@ -681,7 +698,8 @@ struct TimelineClipFill: View {
                             tileWidth: thumbnailWidth,
                             height: height,
                             secondsPerTile: secondsPerThumbnail,
-                            displayScale: displayScale
+                            displayScale: displayScale,
+                            distanceFromPlayhead: thumbnailDistance(index, width: thumbnailWidth, focusX: focusX)
                         )
                         .offset(x: CGFloat(index) * thumbnailWidth)
                     }
@@ -709,10 +727,8 @@ struct TimelineClipFill: View {
     }
 
     private var activeWaveformSamples: [CGFloat] {
-        if !waveformSamples.isEmpty {
-            return waveformSamples
-        }
-        return [0.02]
+        guard let waveform, waveform.mappingID == waveformMappingID else { return [0.02] }
+        return waveform.samples
     }
 
     private var timelineThumbnailWidth: CGFloat {
@@ -731,17 +747,21 @@ struct TimelineClipFill: View {
         max((pixelsPerSecond / 4).rounded() * 4, 4)
     }
 
+    private func thumbnailDistance(_ index: Int, width: CGFloat, focusX: CGFloat) -> CGFloat {
+        abs((CGFloat(index) + 0.5) * width - focusX)
+    }
+
     private var visibleThumbnailIndices: Range<Int> {
         let thumbnailWidth = max(timelineThumbnailWidth, 1)
         let totalCount = max(Int(ceil(width / thumbnailWidth)) + 1, 1)
         guard let visibleTimelineRange else { return 0..<totalCount }
         let localStart = max(
-            CGFloat(visibleTimelineRange.lowerBound - clip.timelineStart) * pixelsPerSecond,
+            CGFloat(visibleTimelineRange.lowerBound - timelineStart) * pixelsPerSecond,
             0
         )
         let localEnd = min(
             max(
-                CGFloat(visibleTimelineRange.upperBound - clip.timelineStart) * pixelsPerSecond,
+                CGFloat(visibleTimelineRange.upperBound - timelineStart) * pixelsPerSecond,
                 localStart
             ),
             width
@@ -751,14 +771,13 @@ struct TimelineClipFill: View {
         return first..<max(first, end)
     }
 
-    private var waveformTaskID: String {
+    private var waveformMappingID: String {
         [
             clip.id.uuidString,
-            "\(quantizedWaveformSampleCount)",
             media.mediaID.rawValue.uuidString,
             "\(speedMap.topologySignature)",
-            String(format: "%.3f", clip.sourceRange.start),
-            String(format: "%.3f", clip.sourceRange.duration)
+            String(clip.sourceRange.start),
+            String(clip.sourceRange.duration)
         ].joined(separator: "|")
     }
 }

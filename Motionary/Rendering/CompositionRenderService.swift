@@ -1263,6 +1263,7 @@ final class CompositionRenderService {
         var audioParameters: [AVAudioMixInputParameters] = []
         var visualTrackIDs: [UUID: CMPersistentTrackID] = [:]
         var audioTrackIDs: [UUID: CMPersistentTrackID] = [:]
+        var movieBackedAudioIDs = Set<UUID>()
         var sourceTransforms: [UUID: CGAffineTransform] = [:]
         var backgroundMaskTrackIDs: [UUID: CMPersistentTrackID] = [:]
         var backgroundMaskTransforms: [UUID: CGAffineTransform] = [:]
@@ -1470,6 +1471,9 @@ final class CompositionRenderService {
                     continue
                 }
                 audioTrackIDs[mediaItem.id] = compositionAudioTrack.trackID
+                if livePreviewState != nil, metadata.videoTrack != nil {
+                    movieBackedAudioIDs.insert(mediaItem.id)
+                }
                 audioParameters.append(
                     makeAudioParameters(
                         track: compositionAudioTrack,
@@ -1486,18 +1490,23 @@ final class CompositionRenderService {
         if livePreviewState != nil {
             var coldSecondsRemaining = 45.0
             for item in project.tracks.lazy.flatMap(\.items) {
-                guard case .media(let clip) = item, !isUnretimed(clip.speedMap, sourceDuration: clip.sourceRange.duration),
+                guard case .media(let clip) = item,
                     let id = audioTrackIDs[clip.id], let track = composition.track(withTrackID: id),
                     let source = project.mediaLibrary[clip.mediaID]?.url
                 else { continue }
+                let needsSeekablePCM = movieBackedAudioIDs.contains(clip.id)
+                let isRetimed = !isUnretimed(clip.speedMap, sourceDuration: clip.sourceRange.duration)
+                guard needsSeekablePCM || isRetimed else { continue }
+
                 do {
                     try await PreviewRetimedAudio.prepare(track: track, clipID: clip.id, source: source,
-                        pitch: clip.pitchFollowsSpeed ? .varispeed : .timeDomain, coldSecondsRemaining: &coldSecondsRemaining)
+                        pitch: clip.pitchFollowsSpeed || !isRetimed ? .varispeed : .timeDomain,
+                        needsSeekablePCM: needsSeekablePCM, coldSecondsRemaining: &coldSecondsRemaining)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
                     // The authored composition edits still play if the device cannot cache PCM.
-                    AppLogger.media.debug("Preview curve audio cache unavailable: \(error.localizedDescription, privacy: .public)")
+                    AppLogger.media.debug("Preview PCM audio cache unavailable: \(error.localizedDescription, privacy: .public)")
                 }
             }
         }

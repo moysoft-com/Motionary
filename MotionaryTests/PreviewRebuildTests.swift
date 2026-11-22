@@ -12,8 +12,9 @@ private final class ControlledSeekPlayer: AVPlayer, @unchecked Sendable {
     private var callbacks: [(@Sendable (Bool) -> Void)] = []
     private var requests: [(time: Double, tolerance: Double)] = []
     private(set) var playCalls = 0
+    var reportedTime = CMTime.zero
 
-    override func currentTime() -> CMTime { .zero }
+    override func currentTime() -> CMTime { reportedTime }
     override func play() { playCalls += 1 }
 
     override func seek(
@@ -160,6 +161,36 @@ struct PreviewRebuildTests {
         player.completeSeek(at: 0, finished: true)
         for _ in 0..<100 where player.playCalls == 0 { await Task.yield() }
         #expect(player.playCalls == 1)
+    }
+
+    @MainActor
+    @Test func playbackWaitsForAnExactSeekAfterScrubbingEvenWhenThePlayerClockAlreadyMatches() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        model.player = player
+        model.preparePlaybackAudio = {}
+        let target = model.lastPlayableTime * 0.85
+
+        model.beginScrub()
+        model.endScrub(at: target)
+        for _ in 0..<100 where player.pendingSeekCount == 0 { await Task.yield() }
+        let scrubSeek = try #require(player.seekRequests.first)
+        player.reportedTime = CMTime(seconds: scrubSeek.time, preferredTimescale: 600)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<100 where model.isScrubbing { await Task.yield() }
+        try #require(!model.isScrubbing)
+
+        model.togglePlayback()
+        for _ in 0..<100 where player.pendingSeekCount < 2 { await Task.yield() }
+        try #require(player.seekRequests.count == 2)
+        #expect(player.seekRequests[1].time == scrubSeek.time)
+        #expect(player.seekRequests[1].tolerance == 0)
+        #expect(player.playCalls == 0)
+        player.completeSeek(at: 1, finished: true)
+        for _ in 0..<100 where player.playCalls == 0 { await Task.yield() }
+        #expect(player.playCalls == 1)
+        #expect(!model.playbackNeedsSeekAfterNavigation)
     }
 
     @MainActor

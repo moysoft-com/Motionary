@@ -178,7 +178,8 @@ extension EditorViewModel {
     func extractAudioFromSelectedClip() {
         guard let selectedClipID,
             let clip = selectedClip,
-            clip.mediaType == .video
+            case .media(let videoItem) = project.item(id: selectedClipID),
+            videoItem.mediaType == .video
         else { return }
 
         Task {
@@ -187,49 +188,61 @@ extension EditorViewModel {
                     project.mediaURL(for: clip),
                     projectID: projectID
                 )
-                let asset = AVURLAsset(url: mediaURL)
-                let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-                guard !audioTracks.isEmpty else {
+                let asset = AVURLAsset(url: mediaURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+                guard let audioTrack = try await asset.loadTracks(withMediaType: .audio).first else {
                     errorMessage = "This video does not contain an audio track."
+                    return
+                }
+                let audioRange = try await audioTrack.load(.timeRange)
+                guard let location = project.clipLocation(id: selectedClipID),
+                    project.item(id: selectedClipID) == .media(videoItem),
+                    self.selectedClipID == selectedClipID
+                else { return }
+
+                let start = max(videoItem.sourceRange.start, audioRange.start.seconds)
+                let end = min(videoItem.sourceRange.end, audioRange.end.seconds)
+                guard audioRange.start.isNumeric, audioRange.end.isNumeric, end > start else {
+                    errorMessage = "The selected part of this video does not contain audio."
                     return
                 }
 
                 let beforeTracks = project.tracks
                 let beforeMediaLibrary = project.mediaLibrary
                 var draft = project
-                let videoClip = clip
+                // A variable map can cross the available audio range multiple times.
+                // Preserve those mappings so each audible section stays in sync.
+                let canCrop = videoItem.speedMap.timeRemap == nil
+                let sourceRange = canCrop
+                    ? TimeRangeValue(start: start, duration: end - start)
+                    : videoItem.sourceRange
                 let audioSource = ClipSource(
                     url: mediaURL,
                     mediaType: .audio,
-                    originalDuration: project.originalDuration(for: videoClip),
+                    originalDuration: max(audioRange.end.seconds, sourceRange.end),
                     naturalSize: nil
                 )
-                var audioClip = TimelineClip(
-                    name: "\(videoClip.name) Audio",
-                    source: audioSource,
-                    timelineStart: videoClip.timelineStart,
-                    sourceRange: videoClip.sourceRange,
-                    volume: AnimatableProperty(
-                        baseValue: max(videoClip.volume.baseValue, 1)
-                    )
+                let audioClip = MediaTimelineItem(
+                    name: "\(videoItem.name) Audio",
+                    mediaID: draft.registerMedia(from: audioSource),
+                    mediaType: .audio,
+                    timelineStart: videoItem.timelineStart
+                        + (sourceRange.start - videoItem.sourceRange.start) / videoItem.speedMap.constantSpeed,
+                    sourceRange: sourceRange,
+                    visuals: TimelineItemVisuals(volume: AnimatableProperty(baseValue: max(videoItem.visuals.volume.baseValue, 1))),
+                    speedMap: videoItem.speedMap,
+                    pitchFollowsSpeed: videoItem.pitchFollowsSpeed
                 )
-                draft.registerClipMedia(&audioClip, source: audioSource)
-                if let location = draft.clipLocation(id: selectedClipID) {
-                    draft.tracks[location.track].replaceLegacyClip(
-                        id: selectedClipID,
-                        with: {
-                            var clip = draft.tracks[location.track].clips[location.clip]
-                            clip.volume = AnimatableProperty(baseValue: 0)
-                            return clip
-                        }()
-                    )
-                }
+                var mutedVideo = videoItem
+                mutedVideo.visuals.volume = AnimatableProperty(baseValue: 0)
+                guard let videoIndex = draft.tracks[location.track].itemIndex(id: selectedClipID) else { return }
+                draft.tracks[location.track].items[videoIndex] = .media(mutedVideo)
                 let audioTrackIndex = draft.topAvailableTrackIndex(
                     kind: .audio,
                     start: audioClip.timelineStart,
-                    duration: audioClip.sourceRange.duration
+                    duration: audioClip.timelineDuration
                 ) ?? draft.insertFreshTrack(kind: .audio)
-                draft.tracks[audioTrackIndex].appendLegacyClip(audioClip)
+                draft.tracks[audioTrackIndex].items.append(.media(audioClip))
+                draft.tracks[audioTrackIndex].sortItems()
                 draft.synchronizeMediaLibrary()
                 commit(
                     AnyEditorCommand(

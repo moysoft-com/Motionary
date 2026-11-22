@@ -371,6 +371,8 @@ struct ProjectEditorView: View {
             && (availableHeight >= 500 || isTextKeyboardVisible)
             && !dynamicTypeSize.isAccessibilitySize
         let usesSideWorkspace = supportsSideWorkspace && activePanel != .timeline
+        let showsMiniTimeline = activePanel != .timeline
+            && !(UIDevice.current.userInterfaceIdiom == .pad && usesSideWorkspace)
         let inspectorWidth = min(max((geometry.size.width - 32) * 0.36, 340), 440)
         let wideTimelineHeight = min(max(availableHeight * 0.34, 180), 300)
         return ZStack {
@@ -405,7 +407,7 @@ struct ProjectEditorView: View {
                 )
                 .frame(maxHeight: .infinity)
 
-                if activePanel != .timeline {
+                if showsMiniTimeline {
                     SelectedLayerMiniTimeline(
                         viewModel: viewModel,
                         contextClipID: propertyContextTimelineItem?.id ?? viewModel.selectedTimelineItemID,

@@ -3,7 +3,15 @@
 import SwiftUI
 import UIKit
 
+enum SettingsDestination: Hashable {
+    case feedback
+}
+
 struct SettingsView: View {
+    @Binding var path: [SettingsDestination]
+    @Binding var searchText: String
+    @Binding var isSearchPresented: Bool
+
     @Environment(\.colorScheme) private var colorScheme
 
     @AppStorage(AppPreferences.newProjectFrameRateKey)
@@ -23,7 +31,7 @@ struct SettingsView: View {
     @State private var isResetConfirmationPresented = false
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Form {
                 Section {
                     Picker(selection: $newProjectFrameRate) {
@@ -100,9 +108,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    NavigationLink {
-                        SuggestionsListView()
-                    } label: {
+                    NavigationLink(value: SettingsDestination.feedback) {
                         SettingsLabel("Feedback", systemImage: "sparkles", colors: [.yellow, .orange])
                     }
                 } header: {
@@ -165,6 +171,12 @@ struct SettingsView: View {
                     } label: {
                         SettingsLabel("Reset Settings", systemImage: "arrow.counterclockwise", colors: [.red, .orange])
                     }
+                }
+            }
+            .navigationDestination(for: SettingsDestination.self) { destination in
+                switch destination {
+                case .feedback:
+                    SuggestionsListView(searchText: $searchText, isSearchPresented: $isSearchPresented)
                 }
             }
             .formStyle(.grouped)
@@ -244,5 +256,6 @@ private struct SettingsLabel: View {
 }
 
 #Preview {
-    SettingsView()
+    @Previewable @State var path: [SettingsDestination] = []
+    SettingsView(path: $path, searchText: .constant(""), isSearchPresented: .constant(false))
 }

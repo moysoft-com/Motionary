@@ -19,6 +19,7 @@ enum MotionaryPadTab: Int, CaseIterable {
 /// Liquid Glass tab bar with a native selection control on iPad.
 struct MotionaryPadTabBar: View {
     @Binding var selection: Int
+    let isSearchEnabled: Bool
     let isSearching: Bool
     let onSearch: () -> Void
 
@@ -64,6 +65,8 @@ struct MotionaryPadTabBar: View {
                 .buttonStyle(.plain)
                 .motionaryInteractiveGlassCapsule()
                 .accessibilityLabel(isSearching ? "Close search" : "Search")
+                .opacity(isSearchEnabled ? 1 : 0.35)
+                .disabled(!isSearchEnabled)
             }
             .frame(height: MotionaryPadTabBarMetrics.height)
             #if os(iOS)

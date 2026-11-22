@@ -240,37 +240,10 @@ struct HomeView: View {
     }
 
     private var projectSearchHeader: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(MotionaryDesign.Typography.compactIcon)
-                .foregroundStyle(MotionaryTheme.textSecondary)
-            TextField("Search projects", text: $searchText)
-                .accessibilityIdentifier("home-project-search-field")
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.callout)
-                .tint(MotionaryTheme.accent)
-                .submitLabel(.search)
-                .focused($isSearchFocused)
-                .task {
-                    guard isSearchPresented else { return }
-                    isSearchFocused = true
-                }
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: {
-                    Image(systemName: "delete.backward")
-                        .foregroundStyle(MotionaryTheme.textSecondary)
-                        .frame(width: 32, height: 44)
-                }
-                .accessibilityLabel("Clear search")
-            }
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 14)
-        .frame(height: 48)
-        .foregroundStyle(MotionaryTheme.textPrimary)
-        .background(MotionaryDesign.Surface.control(), in: Capsule())
-        .motionaryGlass(cornerRadius: 24)
+        MotionarySearchField(
+            prompt: "Search projects", accessibilityIdentifier: "home-project-search-field",
+            searchText: $searchText, isSearchPresented: isSearchPresented, focus: $isSearchFocused
+        )
     }
 
     private var dashboardHeader: some View {

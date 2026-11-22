@@ -815,10 +815,68 @@ struct SourceTimingRenderTests {
         #expect(quietPeak > loudPeak * 0.15 && quietPeak < loudPeak * 0.36)
     }
 
-    private static func earlyAudioPeak(of preview: PreparedPreview) throws -> Float {
+    @MainActor
+    @Test func extractedMovieAudioStartsAtTheRetainedSourceTimeAfterASeek() async throws {
+        let videoURL = try await makeVideo()
+        let folder = FileManager.default.temporaryDirectory
+        let audioURL = folder.appendingPathComponent("seek-audio-\(UUID()).caf")
+        let movieURL = folder.appendingPathComponent("seek-movie-\(UUID()).mov")
+        defer {
+            for url in [videoURL, audioURL, movieURL] { try? FileManager.default.removeItem(at: url) }
+            try? FileManager.default.removeItem(at: PreviewRetimedAudio.directory(for: movieURL))
+        }
+
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 168_000))
+        buffer.frameLength = buffer.frameCapacity
+        let samples = try #require(buffer.floatChannelData?[0])
+        for frame in 0..<Int(buffer.frameLength) {
+            let amplitude: Float = frame < 96_000 ? 0.05 : 0.45
+            samples[frame] = amplitude * Float(sin(Double(frame) * 2 * .pi * 440 / format.sampleRate))
+        }
+        do {
+            let file = try AVAudioFile(forWriting: audioURL, settings: format.settings)
+            try file.write(from: buffer)
+        }
+
+        let movie = AVMutableComposition()
+        let video = try #require(try await AVURLAsset(url: videoURL).loadTracks(withMediaType: .video).first)
+        let audio = try #require(try await AVURLAsset(url: audioURL).loadTracks(withMediaType: .audio).first)
+        let videoTrack = try #require(movie.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid))
+        let audioTrack = try #require(movie.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid))
+        try videoTrack.insertTimeRange(try await video.load(.timeRange), of: video, at: .zero)
+        try audioTrack.insertTimeRange(try await audio.load(.timeRange), of: audio, at: CMTime(value: 1, timescale: 2))
+        let export = try #require(AVAssetExportSession(asset: movie, presetName: AVAssetExportPresetPassthrough))
+        try await export.export(to: movieURL, as: .mov)
+
+        let clip = TimelineClip(
+            name: "Extracted audio",
+            source: ClipSource(url: movieURL, mediaType: .audio, originalDuration: 4),
+            timelineStart: 1,
+            sourceRange: TimeRangeValue(start: 0.75, duration: 3)
+        )
+        var project = EditorProject(title: "Movie audio seek", tracks: [
+            TimelineTrack(name: "Audio", kind: .audio, clips: [clip])
+        ])
+        let item = try #require(project.item(id: clip.id))
+        project.tracks[0].items = [try #require(item.split(at: 1)).right]
+        let service = CompositionRenderService(previewProxyStore: nil)
+        let preview = try #require(try await service.preparePreview(
+            for: project, quality: .balanced, invalidation: [.compositionTopology, .audioMix]))
+        let track = try #require(preview.composition.tracks(withMediaType: .audio).first)
+        let segment = try #require(track.segments.first { !$0.isEmpty })
+        #expect(segment.sourceURL?.pathExtension == "caf")
+        #expect(segment.timeMapping.source.start == .zero)
+        #expect(segment.timeMapping.target.start.seconds == 2)
+        #expect(try Self.earlyAudioPeak(of: preview, at: 2.25) < 0.1)
+        #expect(try Self.earlyAudioPeak(of: preview, at: 3) > 0.35)
+    }
+
+    private static func earlyAudioPeak(of preview: PreparedPreview, at time: Double = 0) throws -> Float {
         let composition = preview.composition
         let reader = try AVAssetReader(asset: composition)
-        reader.timeRange = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 25))
+        reader.timeRange = CMTimeRange(start: CMTime(seconds: time, preferredTimescale: 600),
+                                       duration: CMTime(value: 1, timescale: 25))
         let output = AVAssetReaderAudioMixOutput(audioTracks: composition.tracks(withMediaType: .audio), audioSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVLinearPCMBitDepthKey: 32,

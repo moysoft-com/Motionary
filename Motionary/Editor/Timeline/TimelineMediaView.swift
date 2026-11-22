@@ -13,6 +13,7 @@ struct TimelineThumbnailTile: View {
     let height: CGFloat
     let secondsPerTile: Double
     let displayScale: CGFloat
+    let distanceFromPlayhead: CGFloat
 
     @State private var image: UIImage?
 
@@ -56,7 +57,8 @@ struct TimelineThumbnailTile: View {
             tileWidth: tileWidth,
             tileHeight: height,
             secondsPerTile: secondsPerTile,
-            displayScale: displayScale
+            displayScale: displayScale,
+            distanceFromPlayhead: distanceFromPlayhead
         )
     }
 
@@ -123,27 +125,34 @@ private actor TimelineThumbnailGenerationLimiter {
     static let shared = TimelineThumbnailGenerationLimiter(limit: 2)
 
     private var availablePermits: Int
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private struct Waiter {
+        let distanceFromPlayhead: CGFloat
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
+    private var waiters: [Waiter] = []
 
     init(limit: Int) {
         availablePermits = max(limit, 1)
     }
 
-    func acquire() async {
+    func acquire(distanceFromPlayhead: CGFloat) async {
         if availablePermits > 0 {
             availablePermits -= 1
             return
         }
         await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+            waiters.append(Waiter(distanceFromPlayhead: distanceFromPlayhead, continuation: continuation))
         }
     }
 
     func release() {
-        if waiters.isEmpty {
-            availablePermits += 1
+        if let next = waiters.indices.min(by: {
+            waiters[$0].distanceFromPlayhead < waiters[$1].distanceFromPlayhead
+        }) {
+            waiters.remove(at: next).continuation.resume()
         } else {
-            waiters.removeFirst().resume()
+            availablePermits += 1
         }
     }
 }
@@ -178,7 +187,8 @@ actor TimelineThumbnailTileCache {
         tileWidth: CGFloat,
         tileHeight: CGFloat,
         secondsPerTile: Double,
-        displayScale: CGFloat
+        displayScale: CGFloat,
+        distanceFromPlayhead: CGFloat = 0
     ) async -> UIImage? {
         let localTimelineTime =
             clip.mediaType == .image
@@ -215,7 +225,8 @@ actor TimelineThumbnailTileCache {
             task = Task(priority: .utility) {
                 let image = await Self.loadTile(
                     at: url, clip: clip, media: media, sourceTime: sourceTime,
-                    targetSize: CGSize(width: tileWidth, height: tileHeight), displayScale: displayScale
+                    targetSize: CGSize(width: tileWidth, height: tileHeight), displayScale: displayScale,
+                    distanceFromPlayhead: distanceFromPlayhead
                 )
                 guard inFlight[key]?.id == id else { return nil }
                 inFlight[key] = nil
@@ -245,9 +256,9 @@ actor TimelineThumbnailTileCache {
 
     private nonisolated static func loadTile(
         at url: URL, clip: TimelineClip, media: ClipMediaDescriptor,
-        sourceTime: Double, targetSize: CGSize, displayScale: CGFloat
+        sourceTime: Double, targetSize: CGSize, displayScale: CGFloat, distanceFromPlayhead: CGFloat
     ) async -> UIImage? {
-        await TimelineThumbnailGenerationLimiter.shared.acquire()
+        await TimelineThumbnailGenerationLimiter.shared.acquire(distanceFromPlayhead: distanceFromPlayhead)
         let image: UIImage?
         if Task.isCancelled {
             image = nil
@@ -346,7 +357,8 @@ enum TimelineThumbnailLoader {
         tileWidth: CGFloat,
         tileHeight: CGFloat,
         secondsPerTile: Double,
-        displayScale: CGFloat
+        displayScale: CGFloat,
+        distanceFromPlayhead: CGFloat = 0
     ) async -> UIImage? {
         await TimelineThumbnailTileCache.shared.tileImage(
             for: clip,
@@ -356,7 +368,8 @@ enum TimelineThumbnailLoader {
             tileWidth: tileWidth,
             tileHeight: tileHeight,
             secondsPerTile: secondsPerTile,
-            displayScale: displayScale
+            displayScale: displayScale,
+            distanceFromPlayhead: distanceFromPlayhead
         )
     }
 

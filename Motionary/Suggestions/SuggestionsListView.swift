@@ -4,6 +4,9 @@ import SwiftUI
 
 struct SuggestionsListView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Binding private var searchText: String
+    @Binding private var isSearchPresented: Bool
+    @FocusState private var isSearchFocused: Bool
     @State private var viewModel = SuggestionsViewModel()
     @State private var presentedSheet: SuggestionsSheet?
     @State private var selectedSuggestion: Suggestion?
@@ -15,7 +18,13 @@ struct SuggestionsListView: View {
     @State private var pendingDeletion: Suggestion?
     @State private var confirmsAccountDeletion = false
 
-    init(opensComposer: Bool = false) {
+    init(
+        opensComposer: Bool = false,
+        searchText: Binding<String> = .constant(""),
+        isSearchPresented: Binding<Bool> = .constant(false)
+    ) {
+        _searchText = searchText
+        _isSearchPresented = isSearchPresented
         _presentedSheet = State(initialValue: opensComposer ? .add : nil)
     }
 
@@ -30,9 +39,25 @@ struct SuggestionsListView: View {
             .sorted(by: selectedSort.areInIncreasingOrder)
     }
 
+    private var searchQuery: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var matchingSuggestions: [Suggestion] {
+        let query = searchQuery
+        guard isSearchPresented, !query.isEmpty else { return displayedSuggestions }
+        return displayedSuggestions.filter {
+            $0.title.localizedCaseInsensitiveContains(query)
+                || $0.description.localizedCaseInsensitiveContains(query)
+        }
+    }
+
     var body: some View {
         presentedContent
             .task { await viewModel.openFeedback() }
+            .onChange(of: isSearchPresented) { _, presented in
+                if !presented { isSearchFocused = false }
+            }
             .onChange(of: suggestionsRevision, initial: true) { _, _ in
                 stageSuggestionUpdate(feedSuggestions)
             }
@@ -83,7 +108,8 @@ struct SuggestionsListView: View {
     }
 
     private var suggestionsContent: some View {
-        ScrollView {
+        let matches = matchingSuggestions
+        return ScrollView {
             LazyVStack(spacing: 12) {
                 SuggestionFilterBar(selectedFilter: $selectedFilter)
                     .padding(.bottom, 2)
@@ -107,11 +133,13 @@ struct SuggestionsListView: View {
                 } else if viewModel.isLoadingFeed && displayedSuggestions.isEmpty {
                     ProgressView("Loading feedback…")
                         .frame(maxWidth: .infinity, minHeight: 220)
-                } else if displayedSuggestions.isEmpty {
+                } else if matches.isEmpty && isSearchPresented && !searchQuery.isEmpty {
+                    ContentUnavailableView.search(text: searchQuery)
+                } else if matches.isEmpty {
                     emptyState
                         .transition(.scale(scale: 0.96).combined(with: .opacity))
                 } else {
-                    ForEach(displayedSuggestions) { suggestion in
+                    ForEach(matches) { suggestion in
                         SuggestionCard(
                             suggestion: suggestion,
                             isVoted: viewModel.isVoted(suggestion),
@@ -132,6 +160,17 @@ struct SuggestionsListView: View {
         .scrollIndicators(.hidden)
         .refreshable { await viewModel.openFeedback() }
         .background { MotionaryTheme.background(for: colorScheme).ignoresSafeArea() }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if isSearchPresented {
+                MotionarySearchField(
+                    prompt: "Search feedback", accessibilityIdentifier: "feedback-search-field",
+                    searchText: $searchText, isSearchPresented: isSearchPresented, focus: $isSearchFocused
+                )
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background { MotionaryTheme.background(for: colorScheme) }
+            }
+        }
         .navigationTitle("Feedback")
         .toolbar { suggestionsToolbar }
     }

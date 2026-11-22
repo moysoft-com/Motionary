@@ -29,6 +29,7 @@ final class EditorViewModel: ObservableObject {
     var preparePlaybackAudio: () async -> Void = { await EditorAudioSession.preparePlayback() }
     var previewPrerollTask: Task<Void, Never>?
     var playbackNeedsSeekAfterMixUpdate = false
+    var playbackNeedsSeekAfterNavigation = false
     let livePreviewPresentation = LivePreviewPresentation()
     let playbackState = PlaybackState()
     let selectionState = SelectionState()

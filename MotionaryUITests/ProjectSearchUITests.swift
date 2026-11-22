@@ -40,7 +40,55 @@ final class ProjectSearchUITests: XCTestCase {
     }
 
     @MainActor
-    func testColdLaunchAndRepeatedSearchFromSettingsAndHome() {
+    func testFeedbackSearchIsEnabledOnlyInFeedbackWithinSettings() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--skip-whats-new", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+
+        let settingsTab = app.buttons["Settings"].firstMatch
+        let searchButton = app.buttons["Search"].firstMatch
+        let feedbackField = app.textFields["feedback-search-field"]
+        XCTAssertTrue(settingsTab.waitForExistence(timeout: 15))
+        let initialTabX = app.buttons["Motionary"].firstMatch.frame.minX
+        settingsTab.tap()
+        XCTAssertTrue(app.staticTexts["New projects"].waitForExistence(timeout: 5))
+        XCTAssertTrue(searchButton.exists)
+        if searchButton.isEnabled { searchButton.tap() }
+        XCTAssertTrue(settingsTab.isSelected)
+        XCTAssertFalse(feedbackField.exists)
+        XCTAssertFalse(app.textFields["home-project-search-field"].exists)
+        XCTAssertEqual(app.buttons["Motionary"].firstMatch.frame.minX, initialTabX, accuracy: 1)
+
+        let feedbackLink = app.buttons["Feedback"].firstMatch
+        if !feedbackLink.isHittable { app.swipeUp() }
+        feedbackLink.tap()
+        XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(searchButton.isEnabled)
+        searchButton.tap()
+        XCTAssertTrue(feedbackField.waitForExistence(timeout: 5))
+        XCTAssertTrue(settingsTab.isSelected)
+        XCTAssertFalse(app.textFields["home-project-search-field"].exists)
+        feedbackField.tap()
+        feedbackField.typeText("Motionary feedback search")
+
+        let dismissSearch = app.buttons["Close search"].firstMatch
+        dismissSearch.tap()
+        XCTAssertTrue(feedbackField.waitForNonExistence(timeout: 5))
+        searchButton.tap()
+        XCTAssertTrue(feedbackField.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(feedbackField.value as? String, "Motionary feedback search")
+
+        app.navigationBars["Feedback"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["New projects"].waitForExistence(timeout: 5))
+        XCTAssertTrue(searchButton.exists)
+        if searchButton.isEnabled { searchButton.tap() }
+        XCTAssertTrue(settingsTab.isSelected)
+        XCTAssertTrue(dismissSearch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(feedbackField.waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testColdLaunchAndRepeatedProjectSearchAfterReturningFromSettings() {
         let app = XCUIApplication()
         app.launchArguments = ["--skip-whats-new", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.terminate()
@@ -70,7 +118,9 @@ final class ProjectSearchUITests: XCTestCase {
             XCTAssertFalse(searchField.exists)
             XCTAssertEqual(app.searchFields.count, 0, "Settings must not inherit searchable")
 
-            // Search is an action: Home must remain the selected tab, with its overlay visible.
+            XCTAssertTrue(searchButton.exists)
+            homeTab.tap()
+            XCTAssertTrue(searchButton.waitForExistence(timeout: 5))
             searchButton.tap()
             XCTAssertTrue(searchField.waitForExistence(timeout: 5))
             XCTAssertTrue(homeTab.isSelected)

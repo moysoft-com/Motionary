@@ -118,6 +118,9 @@ struct MainView: App {
     @State private var selectedTab = 0
     @State private var projectSearchText = ""
     @State private var isProjectSearchPresented = false
+    @State private var settingsPath: [SettingsDestination] = []
+    @State private var feedbackSearchText = ""
+    @State private var isFeedbackSearchPresented = false
     @State private var isEditorPresented = false
     @StateObject private var projectStore = ProjectStore()
     @State private var iconPickerPresented = false
@@ -147,7 +150,7 @@ struct MainView: App {
             #if DEBUG
                 if ProcessInfo.processInfo.arguments.contains("--effects-gesture-tests") {
                     ProjectTabController(
-                        selection: .constant(0), isSearching: false, isEditorPresented: true,
+                        selection: .constant(0), isSearchEnabled: true, isSearching: false, isEditorPresented: true,
                         homeRevision: nil, onSearch: {}, onLeaveHome: {},
                         home: { EffectsGestureTestScene() }, settings: { Text("Settings") }
                     )
@@ -248,21 +251,38 @@ struct MainView: App {
         .sensoryFeedback(.selection, trigger: selectedTab)
         .onChange(of: selectedTab) { _, tab in
             if tab == 1 {
-                isProjectSearchPresented = false
-                projectSearchText = ""
+                clearProjectSearch()
+            } else {
+                clearFeedbackSearch()
             }
+        }
+        .onChange(of: settingsPath) { _, path in
+            if path.last != .feedback { clearFeedbackSearch() }
         }
     }
 
+    private var isSearchEnabled: Bool {
+        selectedTab == 0 || settingsPath.last == .feedback
+    }
+
+    private var isSearching: Bool {
+        selectedTab == 0 ? isProjectSearchPresented : isFeedbackSearchPresented
+    }
+
+    private var settingsContent: some View {
+        SettingsView(
+            path: $settingsPath,
+            searchText: $feedbackSearchText,
+            isSearchPresented: $isFeedbackSearchPresented
+        )
+    }
+
     private var phoneTabs: some View {
-        ProjectTabController(selection: $selectedTab, isSearching: isProjectSearchPresented, isEditorPresented: isEditorPresented, homeRevision: newProjectRequest, onSearch: {
-            selectedTab = 0
-            isProjectSearchPresented.toggle()
-            if !isProjectSearchPresented { projectSearchText = "" }
-        }, onLeaveHome: {
-            isProjectSearchPresented = false
-            projectSearchText = ""
-        }) {
+        ProjectTabController(
+            selection: $selectedTab, isSearchEnabled: isSearchEnabled, isSearching: isSearching,
+            isEditorPresented: isEditorPresented, homeRevision: newProjectRequest,
+            onSearch: toggleSearch, onLeaveHome: clearProjectSearch
+        ) {
             HomeView(
                 projectStore: projectStore,
                 newProjectRequest: newProjectRequest,
@@ -272,7 +292,7 @@ struct MainView: App {
                 onEditorPresentationChange: { isEditorPresented = $0 }
             )
         } settings: {
-            SettingsView()
+            settingsContent
         }
     }
 
@@ -290,7 +310,7 @@ struct MainView: App {
             .allowsHitTesting(selectedTab == 0)
             .accessibilityHidden(selectedTab != 0)
 
-            SettingsView()
+            settingsContent
                 .opacity(selectedTab == 1 ? 1 : 0)
                 .allowsHitTesting(selectedTab == 1)
                 .accessibilityHidden(selectedTab != 1)
@@ -298,12 +318,13 @@ struct MainView: App {
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .tint(.primary)
         .modifier(PadTabBarPlacement(isEditorPresented: isEditorPresented, selection: $selectedTab,
-                                     isSearching: isProjectSearchPresented, onSearch: handlePadSearch))
+                                     isSearchEnabled: isSearchEnabled, isSearching: isSearching, onSearch: handlePadSearch))
     }
 
     private struct PadTabBarPlacement: ViewModifier {
         let isEditorPresented: Bool
         @Binding var selection: Int
+        let isSearchEnabled: Bool
         let isSearching: Bool
         let onSearch: () -> Void
 
@@ -313,6 +334,7 @@ struct MainView: App {
                     if !isEditorPresented {
                         MotionaryPadTabBar(
                             selection: $selection,
+                            isSearchEnabled: isSearchEnabled,
                             isSearching: isSearching,
                             onSearch: onSearch
                         )
@@ -332,14 +354,33 @@ struct MainView: App {
     }
 
     private func handlePadSearch() {
-        if isProjectSearchPresented {
+        if isSearching {
             UIApplication.shared.sendAction(
                 #selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
-        selectedTab = 0
-        isProjectSearchPresented.toggle()
-        if !isProjectSearchPresented { projectSearchText = "" }
+        toggleSearch()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func toggleSearch() {
+        guard isSearchEnabled else { return }
+        if selectedTab == 0 {
+            isProjectSearchPresented.toggle()
+            if !isProjectSearchPresented { clearProjectSearch() }
+        } else {
+            isFeedbackSearchPresented.toggle()
+            if !isFeedbackSearchPresented { clearFeedbackSearch() }
+        }
+    }
+
+    private func clearProjectSearch() {
+        isProjectSearchPresented = false
+        projectSearchText = ""
+    }
+
+    private func clearFeedbackSearch() {
+        isFeedbackSearchPresented = false
+        feedbackSearchText = ""
     }
 
     private func collectSharedProjects() {
@@ -446,10 +487,11 @@ struct RootTabContent<Content: View>: View {
     var body: some View { content.tint(.primary) }
 }
 
-/// Uses UIKit's selection veto so the native search tab acts on the existing home controller.
+/// Uses UIKit's selection veto so the native search tab acts on the currently selected tab.
 /// SwiftUI's TabView selection binding cannot veto a tab's presentation reliably.
 struct ProjectTabController<Home: View, Settings: View>: UIViewControllerRepresentable {
     @Binding var selection: Int
+    let isSearchEnabled: Bool
     let isSearching: Bool
     let isEditorPresented: Bool
     let homeRevision: UUID?
@@ -514,18 +556,28 @@ struct ProjectTabController<Home: View, Settings: View>: UIViewControllerReprese
         if controller.isTabBarHidden != isEditorPresented {
             controller.setTabBarHidden(isEditorPresented, animated: false)
         }
-        if coordinator.lastSearchState != isSearching {
+        if #available(iOS 18.4, *), let searchTab = coordinator.searchTab, searchTab.isEnabled != isSearchEnabled {
+            searchTab.isEnabled = isSearchEnabled
+        }
+        if let items = controller.tabBar.items, items.count > 2 {
+            items.last?.isEnabled = isSearchEnabled
+        }
+        if coordinator.lastSearchState != isSearching || coordinator.lastSearchEnabled != isSearchEnabled {
             let symbol = isSearching ? "keyboard.chevron.compact.down" : "magnifyingglass"
             let title = isSearching ? "Close search" : "Search"
-            let icon = UIImage(systemName: symbol)
+            let symbolImage = UIImage(systemName: symbol)
+            let icon = isSearchEnabled
+                ? symbolImage
+                : symbolImage?.withTintColor(.tertiaryLabel, renderingMode: .alwaysOriginal)
             coordinator.searchTab?.image = icon
             coordinator.searchTab?.title = title
-            if let item = controller.tabBar.items?.last {
+            if let items = controller.tabBar.items, items.count > 2, let item = items.last {
                 item.title = title
                 item.image = icon
                 item.accessibilityLabel = title
             }
             coordinator.lastSearchState = isSearching
+            coordinator.lastSearchEnabled = isSearchEnabled
         }
         // Bindings and ObservableObject update Home in its own hosting tree.
         // Only the value-type new-project request requires a new root value.
@@ -553,6 +605,7 @@ struct ProjectTabController<Home: View, Settings: View>: UIViewControllerReprese
     final class Coordinator: NSObject, UITabBarControllerDelegate {
         var parent: ProjectTabController
         var lastSearchState: Bool?
+        var lastSearchEnabled: Bool?
         var lastHomeRevision: UUID?
         var homeController: UIHostingController<RootTabContent<Home>>?
         var settingsController: UIHostingController<RootTabContent<Settings>>?
@@ -564,14 +617,10 @@ struct ProjectTabController<Home: View, Settings: View>: UIViewControllerReprese
 
         func tabBarController(_ tabBarController: UITabBarController, shouldSelectTab tab: UITab) -> Bool {
             if tab === searchTab {
+                guard parent.isSearchEnabled else { return false }
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 if parent.isSearching { tabBarController.view.endEditing(true) }
-                // Finish UIKit's selection decision before changing the active tab.
-                DispatchQueue.main.async { [weak self, weak tabBarController] in
-                    guard let self, let tabBarController else { return }
-                    tabBarController.selectedTab = self.homeTab
-                    self.parent.onSearch()
-                }
+                parent.onSearch()
                 return false
             }
             return true

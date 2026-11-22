@@ -303,3 +303,45 @@ struct MotionaryNumberPadPopover<Label: View>: View {
         onValueChange(value)
     }
 }
+
+struct MotionarySearchField: View {
+    let prompt: LocalizedStringKey
+    let accessibilityIdentifier: String
+    @Binding var searchText: String
+    let isSearchPresented: Bool
+    let focus: FocusState<Bool>.Binding
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(MotionaryDesign.Typography.compactIcon)
+                .foregroundStyle(MotionaryTheme.textSecondary)
+            TextField(prompt, text: $searchText)
+                .accessibilityIdentifier(accessibilityIdentifier)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.callout)
+                .tint(MotionaryTheme.accent)
+                .submitLabel(.search)
+                .focused(focus)
+                .task {
+                    guard isSearchPresented else { return }
+                    focus.wrappedValue = true
+                }
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "delete.backward")
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                        .frame(width: 32, height: 44)
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 14)
+        .frame(height: 48)
+        .foregroundStyle(MotionaryTheme.textPrimary)
+        .background(MotionaryDesign.Surface.control(), in: Capsule())
+        .motionaryGlass(cornerRadius: 24)
+    }
+}
