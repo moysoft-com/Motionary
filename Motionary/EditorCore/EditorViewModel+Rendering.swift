@@ -224,7 +224,11 @@ extension EditorViewModel {
                         }()
                     )
                 }
-                let audioTrackIndex = draft.insertFreshTrack(kind: .audio)
+                let audioTrackIndex = draft.topAvailableTrackIndex(
+                    kind: .audio,
+                    start: audioClip.timelineStart,
+                    duration: audioClip.sourceRange.duration
+                ) ?? draft.insertFreshTrack(kind: .audio)
                 draft.tracks[audioTrackIndex].appendLegacyClip(audioClip)
                 draft.synchronizeMediaLibrary()
                 commit(
