@@ -21,6 +21,7 @@ struct MotionaryVideoPlayer: View {
     @State private var duration = 0.0
     @State private var position = 0.0
     @State private var isPlaying = false
+    @State private var hasStartedPlayback = false
     @State private var didFinish = false
     @State private var playbackFailed = false
     @State private var scrubPosition: Double?
@@ -34,6 +35,7 @@ struct MotionaryVideoPlayer: View {
     @State private var itemObservation: NSKeyValueObservation?
 
     private var hasHaptics: Bool { !movie.haptics.events.isEmpty }
+    private var canStartPlayback: Bool { scenePhase == .active && duration > 0 && !playbackFailed }
 
     var body: some View {
         NavigationStack {
@@ -93,7 +95,13 @@ struct MotionaryVideoPlayer: View {
                 player.pause()
                 finishScrubbing()
             }
+        }
+        .onChange(of: canStartPlayback, initial: true) { _, ready in
             updateHaptics()
+            if ready, !hasStartedPlayback {
+                hasStartedPlayback = true
+                player.play()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: AVPlayerItem.didPlayToEndTimeNotification)) { note in
             guard note.object as? AVPlayerItem === player.currentItem, !pendingSeek, scrubPosition == nil else { return }
@@ -316,8 +324,6 @@ struct MotionaryVideoPlayer: View {
                 return
             }
             duration = seconds
-            updateHaptics()
-            if scenePhase == .active { player.play() }
         } catch {
             guard !Task.isCancelled, player.currentItem === item else { return }
             playbackFailed = true
@@ -396,7 +402,7 @@ struct MotionaryVideoPlayer: View {
     }
 
     private func updateHaptics() {
-        if hapticsEnabled, scenePhase == .active, player.currentItem != nil {
+        if hapticsEnabled, canStartPlayback, player.currentItem != nil {
             haptics.attach(to: player, track: movie.haptics)
         } else {
             haptics.detach()

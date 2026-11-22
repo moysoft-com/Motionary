@@ -69,9 +69,10 @@ struct AudioBeatAnalysisService {
             sourceDuration: Double(samples.count) / sampleRate,
             sourceFingerprint: sourceFingerprint
         )
-        analysis.offbeatAccents = try samples.withUnsafeBufferPointer {
-            try OffbeatAccentAnalyzer.analyze(markers: analysis.markers, samples: $0, sampleRate: sampleRate)
+        let offbeats = try samples.withUnsafeBufferPointer {
+            try OffbeatAccentAnalyzer.analyze(markers: &analysis.markers, samples: $0, sampleRate: sampleRate)
         }
+        analysis.offbeatAccents = offbeats
         return analysis
     }
 
@@ -241,11 +242,12 @@ struct AudioBeatAnalysisService {
         }
         if let pcm {
             progress(0.95)
-            analysis.offbeatAccents = try pcm.withUnsafeBytes {
+            let offbeats = try pcm.withUnsafeBytes {
                 try OffbeatAccentAnalyzer.analyze(
-                    markers: analysis.markers, samples: $0.bindMemory(to: Float.self), sampleRate: sampleRate
+                    markers: &analysis.markers, samples: $0.bindMemory(to: Float.self), sampleRate: sampleRate
                 )
             }
+            analysis.offbeatAccents = offbeats
         }
         progress(1)
         return analysis

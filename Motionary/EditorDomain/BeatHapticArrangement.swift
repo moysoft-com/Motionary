@@ -30,14 +30,15 @@ enum BeatHapticArrangement {
             let marker = markers[index]
             let isDrop = marker.isDrop == true
             let isDownbeat = marker.isDownbeat == true
-            guard marker.sourceTime >= clip.sourceRange.start, marker.sourceTime <= clip.sourceRange.end,
-                marker.isBreakStart != true || isDrop
-            else { return [] }
+            guard marker.sourceTime >= clip.sourceRange.start, marker.sourceTime <= clip.sourceRange.end else { return [] }
 
             let accent = accents[index]
             let neighbors = accents[max(0, index - 3)...min(accents.count - 1, index + 3)]
             let typical = neighbors.reduce(0, +) / Double(neighbors.count)
-            if !isDrop {
+            if let attack = marker.hapticAttack {
+                guard attack > 0 else { return [] }
+            } else if !isDrop {
+                guard marker.isBreakStart != true else { return [] }
                 if marker.accentScore != nil {
                     let minimumAccent = isDownbeat ? 0.23 : max(0.22, typical * 0.65)
                     guard accent >= minimumAccent else { return [] }
@@ -46,7 +47,8 @@ enum BeatHapticArrangement {
                 }
             }
             let contrast = unit(0.5 + 1.5 * (accent - typical))
-            let energy = 0.75 * accent + 0.25 * contrast
+            let accentEnergy = 0.75 * accent + 0.25 * contrast
+            let energy = marker.hapticAttack.map { 0.55 * unit($0) + 0.45 * accentEnergy } ?? accentEnergy
             return timelineTimes(for: marker.sourceTime)
                 .map { Strike(time: $0, energy: energy, isDownbeat: isDownbeat, isDrop: isDrop) }
         }

@@ -122,6 +122,7 @@ struct AudioBeatMarker: Codable, Equatable, Sendable, Identifiable {
     var strength: Double
     var gridTime: Double?
     var audibleOnset: Double?
+    var hapticAttack: Double? = nil
     var isDownbeat: Bool?
     var editScore: Double?
     var accentScore: Double?
@@ -147,7 +148,7 @@ struct AudioBeatMarker: Codable, Equatable, Sendable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case sourceTime
         case strength, gridTime, audibleOnset, isDownbeat, editScore
-        case accentScore, boundaryScore, isDrop, isBreakStart
+        case accentScore, boundaryScore, isDrop, isBreakStart, hapticAttack
     }
 
     init(from decoder: Decoder) throws {
@@ -161,6 +162,7 @@ struct AudioBeatMarker: Codable, Equatable, Sendable, Identifiable {
             editScore: try container.decodeIfPresent(Double.self, forKey: .editScore)
         )
         accentScore = try container.decodeIfPresent(Double.self, forKey: .accentScore)
+        hapticAttack = try container.decodeIfPresent(Double.self, forKey: .hapticAttack)
         boundaryScore = try container.decodeIfPresent(Double.self, forKey: .boundaryScore)
         isDrop = try container.decodeIfPresent(Bool.self, forKey: .isDrop)
         isBreakStart = try container.decodeIfPresent(Bool.self, forKey: .isBreakStart)

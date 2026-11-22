@@ -16,7 +16,7 @@ enum OffbeatAccentAnalyzer {
     }
 
     static func analyze(
-        markers: [AudioBeatMarker], samples: UnsafeBufferPointer<Float>, sampleRate: Double
+        markers: inout [AudioBeatMarker], samples: UnsafeBufferPointer<Float>, sampleRate: Double
     ) throws -> [AudioOffbeatAccent] {
         guard markers.count >= 3, sampleRate.isFinite, sampleRate >= 8_000 else { return [] }
         let hop = Int((sampleRate * 0.01).rounded())
@@ -32,58 +32,87 @@ enum OffbeatAccentAnalyzer {
 
         let beatAttacks = markers.map { marker in
             let onset = marker.audibleOnset ?? marker.sourceTime
-            return framesBetween(onset - 0.025, onset + 0.045).map { frames[$0].bodyRise }.max() ?? 0
+            return framesBetween(onset - 0.025, onset + 0.045).map {
+                frames[$0].bodyRise + 0.25 * frames[$0].airRise
+            }.max() ?? 0
+        }
+        for index in markers.indices {
+            let context = beatAttacks[max(0, index - 4)...min(index + 4, markers.count - 1)].sorted()
+            let reference = max(context[context.count / 2], 0.003)
+            let attack = beatAttacks[index]
+            markers[index].hapticAttack = attack >= max(0.001, reference * 0.16)
+                ? attack / (attack + reference * 0.6) : 0
         }
         let intervals = zip(markers, markers.dropFirst()).map { $1.sourceTime - $0.sourceTime }
         let plausibleIntervals = intervals.filter { (0.23...1.5).contains($0) }.sorted()
         guard !plausibleIntervals.isEmpty else { return [] }
         let typicalInterval = plausibleIntervals[plausibleIntervals.count / 2]
         let subdivisions = [0.25, 1.0 / 3, 0.5, 2.0 / 3, 0.75]
-        let candidates = zip(markers, markers.dropFirst()).map { left, right -> Candidate? in
+        let candidates = zip(markers, markers.dropFirst()).map { left, right -> [Candidate] in
             let period = right.sourceTime - left.sourceTime
             // A gap roughly two beats long may contain a missed main beat.
-            guard (0.23...1.5).contains(period), period < typicalInterval * 1.75 else { return nil }
-            let margin = max(0.085, period * 0.16)
+            guard (0.23...1.5).contains(period), period < typicalInterval * 1.75 else { return [] }
+            let margin = max(0.085, period * 0.12)
             let earliest = max(left.sourceTime, left.audibleOnset ?? left.sourceTime) + margin
             let latest = min(right.sourceTime, right.audibleOnset ?? right.sourceTime) - margin
             return framesBetween(earliest + frameDuration, latest + frameDuration).compactMap { index -> Candidate? in
                 let frame = frames[index]
                 // A bright tick alone or a very short burst of noise has little
                 // weight. A bass or melodic attack retains energy after the peak.
-                guard frame.bodyRise > 0.001, frame.bodyRise > frame.airRise * 0.85,
-                      index + 3 < frames.count, frames[index + 3].bodyLevel > frame.bodyRise * 0.55
+                guard index > 0, index + 3 < frames.count,
+                      frame.bodyRise > frames[index - 1].bodyRise, frame.bodyRise >= frames[index + 1].bodyRise,
+                      frame.bodyRise > 0.001, frame.bodyRise > frame.airRise * 0.85,
+                      frames[index + 3].bodyLevel > frame.bodyRise * 0.55
                 else { return nil }
                 let time = Double(index - 1) * frameDuration
                 let phase = (time - left.sourceTime) / period
                 let isSubdivision = subdivisions.contains { abs(phase - $0) <= 0.055 }
                 return Candidate(time: time, attack: frame.bodyRise, phase: phase, isSubdivision: isSubdivision)
-            }.max { $0.attack < $1.attack }
+            }
         }
 
-        return candidates.indices.compactMap { index in
-            guard let candidate = candidates[index] else { return nil }
+        return candidates.indices.flatMap { index -> [AudioOffbeatAccent] in
             let lower = max(index - 4, 0)
             let upper = min(index + 4, candidates.count - 1)
-            let neighbors = (lower...upper).filter { $0 != index }.map { candidates[$0] }
-            let nearby = neighbors.map { $0?.attack ?? 0 }.sorted()
+            let nearby = (lower...upper).filter { $0 != index }
+                .map { candidates[$0].map(\.attack).max() ?? 0 }.sorted()
             let offbeatBed = nearby[(nearby.count - 1) / 2]
-            let recurring = neighbors.compactMap { $0 }
-                .filter { abs($0.phase - candidate.phase) <= 0.08 }.map(\.attack).sorted()
-            let grooveLevel = recurring.count >= 2 ? recurring[recurring.count / 2] : 0
             let beatContext = beatAttacks[lower...(upper + 1)].sorted()
-            let beatLevel = beatContext[beatContext.count / 2]
-            // An ordinary subdivision must stand out against other offbeats.
-            // A more freely timed phrase needs stronger evidence.
-            let threshold = max(
-                0.001,
-                offbeatBed * (candidate.isSubdivision ? 1.65 : 1.85),
-                grooveLevel * 1.45,
-                beatLevel * (candidate.isSubdivision ? 0.32 : 0.55)
-            )
-            guard candidate.attack > threshold else { return nil }
-            let reference = max(beatLevel, threshold)
-            let strength = candidate.attack / (candidate.attack + reference * 0.45)
-            return AudioOffbeatAccent(sourceTime: candidate.time, strength: strength)
+            let beatLevel = max(beatContext[beatContext.count / 2], 0.003)
+            let grooveContext = max(0, index - 8)...min(index + 8, candidates.count - 1)
+            // A pulse in nearly every interval is usually accompaniment.
+            // Count across phases so alternating subdivisions count as one bed.
+            let busyIntervals = grooveContext.count { neighbor in
+                candidates[neighbor].contains { $0.attack >= beatLevel * 0.50 }
+            }
+            let hasDenseBed = grooveContext.count >= 6 && busyIntervals * 4 >= grooveContext.count * 3
+            func matchingAttack(at neighbor: Int, phase: Double) -> Double {
+                guard candidates.indices.contains(neighbor) else { return 0 }
+                return candidates[neighbor].filter { abs($0.phase - phase) <= 0.09 }.map(\.attack).max() ?? 0
+            }
+            var accepted: [AudioOffbeatAccent] = []
+            for candidate in candidates[index].sorted(by: { $0.attack > $1.attack }) {
+                // Require repeated acoustic attacks at the same phase and beat interval.
+                let groove = (1...4).map { lag in
+                    let before = matchingAttack(at: index - lag, phase: candidate.phase)
+                    let after = matchingAttack(at: index + lag, phase: candidate.phase)
+                    return max(min(before, after),
+                               min(before, matchingAttack(at: index - 2 * lag, phase: candidate.phase)),
+                               min(after, matchingAttack(at: index + 2 * lag, phase: candidate.phase)))
+                }.max() ?? 0
+                let followsGroove = !hasDenseBed && groove >= beatLevel * 0.55
+                    && candidate.attack >= max(beatLevel * 0.39, groove * 0.56)
+                let standsOut = candidate.attack >= max(
+                    offbeatBed * (candidate.isSubdivision ? 1.60 : 1.80),
+                    beatLevel * (candidate.isSubdivision ? 0.48 : 0.62)
+                )
+                guard followsGroove || standsOut,
+                      accepted.allSatisfy({ abs($0.sourceTime - candidate.time) >= 0.105 })
+                else { continue }
+                let strength = candidate.attack / (candidate.attack + beatLevel * 0.55)
+                accepted.append(AudioOffbeatAccent(sourceTime: candidate.time, strength: strength))
+            }
+            return accepted.sorted { $0.sourceTime < $1.sourceTime }
         }
     }
 

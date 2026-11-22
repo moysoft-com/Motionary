@@ -1,10 +1,36 @@
 import AVFoundation
+import CoreHaptics
 import Foundation
 import UIKit
 import XCTest
 @testable import Motionary
 
 final class HapticsTests: XCTestCase {
+    @MainActor
+    func testVideoHapticsRecoverFromStartAndSchedulingFailuresWithoutReattaching() async {
+        let rescheduled = expectation(description: "The replacement engine receives the haptic event")
+        let startFailure = PlaybackTestHapticEngine(startError: CHHapticError(.engineStartTimeout))
+        let stoppedEngine = PlaybackTestHapticEngine {
+            throw CHHapticError(.engineNotRunning)
+        }
+        let recoveredEngine = PlaybackTestHapticEngine {
+            rescheduled.fulfill()
+            throw CHHapticError(.invalidPatternData)
+        }
+        var engines = [startFailure, stoppedEngine, recoveredEngine]
+        let playback = HapticPlayback(makeEngine: { engines.isEmpty ? nil : engines.removeFirst() })
+        let video = HapticTestVideoClock()
+        defer { withExtendedLifetime(video) { playback.detach() } }
+
+        playback.attach(to: video, track: HapticTrack(events: [
+            .init(time: 0, duration: 0, samples: [.init(time: 0, intensity: 1, sharpness: 0.5)]),
+        ]))
+
+        await fulfillment(of: [rescheduled], timeout: 2)
+        XCTAssertTrue(stoppedEngine.didStop)
+        XCTAssertTrue(engines.isEmpty)
+    }
+
     func testBeatHapticsArrangeMusicalAccentsAndFadeWithinTheRetimedClip() throws {
         var light = AudioBeatMarker(sourceTime: 1, strength: 0.99)
         light.accentScore = 0.45
@@ -362,6 +388,48 @@ final class HapticsTests: XCTestCase {
     }
 }
 
+
+private final class HapticTestVideoClock: AVPlayer {
+    override var timeControlStatus: AVPlayer.TimeControlStatus { .playing }
+    override var rate: Float {
+        get { 1 }
+        set {}
+    }
+
+    override func currentTime() -> CMTime { .zero }
+}
+
+private final class PlaybackTestHapticEngine: HapticPlaybackEngine {
+    var currentTime: TimeInterval { 0 }
+    var playsHapticsOnly = false
+    var stoppedHandler: CHHapticEngine.StoppedHandler = { _ in }
+    var resetHandler: CHHapticEngine.ResetHandler = {}
+    private(set) var didStop = false
+    private let startError: Error?
+    private let makePlayer: () throws -> any CHHapticAdvancedPatternPlayer
+
+    init(
+        startError: Error? = nil,
+        makePlayer: @escaping () throws -> any CHHapticAdvancedPatternPlayer = {
+            throw CHHapticError(.invalidPatternData)
+        }
+    ) {
+        self.startError = startError
+        self.makePlayer = makePlayer
+    }
+
+    func start() throws {
+        if let startError { throw startError }
+    }
+
+    func stopPlayback() {
+        didStop = true
+    }
+
+    func makeAdvancedPlayer(with pattern: CHHapticPattern) throws -> any CHHapticAdvancedPatternPlayer {
+        try makePlayer()
+    }
+}
 
 final class TimelineAudioWaveformTests: XCTestCase {
     func testScalingKeepsDetailInLoudAndQuietClips() {

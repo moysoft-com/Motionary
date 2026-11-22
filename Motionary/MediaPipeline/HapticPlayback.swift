@@ -1,15 +1,32 @@
 import AVFoundation
 import CoreHaptics
 
+protocol HapticPlaybackEngine: AnyObject {
+    var currentTime: TimeInterval { get }
+    var playsHapticsOnly: Bool { get set }
+    var stoppedHandler: CHHapticEngine.StoppedHandler { get set }
+    var resetHandler: CHHapticEngine.ResetHandler { get set }
+    func start() throws
+    func stopPlayback()
+    func makeAdvancedPlayer(with pattern: CHHapticPattern) throws -> any CHHapticAdvancedPatternPlayer
+}
+
+extension CHHapticEngine: HapticPlaybackEngine {
+    func stopPlayback() { stop() }
+}
+
 /// Uses the video's clock as the authority while scheduling on the haptic engine's clock.
 @MainActor
 final class HapticPlayback {
-    static var isSupported: Bool {
+    private static let engineRetryDelay: Duration = .milliseconds(100)
+
+    nonisolated static var isSupported: Bool {
         CHHapticEngine.capabilitiesForHardware().supportsHaptics
     }
 
-    private var engine: CHHapticEngine?
-    private var engineRunning = false
+    private let makeEngine: () throws -> (any HapticPlaybackEngine)?
+    private var engine: (any HapticPlaybackEngine)?
+    private var retryEngineAfter: ContinuousClock.Instant?
     private var clockObservation: NSKeyValueObservation?
     private var timeJumpObservation: NSObjectProtocol?
     private var tickTask: Task<Void, Never>?
@@ -21,13 +38,24 @@ final class HapticPlayback {
     private var resumeTime: Double?
     private var lastRate: Float = 0
 
+    init(makeEngine: @escaping () throws -> (any HapticPlaybackEngine)? = {
+        guard HapticPlayback.isSupported else { return nil }
+        return try CHHapticEngine()
+    }) {
+        self.makeEngine = makeEngine
+    }
+
     func attach(to video: AVPlayer, track: HapticTrack) {
         detach()
-        guard Self.isSupported, !track.events.isEmpty else { return }
+        guard !track.events.isEmpty else { return }
+        _ = prepareEngine()
+        // A failed start can recover once playback begins. Unsupported hardware
+        // has no engine to retry.
+        guard engine != nil || retryEngineAfter != nil else { return }
         player = video
         self.track = track
-        resumeTime = video.currentTime().seconds
-        _ = prepareEngine()
+        let position = video.currentTime().seconds
+        resumeTime = position.isFinite ? position : nil
         clockObservation = video.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] _, _ in
             Task { @MainActor in self?.updateClock() }
         }
@@ -56,6 +84,7 @@ final class HapticPlayback {
         player = nil
         track = HapticTrack(events: [])
         resumeTime = nil
+        retryEngineAfter = nil
         stopEngine()
     }
 
@@ -87,51 +116,44 @@ final class HapticPlayback {
         if isAuditioning { detach() }
     }
 
-    private func prepareEngine() -> CHHapticEngine? {
-        guard Self.isSupported else { return nil }
+    private func prepareEngine() -> (any HapticPlaybackEngine)? {
+        if let engine { return engine }
+        if let retryEngineAfter, ContinuousClock.now < retryEngineAfter { return nil }
         do {
-            if engine == nil {
-                let newEngine = try CHHapticEngine()
-                newEngine.playsHapticsOnly = true
-                newEngine.stoppedHandler = { [weak self, weak newEngine] _ in
-                    Task { @MainActor in
-                        guard let self, self.engine === newEngine else { return }
-                        if self.isAuditioning {
-                            self.stopAudition()
-                            return
-                        }
-                        self.engineRunning = false
-                        self.resetSchedule()
-                    }
+            guard let newEngine = try makeEngine() else { return nil }
+            newEngine.playsHapticsOnly = true
+            let invalidate: @Sendable () -> Void = { [weak self, weak newEngine] in
+                Task { @MainActor in
+                    guard let self, let newEngine, self.engine === newEngine else { return }
+                    self.invalidateEngine()
                 }
-                newEngine.resetHandler = { [weak self, weak newEngine] in
-                    Task { @MainActor in
-                        guard let self, self.engine === newEngine else { return }
-                        if self.isAuditioning {
-                            self.stopAudition()
-                            return
-                        }
-                        self.engineRunning = false
-                        self.resetSchedule()
-                    }
-                }
-                engine = newEngine
             }
-            if !engineRunning {
-                try engine?.start()
-                engineRunning = true
-            }
-            return engine
+            newEngine.stoppedHandler = { _ in invalidate() }
+            newEngine.resetHandler = invalidate
+            try newEngine.start()
+            engine = newEngine
+            retryEngineAfter = nil
+            return newEngine
         } catch {
+            retryEngineAfter = ContinuousClock.now.advanced(by: Self.engineRetryDelay)
+            AppLogger.lifecycle.debug("Could not start haptic engine: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+    }
+
+    private func invalidateEngine() {
+        if isAuditioning {
+            stopAudition()
+            return
+        }
+        resetSchedule()
+        stopEngine()
     }
 
     private func stopEngine() {
         let previous = engine
         engine = nil
-        engineRunning = false
-        previous?.stop()
+        previous?.stopPlayback()
     }
 
     private func resetSchedule() {
@@ -143,7 +165,7 @@ final class HapticPlayback {
 
     private func updateClock() {
         guard let player else { return }
-        guard player.timeControlStatus == .playing, player.rate > 0 else {
+        guard player.timeControlStatus == .playing else {
             tickTask?.cancel()
             tickTask = nil
             if cursor != nil { resumeTime = player.currentTime().seconds }
@@ -166,12 +188,13 @@ final class HapticPlayback {
             resetSchedule()
             return
         }
+        guard let engine = prepareEngine() else { return }
         let position = player.currentTime().seconds
-        guard position.isFinite, let engine = prepareEngine() else { return }
+        guard position.isFinite else { return }
         scheduleEvents(at: position, rate: player.rate, now: engine.currentTime, engine: engine)
     }
 
-    private func scheduleEvents(at position: Double, rate: Float, now: Double, engine: CHHapticEngine) {
+    private func scheduleEvents(at position: Double, rate: Float, now: Double, engine: any HapticPlaybackEngine) {
         if rate != lastRate {
             resetSchedule()
             lastRate = rate
@@ -185,7 +208,20 @@ final class HapticPlayback {
             if event.duration > 0 ? event.end > position : event.time >= earliestImpact {
                 let offset = max(0, position - event.time)
                 let start = now + max(0, event.time - position) / Double(rate)
-                schedule(event, offset: offset, rate: rate, engineTime: start, engine: engine)
+                do {
+                    try schedule(event, offset: offset, rate: rate, engineTime: start, engine: engine)
+                } catch {
+                    AppLogger.lifecycle.debug("Could not schedule haptics: \(error.localizedDescription, privacy: .public)")
+                    switch (error as? CHHapticError)?.code {
+                    case .engineNotRunning, .serverInterrupted, .invalidPatternPlayer, .invalidAudioSession:
+                        resumeTime = resumeTime ?? position
+                        retryEngineAfter = ContinuousClock.now.advanced(by: Self.engineRetryDelay)
+                        invalidateEngine()
+                        return
+                    default:
+                        break
+                    }
+                }
             }
             index += 1
         }
@@ -209,8 +245,8 @@ final class HapticPlayback {
     }
 
     private func schedule(
-        _ event: HapticTrack.Event, offset: Double, rate: Float, engineTime: Double, engine: CHHapticEngine
-    ) {
+        _ event: HapticTrack.Event, offset: Double, rate: Float, engineTime: Double, engine: any HapticPlaybackEngine
+    ) throws {
         let first = event.sample(at: offset)
         let duration = max(event.duration - offset, 0)
         let isAutomated = duration > 0 && event.samples.count > 1
@@ -226,16 +262,12 @@ final class HapticPlayback {
             parameters: parameters, relativeTime: 0, duration: duration
         )
         let curves = isAutomated ? parameterCurves(for: event, initial: first, offset: offset) : []
-        do {
-            let pattern = try CHHapticPattern(events: [haptic], parameterCurves: curves)
-            let hapticPlayer = try engine.makeAdvancedPlayer(with: pattern)
-            hapticPlayer.playbackRate = rate
-            let start = engineTime > engine.currentTime ? engineTime : CHHapticTimeImmediate
-            try hapticPlayer.start(atTime: start)
-            players.append((hapticPlayer, engineTime + duration / Double(rate)))
-        } catch {
-            AppLogger.lifecycle.debug("Could not schedule haptics: \(error.localizedDescription, privacy: .public)")
-        }
+        let pattern = try CHHapticPattern(events: [haptic], parameterCurves: curves)
+        let hapticPlayer = try engine.makeAdvancedPlayer(with: pattern)
+        hapticPlayer.playbackRate = rate
+        let start = engineTime > engine.currentTime ? engineTime : CHHapticTimeImmediate
+        try hapticPlayer.start(atTime: start)
+        players.append((hapticPlayer, engineTime + duration / Double(rate)))
     }
 
     private func parameterCurves(
