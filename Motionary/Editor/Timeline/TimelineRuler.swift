@@ -51,24 +51,23 @@ struct TimelineRulerOverlay: UIViewRepresentable {
     }
 }
 
-/// Tick paths and labels are prepared for the current viewport and one
-/// viewport on either side. Scrolling moves the entire band with one layer
-/// position change in the same Core Animation commit as UIKit's track scroll.
+/// Keep a viewport of ruler content on either side of the visible section.
+/// Scrolling moves the band as a unit and leaves overlapping sections intact.
 final class TimelineRulerSurface: UIView {
     private struct Layout: Equatable {
         let width: CGFloat
         let pixelsPerSecond: CGFloat
         let duration: Double
+        let tileWidth: CGFloat
+
+        var projectEndX: CGFloat { width / 2 + CGFloat(duration) * pixelsPerSecond }
     }
 
     private let band = CALayer()
-    private let majorTicks = CAShapeLayer()
-    private let minorTicks = CAShapeLayer()
-    private var labels: [CATextLayer] = []
+    private var tiles: [Int: CALayer] = [:]
     private var sample: TimelineRulerSample?
     private var renderedLayout: Layout?
-    private var windowStart: CGFloat = 0
-    private var windowOrigin: CGFloat = 0
+    private var renderedTileIndex: Int?
 
     init() {
         super.init(frame: .zero)
@@ -76,12 +75,7 @@ final class TimelineRulerSurface: UIView {
         clipsToBounds = true
         isOpaque = false
         band.anchorPoint = .zero
-        band.masksToBounds = true
         layer.addSublayer(band)
-        band.addSublayer(minorTicks)
-        band.addSublayer(majorTicks)
-        majorTicks.lineWidth = 1.1
-        minorTicks.lineWidth = 0.8
         registerForTraitChanges([
             UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self, UITraitDisplayScale.self,
         ]) { (view: TimelineRulerSurface, _) in
@@ -96,6 +90,14 @@ final class TimelineRulerSurface: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         updateBand()
+    }
+
+    func presentPlaybackMotion(_ motion: TimelinePlaybackMotion?) {
+        if let motion {
+            motion.apply(to: band, keyPath: "position.x")
+        } else {
+            band.removeAnimation(forKey: TimelinePlaybackMotion.animationKey)
+        }
     }
 
     func present(_ sample: TimelineRulerSample, animated: Bool = false) {
@@ -119,29 +121,55 @@ final class TimelineRulerSurface: UIView {
         let layout = Layout(
             width: bounds.width,
             pixelsPerSecond: max(sample.pixelsPerSecond, 1),
-            duration: sample.duration > 0 ? sample.duration : 4
+            duration: sample.duration > 0 ? sample.duration : 4,
+            tileWidth: max(pixelAligned(bounds.width), 1)
         )
+        let tileIndex = Int(floor(sample.horizontalOffset / layout.tileWidth))
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if renderedLayout != layout || sample.horizontalOffset < windowStart
-            || sample.horizontalOffset >= windowStart + layout.width
-        {
-            windowStart = floor(sample.horizontalOffset / layout.width) * layout.width
-            windowOrigin = windowStart - layout.width
-            rebuildBand(layout)
+        if renderedLayout != layout {
+            for tile in tiles.values { tile.removeFromSuperlayer() }
+            tiles.removeAll(keepingCapacity: true)
             renderedLayout = layout
+            renderedTileIndex = nil
+        }
+        if renderedTileIndex != tileIndex {
+            updateTiles(around: tileIndex, layout: layout)
+            renderedTileIndex = tileIndex
         }
         let progress = sample.collapseOffset / TimelineRulerSample.collapseDistance
         let y = -15 * progress * progress * (3 - 2 * progress)
-        band.position = CGPoint(x: pixelAligned(windowOrigin - sample.horizontalOffset), y: y)
+        band.position = CGPoint(x: band.bounds.minX - pixelAligned(sample.horizontalOffset), y: y)
         CATransaction.commit()
     }
 
-    private func rebuildBand(_ layout: Layout) {
-        let projectEndX = layout.width / 2 + CGFloat(layout.duration) * layout.pixelsPerSecond - windowOrigin
-        band.bounds = CGRect(x: 0, y: 0, width: min(layout.width * 3, projectEndX + 64), height: 30)
-        majorTicks.frame = band.bounds
-        minorTicks.frame = band.bounds
+    private func updateTiles(around index: Int, layout: Layout) {
+        let indices = (index - 1)...(index + 1)
+        let origin = CGFloat(indices.lowerBound) * layout.tileWidth
+        band.bounds = CGRect(x: origin, y: 0, width: layout.tileWidth * 3, height: 30)
+        for index in tiles.keys where !indices.contains(index) {
+            tiles.removeValue(forKey: index)?.removeFromSuperlayer()
+        }
+        for index in indices where tiles[index] == nil {
+            let tile = makeTile(at: CGFloat(index) * layout.tileWidth, layout: layout)
+            tiles[index] = tile
+            band.addSublayer(tile)
+        }
+    }
+
+    private func makeTile(at origin: CGFloat, layout: Layout) -> CALayer {
+        let tile = CALayer()
+        // Leave room for the stroke on either side of a tile boundary.
+        let tileStart = origin - 1
+        tile.frame = CGRect(x: tileStart, y: 0, width: layout.tileWidth + 2, height: 30)
+        let majorTicks = CAShapeLayer()
+        let minorTicks = CAShapeLayer()
+        majorTicks.frame = tile.bounds
+        minorTicks.frame = tile.bounds
+        majorTicks.lineWidth = 1.1
+        minorTicks.lineWidth = 0.8
+        tile.addSublayer(minorTicks)
+        tile.addSublayer(majorTicks)
         let color = UIColor.label.resolvedColor(with: traitCollection)
         majorTicks.strokeColor = color.withAlphaComponent(0.48).cgColor
         minorTicks.strokeColor = color.withAlphaComponent(0.16).cgColor
@@ -154,63 +182,46 @@ final class TimelineRulerSurface: UIView {
         let majorInterval = rulerMajorInterval(for: layout.pixelsPerSecond)
         let minorInterval = rulerMinorInterval(majorInterval: majorInterval, pixelsPerSecond: layout.pixelsPerSecond)
         let majorStride = Int((majorInterval / minorInterval).rounded())
-        let firstTime = max(Double((windowOrigin - layout.width / 2) / layout.pixelsPerSecond), 0)
-        let lastTime = min(
-            Double((windowOrigin + layout.width * 3 - layout.width / 2) / layout.pixelsPerSecond),
-            layout.duration
-        )
+        let startX = layout.width / 2
+        let end = origin + layout.tileWidth
+        let firstTime = max(Double((origin - startX) / layout.pixelsPerSecond), 0)
+        let lastTime = min(Double((end - startX) / layout.pixelsPerSecond), layout.duration)
         let first = Int(floor(firstTime / minorInterval))
         let last = min(Int(ceil(lastTime / minorInterval)), Int(floor(layout.duration / minorInterval + 1e-9)))
         let majorPath = CGMutablePath()
         let minorPath = CGMutablePath()
-        var labelCount = 0
 
         if first <= last {
             for index in first...last {
                 let time = Double(index) * minorInterval
-                let x = pixelAligned(layout.width / 2 + CGFloat(time) * layout.pixelsPerSecond) - windowOrigin
+                let tickX = pixelAligned(startX + CGFloat(time) * layout.pixelsPerSecond)
+                guard tickX >= origin, tickX < end else { continue }
+                let x = tickX - tileStart
                 let isMajor = index.isMultiple(of: majorStride)
                 let tick = isMajor ? majorTicks : minorTicks
-                let tickFits = x + tick.lineWidth / 2 <= projectEndX
-                if tickFits {
-                    let path = isMajor ? majorPath : minorPath
-                    path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
-                    path.addLine(to: CGPoint(x: x, y: 29))
-                }
-                if isMajor && tickFits {
+                guard tickX + tick.lineWidth / 2 <= layout.projectEndX else { continue }
+                let path = isMajor ? majorPath : minorPath
+                path.move(to: CGPoint(x: x, y: isMajor ? 5 : 17))
+                path.addLine(to: CGPoint(x: x, y: 29))
+                if isMajor {
                     let text = NSAttributedString(string: formatRulerTime(time, interval: majorInterval), attributes: attributes)
                     let size = text.size()
                     let width = ceil(size.width) + 2
                     let height = ceil(size.height)
-                    let startX = layout.width / 2 - windowOrigin
-                    // Keep text fixed to its tick. Let it scroll out of view;
-                    // clamping it to a viewport edge makes the ruler sticky.
-                    let labelX = x + 22 - width / 2
+                    let labelX = x + max(1, 22 - width / 2)
                     let frame = CGRect(x: labelX, y: 10 - height / 2, width: width, height: height)
-                    if frame.minX >= startX {
-                        updateLabel(at: labelCount, text: text, frame: frame)
-                        labelCount += 1
-                    }
+                    let label = CATextLayer()
+                    label.alignmentMode = .center
+                    label.contentsScale = max(traitCollection.displayScale, 1)
+                    label.frame = frame
+                    label.string = text
+                    tile.addSublayer(label)
                 }
             }
         }
         majorTicks.path = majorPath
         minorTicks.path = minorPath
-        for label in labels.dropFirst(labelCount) { label.isHidden = true }
-    }
-
-    private func updateLabel(at index: Int, text: NSAttributedString, frame: CGRect) {
-        if index == labels.count {
-            let label = CATextLayer()
-            label.alignmentMode = .center
-            band.addSublayer(label)
-            labels.append(label)
-        }
-        let label = labels[index]
-        label.contentsScale = max(traitCollection.displayScale, 1)
-        label.frame = frame
-        label.string = text
-        label.isHidden = false
+        return tile
     }
 
     private func rulerMajorInterval(for pixelsPerSecond: CGFloat) -> Double {

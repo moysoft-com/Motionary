@@ -78,8 +78,46 @@ struct TimelinePlaybackPosition {
     }
 }
 
+struct TimelinePlaybackMotion {
+    static let animationKey = "timelinePlaybackMotion"
+
+    let hostTime: CFTimeInterval
+    let duration: CFTimeInterval
+    let distance: CGFloat
+
+    init?(
+        hostTime: CFTimeInterval, refreshInterval: CFTimeInterval, pointsPerSecond: CGFloat,
+        remainingDistance: CGFloat
+    ) {
+        guard pointsPerSecond > 0, remainingDistance > 0, refreshInterval > 0 else { return nil }
+        self.hostTime = hostTime
+        // Cover brief commit gaps while keeping the visual position close
+        // to the player if future updates stop arriving.
+        duration = min(refreshInterval * 3, 0.05, Double(remainingDistance / pointsPerSecond))
+        distance = pointsPerSecond * CGFloat(duration)
+    }
+
+    func apply(to layer: CALayer, keyPath: String) {
+        let animation = CABasicAnimation(keyPath: keyPath)
+        animation.beginTime = layer.convertTime(hostTime, from: nil)
+        animation.duration = duration
+        animation.fromValue = 0
+        animation.toValue = -distance
+        animation.isAdditive = true
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.fillMode = .forwards
+        animation.isRemovedOnCompletion = false
+        layer.add(animation, forKey: Self.animationKey)
+    }
+}
+
 @MainActor
 final class TimelineViewportState: ObservableObject {
+    // Prepare a short sequence once. Bound both dimensions so this cannot
+    // turn a long or densely layered timeline into an eager render.
+    private static let preparedWidth: CGFloat = 2_400
+    private static let preparedTrackLimit = 4
+
     @Published private(set) var window: TimelineViewportWindow = .initial
     private var wasPinching = false
 
@@ -159,7 +197,9 @@ final class TimelineViewportState: ObservableObject {
             visibleEnd + horizontalOverscan,
             max(timelineDuration, visibleEnd)
         )
-        let requestedRange: ClosedRange<Double> = ClosedRange(
+        let fitsPreparedWindow = !isPinching && configuration.trackCount <= Self.preparedTrackLimit
+            && CGFloat(timelineDuration) * safePixelsPerSecond <= Self.preparedWidth
+        let requestedRange: ClosedRange<Double> = fitsPreparedWindow ? 0...timelineDuration : ClosedRange(
             uncheckedBounds: (
                 lower: min(max(visibleStart - horizontalOverscan, 0), requestedUpper),
                 upper: requestedUpper
@@ -201,13 +241,19 @@ final class TimelineScrollPresentationState: ObservableObject {
     }
 
     func detachRuler(_ surface: TimelineRulerSurface) {
-        if ruler === surface { ruler = nil }
+        guard ruler === surface else { return }
+        surface.presentPlaybackMotion(nil)
+        ruler = nil
     }
 
     func presentRuler(_ sample: TimelineRulerSample, animated: Bool = false) {
         guard rulerSample != sample else { return }
         rulerSample = sample
         ruler?.present(sample, animated: animated)
+    }
+
+    func presentPlaybackMotion(_ motion: TimelinePlaybackMotion?) {
+        ruler?.presentPlaybackMotion(motion)
     }
 
     func update(verticalOffset: CGFloat) {

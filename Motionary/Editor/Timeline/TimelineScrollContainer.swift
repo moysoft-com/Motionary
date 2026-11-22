@@ -422,6 +422,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private var pendingScrubTime: Double?
         private var playbackDisplayLink: CADisplayLink?
         private var playbackPosition: TimelinePlaybackPosition?
+        private var hasPlaybackMotion = false
         private weak var observedPlaybackState: PlaybackState?
         private var playbackCancellables: Set<AnyCancellable> = []
         private var isPlaybackSynchronizationScheduled = false
@@ -520,7 +521,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             playbackPosition = nil
             let link = CADisplayLink(
                 target: self,
-                selector: #selector(handlePlaybackFrame)
+                selector: #selector(playbackDisplayLinkDidFire)
             )
             configurePlaybackDisplayLink(link)
             link.add(to: .main, forMode: .common)
@@ -542,6 +543,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
         private func navigateToCurrentTime() {
             guard let scrollView, !parent.isScrollDisabled else { return }
+            clearPlaybackMotion()
             let time = clampedTime(parent.playbackState?.currentTime ?? parent.currentTime)
             playbackPosition = TimelinePlaybackPosition(time: time, timestamp: CACurrentMediaTime())
             if isPinching {
@@ -578,6 +580,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         private func stopPlaybackDisplayLink() {
             playbackDisplayLink?.invalidate()
             playbackDisplayLink = nil
+            clearPlaybackMotion()
             if let scrollView, playbackPresentationX != nil,
                 !scrollView.isTracking, !scrollView.isDecelerating, !isOverscrolled(scrollView)
             {
@@ -606,7 +609,11 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             )
         }
 
-        @objc func handlePlaybackFrame() {
+        @objc private func playbackDisplayLinkDidFire(_ link: CADisplayLink) {
+            handlePlaybackFrame(refreshInterval: link.targetTimestamp - link.timestamp)
+        }
+
+        func handlePlaybackFrame(refreshInterval: CFTimeInterval? = nil) {
             guard parent.playbackState?.isPlaying == true,
                 !isUserInteracting || isPinching || isNavigatingVertically,
                 let scrollView
@@ -615,6 +622,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 !scrollView.isTracking, !scrollView.isDecelerating, !isOverscrolled(scrollView) {
                 finishPlaybackPresentation(in: scrollView)
             }
+            let hostTime = CACurrentMediaTime()
             let time = currentPlaybackTime
             if isPinching {
                 pinchAnchorTime = time
@@ -622,6 +630,35 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             } else {
                 scroll(to: time, in: scrollView)
             }
+            guard let refreshInterval, !isUserInteracting, !isPinching, !parent.isScrollDisabled,
+                parent.playbackState?.isStartingPlayback != true,
+                let player = parent.playerProvider?(), player.timeControlStatus == .playing
+            else {
+                clearPlaybackMotion()
+                return
+            }
+            let end = horizontalOffset(for: parent.playbackEndTime ?? parent.maximumTimelineTime, in: scrollView)
+            let motion = TimelinePlaybackMotion(
+                hostTime: hostTime, refreshInterval: refreshInterval,
+                pointsPerSecond: parent.pixelsPerSecond * CGFloat(player.rate),
+                remainingDistance: end - horizontalOffset(for: time, in: scrollView)
+            )
+            guard let motion else {
+                clearPlaybackMotion()
+                return
+            }
+            // The render server can advance both layers between main-thread
+            // scroll commits. UIScrollView still owns the actual gesture offset.
+            motion.apply(to: hostingController.view.layer, keyPath: "transform.translation.x")
+            parent.scrollPresentationState?.presentPlaybackMotion(motion)
+            hasPlaybackMotion = true
+        }
+
+        private func clearPlaybackMotion() {
+            guard hasPlaybackMotion else { return }
+            hasPlaybackMotion = false
+            hostingController.view.layer.removeAnimation(forKey: TimelinePlaybackMotion.animationKey)
+            parent.scrollPresentationState?.presentPlaybackMotion(nil)
         }
 
         private var isNavigatingVertically: Bool {
@@ -838,6 +875,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
 
         func beginScroll(in scrollView: UIScrollView, translation: CGPoint) {
             guard !isPinching, scrollView.panGestureRecognizer.numberOfTouches < 2 else { return }
+            clearPlaybackMotion()
             isUserInteracting = true
             // Lock to the normal range while allowing an interrupted bounce
             // on the other axis to settle naturally.
@@ -1150,6 +1188,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         func updatePinch(state: UIGestureRecognizer.State, scale: CGFloat, in scrollView: UIScrollView) {
             switch state {
             case .began:
+                clearPlaybackMotion()
                 if isUserInteracting { finishScrub(scrollView) }
                 finishPlaybackPresentation(in: scrollView)
                 isPinching = true

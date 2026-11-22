@@ -260,6 +260,42 @@ struct TimelineGestureTests {
         #expect(clock.accept(100.2, at: 0.2, frameDuration: 1 / 30) == 100.2)
     }
 
+    @Test func playbackMotionCoversBriefMissedCommitsAndStopsAtTheProjectEnd() throws {
+        let ordinary = try #require(TimelinePlaybackMotion(
+            hostTime: 10, refreshInterval: 1 / 60, pointsPerSecond: 88, remainingDistance: 500
+        ))
+        #expect(abs(ordinary.duration - 0.05) < 0.000_001)
+        #expect(abs(ordinary.distance - 4.4) < 0.000_001)
+
+        let nearEnd = try #require(TimelinePlaybackMotion(
+            hostTime: 10, refreshInterval: 1 / 60, pointsPerSecond: 88, remainingDistance: 1
+        ))
+        #expect(abs(nearEnd.distance - 1) < 0.000_001)
+        #expect(abs(nearEnd.duration - 1 / 88.0) < 0.000_001)
+        #expect(TimelinePlaybackMotion(
+            hostTime: 10, refreshInterval: 1 / 60, pointsPerSecond: 88, remainingDistance: 0
+        ) == nil)
+    }
+
+    @MainActor
+    @Test func compactTimelineKeepsTheSamePreparedContentThroughoutPlayback() {
+        let state = TimelineViewportState()
+        let viewport = CGSize(width: 360, height: 220)
+        let configuration = TimelineVirtualizationConfiguration(
+            centerPadding: 180, trackOriginY: 38, rowStride: 51, trackCount: 3, duration: 25
+        )
+        #expect(state.update(contentOffset: .zero, viewportSize: viewport, pixelsPerSecond: 88,
+                             configuration: configuration, force: true))
+        #expect(state.window.timeRange == 0...25)
+        for second in 1...25 {
+            #expect(!state.update(contentOffset: CGPoint(x: second * 88, y: 0), viewportSize: viewport,
+                                  pixelsPerSecond: 88, configuration: configuration))
+        }
+        #expect(state.update(contentOffset: CGPoint(x: 880, y: 0), viewportSize: viewport,
+                             pixelsPerSecond: 176, configuration: configuration, isPinching: true))
+        #expect(state.window.timeRange != 0...25)
+    }
+
     @Test func persistentClockCorrectionCatchesUpWithoutJumpingOrFreezing() {
         var clock = TimelinePlaybackPosition(time: 20, timestamp: 0)
         #expect(clock.accept(20.25, at: 0.02, frameDuration: 1 / 30) == 20)
@@ -332,6 +368,11 @@ struct TimelineGestureTests {
     }
 
     @MainActor
+    private func rulerContent(in band: CALayer) -> [CALayer] {
+        (band.sublayers ?? []).flatMap { $0.sublayers ?? [] }
+    }
+
+    @MainActor
     @Test func rulerWindowRebuildKeepsTheSameTickCoordinates() throws {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
@@ -339,20 +380,51 @@ struct TimelineGestureTests {
             ruler.present(TimelineRulerSample(horizontalOffset: offset, collapseOffset: 0,
                                               pixelsPerSecond: 88, duration: 7_200))
             let band = try #require(ruler.layer.sublayers?.first)
-            let ticks = try #require(band.sublayers?.compactMap { $0 as? CAShapeLayer }
-                .first(where: { $0.lineWidth == 1.1 })?.path)
             var positions: [CGFloat] = []
-            ticks.applyWithBlock { element in
-                guard element.pointee.type == .moveToPoint else { return }
-                let x = element.pointee.points[0].x + band.position.x
-                if (20...280).contains(x) { positions.append(x) }
+            for ticks in rulerContent(in: band).compactMap({ $0 as? CAShapeLayer }) where ticks.lineWidth == 1.1 {
+                ticks.path?.applyWithBlock { element in
+                    guard element.pointee.type == .moveToPoint else { return }
+                    let x = ticks.convert(element.pointee.points[0], to: ruler.layer).x
+                    if (20...280).contains(x) { positions.append(x) }
+                }
             }
-            return positions
+            return positions.sorted()
         }
         let previous = try visibleTickPositions(offset: 599_999)
         let next = try visibleTickPositions(offset: 600_001)
         #expect(!previous.isEmpty)
         #expect(next == previous.map { $0 - 2 })
+    }
+
+    @MainActor
+    @Test func visibleRulerLabelsKeepTheirLayersAcrossWindowChanges() throws {
+        let ruler = TimelineRulerSurface()
+        ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
+        let band = try #require(ruler.layer.sublayers?.first)
+        func present(_ offset: CGFloat) {
+            ruler.present(TimelineRulerSample(horizontalOffset: offset, collapseOffset: 0,
+                                              pixelsPerSecond: 75, duration: 60))
+        }
+        func labels(for text: String) -> [CATextLayer] {
+            rulerContent(in: band).compactMap { $0 as? CATextLayer }.filter {
+                ($0.string as? NSAttributedString)?.string == text
+            }
+        }
+
+        present(299)
+        let label = try #require(labels(for: "0:02").first)
+        let previousFrame = try #require(label.superlayer).convert(label.frame, to: ruler.layer)
+        #expect(previousFrame.minX > 0)
+        #expect(previousFrame.midX == 23)
+
+        present(301)
+        #expect(labels(for: "0:02").count == 1)
+        #expect(labels(for: "0:02").first === label)
+        let nextFrame = try #require(label.superlayer).convert(label.frame, to: ruler.layer)
+        #expect(nextFrame == previousFrame.offsetBy(dx: -2, dy: 0))
+
+        present(299)
+        #expect(labels(for: "0:02").first === label)
     }
 
     @MainActor
@@ -362,15 +434,16 @@ struct TimelineGestureTests {
         ruler.present(TimelineRulerSample(horizontalOffset: 120, collapseOffset: 0,
                                           pixelsPerSecond: 88, duration: 10))
         let band = try #require(ruler.layer.sublayers?.first)
-        let label = try #require(band.sublayers?.compactMap { $0 as? CATextLayer }.first {
+        let label = try #require(rulerContent(in: band).compactMap { $0 as? CATextLayer }.first {
             !$0.isHidden && ($0.string as? NSAttributedString)?.string == "0:03"
         })
+        let tile = try #require(label.superlayer)
         let labelFrame = label.frame
-        #expect(labelFrame.maxX + band.position.x > ruler.bounds.maxX)
+        #expect(tile.convert(labelFrame, to: ruler.layer).maxX > ruler.bounds.maxX)
 
         ruler.present(TimelineRulerSample(horizontalOffset: 170, collapseOffset: 0,
                                           pixelsPerSecond: 88, duration: 10))
-        #expect(label.frame.maxX + band.position.x < ruler.bounds.maxX)
+        #expect(tile.convert(label.frame, to: ruler.layer).maxX < ruler.bounds.maxX)
         #expect(label.frame == labelFrame)
     }
 
@@ -381,19 +454,21 @@ struct TimelineGestureTests {
         ruler.present(TimelineRulerSample(horizontalOffset: 3 * 88, collapseOffset: 0,
                                           pixelsPerSecond: 88, duration: 3.1))
         let band = try #require(ruler.layer.sublayers?.first)
-        let labels = try #require(band.sublayers).compactMap { $0 as? CATextLayer }
+        let labels = rulerContent(in: band).compactMap { $0 as? CATextLayer }
         let label = try #require(labels.first {
             !$0.isHidden && ($0.string as? NSAttributedString)?.string == "0:03"
         })
-        #expect(label.frame.maxX <= band.bounds.maxX)
-        let ticks = try #require(band.sublayers?.compactMap { $0 as? CAShapeLayer }
-            .first(where: { $0.lineWidth == 1.1 })?.path)
+        let tile = try #require(label.superlayer)
+        #expect(tile.convert(label.frame, to: band).maxX <= band.bounds.maxX)
         var positions: [CGFloat] = []
-        ticks.applyWithBlock { element in
-            if element.pointee.type == .moveToPoint { positions.append(element.pointee.points[0].x) }
+        for ticks in rulerContent(in: band).compactMap({ $0 as? CAShapeLayer }) where ticks.lineWidth == 1.1 {
+            ticks.path?.applyWithBlock { element in
+                if element.pointee.type == .moveToPoint {
+                    positions.append(ticks.convert(element.pointee.points[0], to: ruler.layer).x)
+                }
+            }
         }
-        let expectedX = 150 + 3 * 88 - (band.position.x + 3 * 88)
-        #expect(positions.contains { abs($0 - expectedX) < 1 })
+        #expect(positions.contains { abs($0 - 150) < 1 })
     }
 
     @MainActor
@@ -401,16 +476,19 @@ struct TimelineGestureTests {
         let ruler = TimelineRulerSurface()
         ruler.frame = CGRect(x: 0, y: 0, width: 300, height: 30)
         ruler.present(TimelineRulerSample(horizontalOffset: 84, collapseOffset: 0,
-                                          pixelsPerSecond: 280, duration: 0.4))
+                                          pixelsPerSecond: 400, duration: 0.28))
         let band = try #require(ruler.layer.sublayers?.first)
-        #expect(band.masksToBounds)
-        #expect(band.position.x + band.bounds.maxX == 242)
-        let layers = try #require(band.sublayers)
-        for label in layers.compactMap({ $0 as? CATextLayer }) where !label.isHidden {
-            #expect(label.frame.maxX <= band.bounds.maxX)
-        }
+        #expect(ruler.clipsToBounds)
+        #expect(!band.masksToBounds)
+        let layers = rulerContent(in: band)
+        let endLabel = try #require(layers.compactMap { $0 as? CATextLayer }.first {
+            ($0.string as? NSAttributedString)?.string == "0.2s"
+        })
+        let tile = try #require(endLabel.superlayer)
+        #expect(tile.convert(endLabel.frame, to: ruler.layer).minX > 146)
         for ticks in layers.compactMap({ $0 as? CAShapeLayer }) {
-            #expect((ticks.path?.boundingBox.maxX ?? 0) + band.position.x <= 178)
+            guard let path = ticks.path, !path.isEmpty else { continue }
+            #expect(ticks.convert(path.boundingBox, to: ruler.layer).maxX <= 178)
         }
     }
 
