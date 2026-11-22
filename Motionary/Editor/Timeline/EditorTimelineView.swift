@@ -6,7 +6,7 @@ import UIKit
 
 /// Adds workspace keyframes and emphasis to the normal interactive timeline.
 struct TimelineWorkspaceContext: Equatable {
-    let itemID: UUID
+    let itemID: UUID?
     let activeSection: KeyframeSection?
     let activeEffectID: UUID?
     let graphSegment: KeyframeSegment?
@@ -20,7 +20,8 @@ struct TimelineWorkspaceContext: Equatable {
     }
 
     func track(in tracks: [TimelineTrack]) -> TimelineTrack? {
-        tracks.first { $0.items.contains { $0.id == itemID } }
+        guard let itemID else { return nil }
+        return tracks.first { $0.items.contains { $0.id == itemID } }
     }
 
     func displayedTracks(in tracks: [TimelineTrack]) -> [TimelineTrack] {

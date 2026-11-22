@@ -36,6 +36,7 @@ enum TimelineTrackBackgroundRadius {
 struct TimelineTrackRow: View {
     let track: TimelineTrack
     let trackSnapshot: TimelineRenderTrackSnapshot?
+    let sourceAudioCandidateURLs: [URL]
     let items: [TimelineRenderItem]
     let trackIndex: Int
     let trackCount: Int
@@ -57,6 +58,7 @@ struct TimelineTrackRow: View {
     let onSelectTrack: () -> Void
     let onTapEmptySpace: () -> Void
     let onToggleTrackMuted: () -> Void
+    let onToggleSourceAudioMuted: () -> Void
     let onDeleteTrack: () -> Void
     let onCopyTrack: () -> Void
     let onCutTrack: () -> Void
@@ -91,6 +93,7 @@ struct TimelineTrackRow: View {
         ZStack(alignment: .leading) {
             TimelineTrackHeader(
                 track: track,
+                sourceAudioCandidateURLs: sourceAudioCandidateURLs,
                 isSelected: selectionState.trackID == track.id,
                 trackTop: trackTop,
                 viewportHeight: viewportHeight,
@@ -99,6 +102,7 @@ struct TimelineTrackRow: View {
                 scrollPresentationState: scrollPresentationState,
                 onSelectTrack: onSelectTrack,
                 onToggleTrackMuted: onToggleTrackMuted,
+                onToggleSourceAudioMuted: onToggleSourceAudioMuted,
                 onDeleteTrack: onDeleteTrack,
                 onCopyTrack: onCopyTrack,
                 onCutTrack: onCutTrack,
@@ -258,6 +262,7 @@ struct TimelineTrackRow: View {
 
 private struct TimelineTrackHeader: View {
     let track: TimelineTrack
+    let sourceAudioCandidateURLs: [URL]
     let isSelected: Bool
     let trackTop: CGFloat
     let viewportHeight: CGFloat
@@ -266,6 +271,7 @@ private struct TimelineTrackHeader: View {
     @ObservedObject var scrollPresentationState: TimelineScrollPresentationState
     let onSelectTrack: () -> Void
     let onToggleTrackMuted: () -> Void
+    let onToggleSourceAudioMuted: () -> Void
     let onDeleteTrack: () -> Void
     let onCopyTrack: () -> Void
     let onCutTrack: () -> Void
@@ -275,58 +281,94 @@ private struct TimelineTrackHeader: View {
     let onTrackDragEnded: (Bool) -> Void
 
     @State private var isShowingDeleteConfirmation = false
+    @State private var sourceAudioURL: URL?
 
     var body: some View {
-        trackLabel
-            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contextMenu {
-                Button {
-                    LayerOptionsTip().invalidate(reason: .actionPerformed)
-                    onToggleTrackMuted()
-                } label: {
-                    switch (track.kind == .audio, track.isMuted) {
-                    case (true, true): Label("Unmute Layer", systemImage: "speaker.wave.2")
-                    case (true, false): Label("Mute Layer", systemImage: "speaker.slash")
-                    case (false, true): Label("Enable Layer", systemImage: "eye")
-                    case (false, false): Label("Disable Layer", systemImage: "eye.slash")
-                    }
-                }
-                Divider()
-                Button("Cut", systemImage: "scissors") {
-                    LayerOptionsTip().invalidate(reason: .actionPerformed)
-                    onCutTrack()
-                }
-                Button("Copy", systemImage: "doc.on.doc") {
-                    LayerOptionsTip().invalidate(reason: .actionPerformed)
-                    onCopyTrack()
-                }
-                Button("Paste", systemImage: "doc.on.clipboard") {
-                    LayerOptionsTip().invalidate(reason: .actionPerformed)
-                    onPasteTrack()
-                }
-                Divider()
-                DeleteMenuButton {
-                    LayerOptionsTip().invalidate(reason: .actionPerformed)
-                    isShowingDeleteConfirmation = true
-                }
-            }
-            .onTapGesture(count: 2) {
+        TimelineTrackTagInteraction(
+            trackID: track.id,
+            label: track.name,
+            value: trackState,
+            icon: trackIcon,
+            makeMenu: makeMenu,
+            onTap: {
+                onSelectTrack()
+                MotionaryTipEvents.layerSelection.sendDonation()
+            },
+            onDoubleTap: {
                 LayerOptionsTip().invalidate(reason: .actionPerformed)
                 EditorHaptics.tap()
                 isShowingDeleteConfirmation = true
             }
-            .onTapGesture {
-                onSelectTrack()
-                MotionaryTipEvents.layerSelection.sendDonation()
+        )
+            .id(track.id)
+            .frame(width: trackLabelWidth, height: height)
+            .task(id: sourceAudioCandidateURLs) {
+                sourceAudioURL = nil
+                for url in Set(sourceAudioCandidateURLs) {
+                    let metadata = try? await MediaAssetCache.shared.metadata(for: url)
+                    guard !Task.isCancelled else { return }
+                    if metadata?.audioTrack != nil {
+                        sourceAudioURL = url
+                        return
+                    }
+                }
+            }
+            .popover(isPresented: $isShowingDeleteConfirmation, arrowEdge: .leading) {
+                deleteConfirmation
             }
             .popoverTip(isSelected && isTrackVisible ? LayerOptionsTip() : nil, arrowEdge: .leading)
-            .accessibilityValue(trackState)
-            .accessibilityIdentifier("timeline-track-\(track.id.uuidString)")
-            .position(
-                x: trackLabelOffset + trackLabelWidth * 0.5,
-                y: height * 0.5
-            )
+            .offset(x: trackLabelOffset)
             .transaction { $0.animation = nil }
+    }
+
+    private func makeMenu() -> UIMenu {
+        func action(
+            _ title: String,
+            icon: String,
+            attributes: UIMenuElement.Attributes = [],
+            perform: @escaping () -> Void
+        ) -> UIAction {
+            UIAction(title: title, image: UIImage(systemName: icon), attributes: attributes) { _ in
+                LayerOptionsTip().invalidate(reason: .actionPerformed)
+                perform()
+            }
+        }
+
+        var layerActions: [UIMenuElement] = []
+        if track.kind == .audio {
+            layerActions.append(action(
+                track.isMuted ? String(localized: "Unmute Layer") : String(localized: "Mute Layer"),
+                icon: track.isMuted ? "speaker.wave.2" : "speaker.slash",
+                perform: onToggleTrackMuted
+            ))
+        } else {
+            layerActions.append(action(
+                track.isMuted ? String(localized: "Enable Layer") : String(localized: "Disable Layer"),
+                icon: track.isMuted ? "eye" : "eye.slash",
+                perform: onToggleTrackMuted
+            ))
+            if hasSourceAudio {
+                layerActions.append(action(
+                    track.isSourceAudioMuted ? String(localized: "Unmute Layer") : String(localized: "Mute Layer"),
+                    icon: track.isSourceAudioMuted ? "speaker.wave.2" : "speaker.slash",
+                    perform: onToggleSourceAudioMuted
+                ))
+            }
+        }
+
+        return UIMenu(children: [
+            UIMenu(options: .displayInline, children: layerActions),
+            UIMenu(options: .displayInline, children: [
+                action(String(localized: "Cut"), icon: "scissors", perform: onCutTrack),
+                action(String(localized: "Copy"), icon: "doc.on.doc", perform: onCopyTrack),
+                action(String(localized: "Paste"), icon: "doc.on.clipboard", perform: onPasteTrack)
+            ]),
+            UIMenu(options: .displayInline, children: [
+                action(String(localized: "Delete"), icon: "trash", attributes: .destructive) {
+                    isShowingDeleteConfirmation = true
+                }
+            ])
+        ])
     }
 
     private var isTrackVisible: Bool {
@@ -343,49 +385,176 @@ private struct TimelineTrackHeader: View {
 
     private var trackLabelWidth: CGFloat { TimelineTrackHeaderLayout.width }
 
-    private var trackState: Text {
-        guard track.isMuted else { return Text("") }
-        return track.kind == .audio ? Text("Muted") : Text("Disabled")
+    private var hasSourceAudio: Bool {
+        sourceAudioURL.map { sourceAudioCandidateURLs.contains($0) } == true
+    }
+
+    private var trackState: String? {
+        if track.isMuted && track.kind != .audio { return String(localized: "Disabled") }
+        if track.isMuted || (hasSourceAudio && track.isSourceAudioMuted) { return String(localized: "Muted") }
+        return nil
     }
 
     private var trackIcon: String {
-        guard track.isMuted else { return timelineTrackIcon(for: track.kind) }
-        return track.kind == .audio ? "speaker.slash" : "eye.slash"
+        if track.isMuted && track.kind != .audio { return "eye.slash" }
+        if track.isMuted || (hasSourceAudio && track.isSourceAudioMuted) { return "speaker.slash" }
+        return timelineTrackIcon(for: track.kind)
     }
 
-    private var trackLabel: some View {
-        HStack(spacing: 7) {
-            Image(systemName: trackIcon)
-                .font(.caption)
-            Text(track.name)
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
-        }
-        .foregroundStyle(MotionaryTheme.textSecondary)
-        .padding(.horizontal, 10)
-        .frame(width: trackLabelWidth, height: height, alignment: .leading)
-        .background(MotionaryTheme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .popover(isPresented: $isShowingDeleteConfirmation, arrowEdge: .leading) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Delete \(track.name)?")
-                    .font(.headline)
+    private var deleteConfirmation: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Delete \(track.name)?")
+                .font(.headline)
 
-                Button(role: .destructive) {
-                    EditorHaptics.deleteCommit()
-                    isShowingDeleteConfirmation = false
-                    onDeleteTrack()
-                } label: {
-                    HStack {
-                        Spacer()
-                        Text("Confirm")
-                        Spacer()
-                    }
+            Button(role: .destructive) {
+                EditorHaptics.deleteCommit()
+                isShowingDeleteConfirmation = false
+                onDeleteTrack()
+            } label: {
+                HStack {
+                    Spacer()
+                    Text("Confirm")
+                    Spacer()
                 }
-                .motionaryProminentButtonStyle()
-                .tint(.red)
             }
-            .padding()
-            .presentationCompactAdaptation(.popover)
+            .motionaryProminentButtonStyle()
+            .tint(.red)
+        }
+        .padding()
+        .presentationCompactAdaptation(.popover)
+    }
+}
+
+private struct TimelineTrackTagInteraction: UIViewRepresentable {
+    let trackID: UUID
+    let label: String
+    let value: String?
+    let icon: String
+    let makeMenu: () -> UIMenu
+    let onTap: () -> Void
+    let onDoubleTap: () -> Void
+
+    private var labelConfiguration: some UIContentConfiguration {
+        UIHostingConfiguration {
+            HStack(spacing: 7) {
+                Image(systemName: icon)
+                    .font(.caption)
+                Text(label)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(MotionaryTheme.textSecondary)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(MotionaryTheme.surface)
+            .accessibilityHidden(true)
+        }
+        .margins(.all, 0)
+        .minSize(width: 0, height: 0)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(tag: self)
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = TimelineAccessibleInteractionView()
+        let coordinator = context.coordinator
+        let labelView = labelConfiguration.makeContentView()
+        labelView.isUserInteractionEnabled = false
+        labelView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(labelView)
+        NSLayoutConstraint.activate([
+            labelView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            labelView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            labelView.topAnchor.constraint(equalTo: view.topAnchor),
+            labelView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
+        view.layer.cornerRadius = 12
+        view.layer.cornerCurve = .continuous
+        view.clipsToBounds = true
+        view.isAccessibilityElement = true
+        view.accessibilityTraits = .button
+        view.onActivate = { [weak coordinator] in
+            guard let coordinator else { return false }
+            coordinator.tap()
+            return true
+        }
+        view.addInteraction(UIContextMenuInteraction(delegate: coordinator))
+
+        let tap = TimelineTapGestureRecognizer(target: coordinator, action: #selector(Coordinator.tap))
+        let doubleTap = TimelineTapGestureRecognizer(target: coordinator, action: #selector(Coordinator.doubleTap))
+        doubleTap.numberOfTapsRequired = 2
+        tap.require(toFail: doubleTap)
+        view.addGestureRecognizer(tap)
+        view.addGestureRecognizer(doubleTap)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        let previous = context.coordinator.tag
+        if previous.label != label || previous.icon != icon,
+            let labelView = uiView.subviews.first as? any UIContentView
+        {
+            labelView.configuration = labelConfiguration
+        }
+        context.coordinator.tag = self
+        uiView.accessibilityIdentifier = "timeline-track-\(trackID.uuidString)"
+        uiView.accessibilityLabel = label
+        uiView.accessibilityValue = value
+    }
+
+    final class Coordinator: NSObject, UIContextMenuInteractionDelegate {
+        var tag: TimelineTrackTagInteraction
+
+        init(tag: TimelineTrackTagInteraction) {
+            self.tag = tag
+        }
+
+        @objc func tap() { tag.onTap() }
+
+        @objc func doubleTap() { tag.onDoubleTap() }
+
+        func contextMenuInteraction(
+            _ interaction: UIContextMenuInteraction,
+            configurationForMenuAtLocation location: CGPoint
+        ) -> UIContextMenuConfiguration? {
+            guard let view = interaction.view, view.bounds.contains(location) else { return nil }
+            // UIKit can request the actions later, after the timeline has moved.
+            let menu = tag.makeMenu()
+            return UIContextMenuConfiguration(identifier: tag.trackID.uuidString as NSString, previewProvider: nil) { _ in
+                menu
+            }
+        }
+
+        func contextMenuInteraction(
+            _ interaction: UIContextMenuInteraction,
+            configuration: UIContextMenuConfiguration,
+            highlightPreviewForItemWithIdentifier identifier: any NSCopying
+        ) -> UITargetedPreview? {
+            preview(for: interaction, configuration: configuration)
+        }
+
+        func contextMenuInteraction(
+            _ interaction: UIContextMenuInteraction,
+            configuration: UIContextMenuConfiguration,
+            dismissalPreviewForItemWithIdentifier identifier: any NSCopying
+        ) -> UITargetedPreview? {
+            preview(for: interaction, configuration: configuration)
+        }
+
+        private func preview(
+            for interaction: UIContextMenuInteraction,
+            configuration: UIContextMenuConfiguration
+        ) -> UITargetedPreview? {
+            guard configuration.identifier as? String == tag.trackID.uuidString,
+                let view = interaction.view, view.window != nil
+            else { return nil }
+
+            let parameters = UIPreviewParameters()
+            parameters.backgroundColor = .clear
+            parameters.visiblePath = UIBezierPath(roundedRect: view.bounds, cornerRadius: 12)
+            return UITargetedPreview(view: view, parameters: parameters)
         }
     }
 }

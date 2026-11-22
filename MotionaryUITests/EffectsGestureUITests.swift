@@ -18,7 +18,14 @@ final class EffectsGestureUITests: XCTestCase {
         )).firstMatch
         XCTAssertTrue(adjustment.waitForExistence(timeout: 30))
         adjustment.tap()
-        app.buttons["Edit"].tap()
+        let toolbar = app.scrollViews["motionary-editor-toolbar"]
+        let effects = toolbar.buttons["Effects"]
+        XCTAssertTrue(effects.waitForExistence(timeout: 5))
+        XCTAssertEqual(toolbar.buttons.matching(identifier: "Effects").count, 1)
+        XCTAssertFalse(toolbar.buttons["Edit"].exists)
+        XCTAssertTrue(effects.isHittable)
+        XCTAssertLessThan(effects.frame.midX, toolbar.buttons["Duplicate"].frame.midX)
+        effects.tap()
         app.buttons["Noir"].firstMatch.tap()
         for _ in 0..<2 {
             app.buttons["Graph"].tap()
@@ -34,14 +41,14 @@ final class EffectsGestureUITests: XCTestCase {
         detail.name = "Effect detail after graph"
         detail.lifetime = .keepAlways
         add(detail)
-        app.buttons["Edit"].tap()
+        effects.tap()
         XCTAssertTrue(app.buttons["Add effect"].waitForExistence(timeout: 5))
         for _ in 0..<3 {
             app.buttons["Noir"].firstMatch.tap()
             let back = app.buttons["Back to effects"]
             let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: back)
             wait(for: [visible], timeout: 5)
-            app.buttons["Edit"].tap()
+            effects.tap()
             let add = app.buttons["Add effect"]
             let overview = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: add)
             wait(for: [overview], timeout: 5)

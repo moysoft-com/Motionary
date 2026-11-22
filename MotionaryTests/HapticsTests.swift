@@ -5,6 +5,122 @@ import XCTest
 @testable import Motionary
 
 final class HapticsTests: XCTestCase {
+    func testBeatHapticsArrangeMusicalAccentsAndFadeWithinTheRetimedClip() throws {
+        var light = AudioBeatMarker(sourceTime: 1, strength: 0.99)
+        light.accentScore = 0.45
+        var downbeat = AudioBeatMarker(sourceTime: 1.5, strength: 0.1, isDownbeat: true)
+        downbeat.accentScore = 0.8
+        var quiet = AudioBeatMarker(sourceTime: 2, strength: 1)
+        quiet.accentScore = 0.12
+        var breakStart = AudioBeatMarker(sourceTime: 2.5, strength: 0.9)
+        breakStart.accentScore = 0.85
+        breakStart.isBreakStart = true
+        var drop = AudioBeatMarker(sourceTime: 3, strength: 0.2, isDownbeat: true)
+        drop.accentScore = 0.9
+        drop.isDrop = true
+        let clip = MediaTimelineItem(
+            name: "Music", mediaID: MediaID(), mediaType: .audio, timelineStart: 4,
+            sourceRange: .init(start: 1, duration: 2.25), speedMap: .constant(speed: 2),
+            beatAnalysis: .init(
+                bpm: 120, confidence: 0.8,
+                markers: [.init(sourceTime: 0.5, strength: 1), light, downbeat, quiet, breakStart, drop,
+                          .init(sourceTime: 3.25, strength: 1)],
+                subbeats: [.init(sourceTime: 1.25, division: 2, position: 1, onsetTime: nil)],
+                subbeatDivision: 2, sourceFingerprint: "music"
+            )
+        )
+        let clips = BeatHapticArrangement.makeClips(for: clip, around: [])
+        XCTAssertEqual(clips.map(\.timelineStart), [4, 4.25, 5])
+        let accent = try XCTUnwrap(clips.first { $0.timelineStart == 4.25 })
+        let impact = try XCTUnwrap(clips.last)
+        let pulse = try XCTUnwrap(clips.first)
+        XCTAssertGreaterThan(accent.intensity.baseValue, pulse.intensity.baseValue)
+        XCTAssertGreaterThan(accent.duration, pulse.duration)
+        XCTAssertGreaterThan(impact.intensity.baseValue, accent.intensity.baseValue)
+        XCTAssertLessThan(impact.sharpness.baseValue, accent.sharpness.baseValue)
+        XCTAssertLessThanOrEqual(impact.timelineEnd, clip.timelineEnd)
+        let rendered = try HapticTrack.render(clips, through: clip.timelineEnd)
+        XCTAssertEqual(rendered.events.count, clips.count)
+        for event in rendered.events {
+            XCTAssertEqual(try XCTUnwrap(event.samples.last).intensity, 0, accuracy: 0.0001)
+        }
+    }
+
+    func testBeatHapticsPrioritizeDenseAccentsAndLeaveRoomBetweenPulses() throws {
+        let clip = MediaTimelineItem(
+            name: "Fast music", mediaID: MediaID(), mediaType: .audio, timelineStart: 0,
+            sourceRange: .init(start: 0, duration: 2), speedMap: .constant(speed: 4),
+            beatAnalysis: .init(
+                bpm: 160, confidence: 0.8,
+                markers: [
+                    .init(sourceTime: 0, strength: 0.6),
+                    .init(sourceTime: 0.375, strength: 0.95),
+                    .init(sourceTime: 0.75, strength: 0.7),
+                    .init(sourceTime: 1.125, strength: 0.5),
+                    .init(sourceTime: 1.5, strength: 0.05),
+                ],
+                method: .signalFallback, sourceFingerprint: "music"
+            )
+        )
+        let clips = BeatHapticArrangement.makeClips(for: clip, around: [])
+        XCTAssertEqual(clips.map(\.timelineStart), [0.09375, 0.28125])
+        let first = try XCTUnwrap(clips.first)
+        XCTAssertLessThanOrEqual(first.duration, (0.28125 - 0.09375) * 0.55)
+    }
+
+    func testOffbeatAccentsRoundTripAndCreateSoftHapticsWithoutTimelineMarkers() throws {
+        let analysis = AudioBeatAnalysis(
+            bpm: 60, confidence: 0.9,
+            markers: [1.0, 2.0, 3.0].map { .init(sourceTime: $0, strength: 0.9, isDownbeat: true) },
+            offbeatAccents: [.init(sourceTime: 1.1, strength: 1), .init(sourceTime: 1.5, strength: 0.85)],
+            sourceFingerprint: "music"
+        )
+        let restored = try JSONDecoder().decode(AudioBeatAnalysis.self, from: JSONEncoder().encode(analysis))
+        XCTAssertEqual(restored, analysis)
+        let clip = MediaTimelineItem(
+            name: "Music", mediaID: MediaID(), mediaType: .audio, timelineStart: 2,
+            sourceRange: .init(start: 0.5, duration: 3), speedMap: .constant(speed: 2), beatAnalysis: restored
+        )
+        XCTAssertEqual(clip.visibleBeatMarkers.map(\.sourceTime), [1, 2, 3])
+        let clips = BeatHapticArrangement.makeClips(for: clip, around: [])
+        XCTAssertEqual(clips.map(\.timelineStart), [2.25, 2.5, 2.75, 3.25])
+        XCTAssertLessThan(clips[1].intensity.baseValue, clips[0].intensity.baseValue)
+        XCTAssertLessThan(clips[1].sharpness.baseValue, clips[0].sharpness.baseValue)
+        XCTAssertLessThan(clips[1].duration, clips[0].duration)
+    }
+
+    @MainActor
+    func testAddBeatHapticsKeepsExistingClipsAndUndoesTheBatchInOneStep() throws {
+        let clip = MediaTimelineItem(
+            name: "Music", mediaID: MediaID(), mediaType: .audio, timelineStart: 0,
+            sourceRange: .init(start: 0, duration: 2),
+            beatAnalysis: .init(
+                bpm: 120, confidence: 0.8,
+                markers: [0, 0.5, 1, 1.5].map { .init(sourceTime: $0, strength: 0.8) },
+                method: .signalFallback, sourceFingerprint: "music"
+            )
+        )
+        let manual = HapticTimelineItem(timelineStart: 0.5, duration: 0.2, style: .impact)
+        let audioTrack = TimelineTrack(name: "Audio", kind: .audio, items: [.media(clip)])
+        let lockedTrack = TimelineTrack(name: "Haptics", kind: .haptic, items: [.haptic(manual)], isLocked: true)
+        let project = EditorProject(title: "Beat haptics", tracks: [lockedTrack, audioTrack])
+        let editor = EditorViewModel(
+            projectID: UUID(), projectStore: ProjectStore(), initialContent: .init(editorProject: project)
+        )
+        editor.selectTimelineItem(clip.id, trackID: audioTrack.id)
+        editor.addHapticsFromSelectedBeats()
+        XCTAssertEqual(editor.project.audibleHapticItems.map(\.timelineStart).sorted(), [0, 0.5, 1, 1.5])
+        XCTAssertEqual(editor.project.item(id: manual.id), .haptic(manual))
+        XCTAssertEqual(editor.selectedTimelineItemID, clip.id)
+        let added = editor.project.tracks
+        editor.addHapticsFromSelectedBeats()
+        XCTAssertEqual(editor.project.tracks, added)
+        editor.undo()
+        XCTAssertEqual(editor.project.audibleHapticItems, [manual])
+        editor.redo()
+        XCTAssertEqual(editor.project.audibleHapticItems.map(\.timelineStart).sorted(), [0, 0.5, 1, 1.5])
+    }
+
     func testProjectArchivePreservesEditableHapticPatternAndKeyframes() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

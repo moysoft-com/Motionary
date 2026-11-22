@@ -11,14 +11,37 @@ private final class TimelineWaveformBox {
     }
 }
 
+struct TimelineAudioWaveformLayout {
+    let drawingRange: Range<CGFloat>
+    let sampleRange: ClosedRange<CGFloat>
+
+    init?(
+        clipWidth: CGFloat,
+        sampleWidth: CGFloat,
+        sampleOffsetX: CGFloat,
+        viewport: ClosedRange<CGFloat>
+    ) {
+        let inset = min(5, sampleWidth / 2)
+        let sampleStart = sampleOffsetX + inset
+        let sampleEnd = sampleOffsetX + sampleWidth - inset
+        let lower = max(0, sampleStart, viewport.lowerBound)
+        let upper = min(clipWidth, sampleEnd, viewport.upperBound)
+        guard upper > lower else { return nil }
+
+        drawingRange = lower..<upper
+        sampleRange = (sampleStart - lower)...(sampleEnd - lower)
+    }
+}
+
 struct TimelineWaveformView: View {
     let samples: [CGFloat]
+    let sampleRange: ClosedRange<CGFloat>
 
     var body: some View {
         Canvas { context, size in
-            guard size.width > 1, size.height > 1, !samples.isEmpty else { return }
+            guard size.width > 0, size.height > 1, !samples.isEmpty else { return }
 
-            let fillPath = TimelineWaveformShape.path(samples: samples, xRange: 0...size.width, height: size.height)
+            let fillPath = TimelineWaveformShape.path(samples: samples, xRange: sampleRange, height: size.height)
             context.fill(
                 fillPath,
                 with: .color(Color(red: 0.16, green: 0.03, blue: 0.32))

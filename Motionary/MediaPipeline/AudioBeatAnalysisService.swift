@@ -63,12 +63,16 @@ struct AudioBeatAnalysisService {
         sourceFingerprint: String = "synthetic"
     ) throws -> AudioBeatAnalysis {
         let envelope = try spectralFlux(samples: samples, sampleRate: sampleRate)
-        return try detectBeatGrid(
+        var analysis = try detectBeatGrid(
             onsetEnvelope: envelope,
             sampleRate: sampleRate,
             sourceDuration: Double(samples.count) / sampleRate,
             sourceFingerprint: sourceFingerprint
         )
+        analysis.offbeatAccents = try samples.withUnsafeBufferPointer {
+            try OffbeatAccentAnalyzer.analyze(markers: analysis.markers, samples: $0, sampleRate: sampleRate)
+        }
+        return analysis
     }
 
     private static func decodeAndAnalyze(
@@ -192,24 +196,29 @@ struct AudioBeatAnalysisService {
             throw AudioBeatAnalysisError.cannotDecode
         }
         progress(0.8)
-        if !spoolFailed {
+        let pcm: Data?
+        if spoolFailed {
+            pcm = nil
+        } else {
             try pcmFile?.close()
+            let mappedPCM = try Data(contentsOf: pcmURL, options: .mappedIfSafe)
+            guard mappedPCM.count.isMultiple(of: MemoryLayout<Float>.stride) else {
+                throw AudioBeatAnalysisError.cannotDecode
+            }
+            pcm = mappedPCM
+        }
+        var neuralAnalysis: AudioBeatAnalysis?
+        if let pcm {
             // If the neural paths cannot establish a rhythm, the existing DSP
             // tracker gets a chance to establish one independently.
             let modelURL = Bundle.main.url(forResource: "BeatThisFP32", withExtension: "mlmodelc")
             if let engine = try? BeatThisInference(modelURL: modelURL) {
-                let pcm = try Data(contentsOf: pcmURL, options: .mappedIfSafe)
-                guard pcm.count.isMultiple(of: MemoryLayout<Float>.stride) else {
-                    throw AudioBeatAnalysisError.cannotDecode
-                }
                 do {
-                    let analysis = try pcm.withUnsafeBytes { bytes in
+                    neuralAnalysis = try pcm.withUnsafeBytes { bytes in
                         try NeuralBeatAnalyzer.analyze(samples: bytes.bindMemory(to: Float.self),
                                                        fingerprint: sourceFingerprint, engine: engine,
                                                        modelPrecision: .fp32)
                     }
-                    progress(1)
-                    return analysis
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -218,13 +227,26 @@ struct AudioBeatAnalysisService {
             }
         }
         try Task.checkCancellation()
-        var analysis = try detectBeatGrid(
-            onsetEnvelope: envelope,
-            sampleRate: sampleRate,
-            sourceDuration: max(duration, Double(envelope.count * hopSize) / sampleRate),
-            sourceFingerprint: sourceFingerprint
-        )
-        analysis.method = .signalFallback
+        var analysis: AudioBeatAnalysis
+        if let neuralAnalysis {
+            analysis = neuralAnalysis
+        } else {
+            analysis = try detectBeatGrid(
+                onsetEnvelope: envelope,
+                sampleRate: sampleRate,
+                sourceDuration: max(duration, Double(envelope.count * hopSize) / sampleRate),
+                sourceFingerprint: sourceFingerprint
+            )
+            analysis.method = .signalFallback
+        }
+        if let pcm {
+            progress(0.95)
+            analysis.offbeatAccents = try pcm.withUnsafeBytes {
+                try OffbeatAccentAnalyzer.analyze(
+                    markers: analysis.markers, samples: $0.bindMemory(to: Float.self), sampleRate: sampleRate
+                )
+            }
+        }
         progress(1)
         return analysis
     }

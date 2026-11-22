@@ -176,7 +176,7 @@ struct TimelineTracksContent: View {
 
     private var visibleTrackIndices: [Int] {
         if let workspaceContext, workspaceContext.showsOnlySelectedTrack {
-            return trackIndex(containing: workspaceContext.itemID).map { [$0] } ?? []
+            return workspaceContext.itemID.flatMap { trackIndex(containing: $0) }.map { [$0] } ?? []
         }
         var indices = Set(viewportState.window.trackRange)
         if let selectedClipID = snapshot.selectedClipID,
@@ -224,6 +224,10 @@ struct TimelineTracksContent: View {
         return TimelineTrackRow(
             track: track,
             trackSnapshot: snapshot.trackSnapshotsByID[track.id],
+            sourceAudioCandidateURLs: track.kind == .visual ? track.items.compactMap { item in
+                guard case .media(let media) = item, media.mediaType == .video else { return nil }
+                return viewModel.project.mediaLibrary[media.mediaID]?.url
+            } : [],
             items: snapshot.items(
                 in: track.id,
                 intersecting: track.kind == .haptic ? hapticVisibleRange : viewportState.window.timeRange,
@@ -249,6 +253,7 @@ struct TimelineTracksContent: View {
             onSelectTrack: { viewModel.selectClip(nil, trackID: track.id) },
             onTapEmptySpace: { viewModel.deselectTimeline() },
             onToggleTrackMuted: { viewModel.toggleLayerMuted(track.id) },
+            onToggleSourceAudioMuted: { viewModel.toggleLayerSourceAudioMuted(track.id) },
             onDeleteTrack: { viewModel.deleteLayer(track.id) },
             onCopyTrack: { viewModel.copyLayer(track.id) },
             onCutTrack: { viewModel.cutLayer(track.id) },

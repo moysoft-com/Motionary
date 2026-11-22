@@ -341,6 +341,16 @@ extension EditorViewModel {
         }
     }
 
+    func toggleLayerSourceAudioMuted(_ trackID: UUID) {
+        guard let index = project.tracks.firstIndex(where: { $0.id == trackID }),
+            project.tracks[index].kind == .visual
+        else { return }
+        pausePlaybackForEditing()
+        mutateProject { project in
+            project.tracks[index].isSourceAudioMuted.toggle()
+        }
+    }
+
     func deleteLayer(_ trackID: UUID) {
         guard let trackIndex = project.tracks.firstIndex(where: { $0.id == trackID }) else { return }
         let before = project.tracks

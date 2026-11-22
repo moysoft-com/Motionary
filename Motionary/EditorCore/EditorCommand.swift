@@ -221,6 +221,7 @@ extension EditorProject {
                 && current.name == old.name
                 && current.kind == old.kind
                 && current.isMuted == old.isMuted
+                && current.isSourceAudioMuted == old.isSourceAudioMuted
                 && current.isLocked == old.isLocked
                 && current.items.map(\.id) == old.items.map(\.id)
         }
@@ -247,6 +248,7 @@ extension EditorProject {
                     id: track.id,
                     kind: track.kind,
                     isMuted: track.isMuted,
+                    isSourceAudioMuted: track.isSourceAudioMuted,
                     items: track.items.map { item in
                         let mediaID: MediaID?
                         let mediaType: ClipMediaType?
@@ -383,6 +385,7 @@ private struct RenderTrackTopology: Equatable {
     let id: UUID
     let kind: TrackKind
     let isMuted: Bool
+    let isSourceAudioMuted: Bool
     let items: [RenderItemTopology]
 }
 

@@ -4,9 +4,113 @@ import AVFoundation
 import Combine
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 
 enum TimelineScrollContainerPullToAdd {
     static let threshold: CGFloat = 62
+}
+
+struct TimelinePinchStart {
+    static let movementThreshold: CGFloat = 8
+    let first: CGPoint
+    let second: CGPoint
+    let requiresSecondFingerDrag: Bool
+
+    func scale(first currentFirst: CGPoint, second currentSecond: CGPoint) -> CGFloat {
+        let initialDistance = max(Self.distance(first, second), 1)
+        return max(Self.distance(currentFirst, currentSecond), 1) / initialDistance
+    }
+
+    func canBegin(first currentFirst: CGPoint, second currentSecond: CGPoint) -> Bool {
+        if requiresSecondFingerDrag {
+            return Self.distance(second, currentSecond) >= Self.movementThreshold
+        }
+        return abs(Self.distance(currentFirst, currentSecond) - Self.distance(first, second))
+            >= Self.movementThreshold
+    }
+
+    static func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
+}
+
+private final class TimelinePinchGestureRecognizer: UIGestureRecognizer {
+    private var firstTouch: UITouch?
+    private var secondTouch: UITouch?
+    private var firstOrigin = CGPoint.zero
+    private var firstFingerHasDragged = false
+    private var start: TimelinePinchStart?
+    private(set) var scale: CGFloat = 1
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let window = view?.window else { return }
+        for touch in touches.sorted(by: { $0.timestamp < $1.timestamp }) {
+            if firstTouch == nil {
+                firstTouch = touch
+                firstOrigin = touch.location(in: window)
+            } else if secondTouch == nil, let firstTouch {
+                let first = firstTouch.location(in: window)
+                start = TimelinePinchStart(
+                    first: first, second: touch.location(in: window),
+                    requiresSecondFingerDrag: firstFingerHasDragged
+                )
+                secondTouch = touch
+            }
+        }
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let window = view?.window, let firstTouch else { return }
+        let first = firstTouch.location(in: window)
+        guard let secondTouch, let start else {
+            firstFingerHasDragged = firstFingerHasDragged
+                || TimelinePinchStart.distance(first, firstOrigin) >= TimelinePinchStart.movementThreshold
+            return
+        }
+        guard touches.contains(firstTouch) || touches.contains(secondTouch) else { return }
+        let second = secondTouch.location(in: window)
+        if state == .possible {
+            guard start.canBegin(first: first, second: second) else { return }
+            scale = start.scale(first: first, second: second)
+            state = .began
+        } else if state == .began || state == .changed {
+            scale = start.scale(first: first, second: second)
+            state = .changed
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let firstTouch else { return }
+        let firstEnded = touches.contains(firstTouch)
+        let secondEnded = secondTouch.map { touches.contains($0) } ?? false
+        guard firstEnded || secondEnded else { return }
+        if state == .began || state == .changed {
+            state = .ended
+        } else if firstEnded {
+            state = .failed
+        } else {
+            // Keep tracking the scrubbing finger after a second-finger tap.
+            secondTouch = nil
+            start = nil
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard firstTouch.map({ touches.contains($0) }) == true
+            || secondTouch.map({ touches.contains($0) }) == true
+        else { return }
+        state = state == .possible ? .failed : .cancelled
+    }
+
+    override func reset() {
+        super.reset()
+        firstTouch = nil
+        secondTouch = nil
+        firstOrigin = .zero
+        firstFingerHasDragged = false
+        start = nil
+        scale = 1
+    }
 }
 
 private final class TimelineUIScrollView: UIScrollView {
@@ -157,7 +261,8 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         scrollView.isDirectionalLockEnabled = true
         scrollView.decelerationRate = .normal
         scrollView.backgroundColor = .clear
-        scrollView.panGestureRecognizer.maximumNumberOfTouches = 1
+        // Keep an active pan alive while the pinch recognizer checks the second touch.
+        scrollView.panGestureRecognizer.maximumNumberOfTouches = 2
         scrollView.panGestureRecognizer.addTarget(
             context.coordinator, action: #selector(Coordinator.handleScrollPan(_:))
         )
@@ -167,7 +272,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         host.view.translatesAutoresizingMaskIntoConstraints = true
         scrollView.addSubview(host.view)
 
-        let pinch = UIPinchGestureRecognizer(
+        let pinch = TimelinePinchGestureRecognizer(
             target: context.coordinator, action: #selector(Coordinator.handlePinch(_:)))
         pinch.delegate = context.coordinator
         scrollView.addGestureRecognizer(pinch)
@@ -283,7 +388,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var parent: TimelineScrollContainer
         let hostingController: UIHostingController<Content>
-        var pinchRecognizer: UIPinchGestureRecognizer?
+        fileprivate var pinchRecognizer: TimelinePinchGestureRecognizer?
         var pinchStartPixelsPerSecond: CGFloat = 88
         var pinchAnchorTime: Double = 0
         var isProgrammaticScroll = false
@@ -972,6 +1077,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            guard !isPinching else { return }
             let shouldAddLayer =
                 isPullToAddArmed && max(-scrollView.contentOffset.y, 0) >= TimelineScrollContainerPullToAdd.threshold
             isPullToAddArmed = false
@@ -981,6 +1087,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
         }
 
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            guard !isPinching else { return }
             finishScrub(scrollView)
         }
 
@@ -1034,7 +1141,7 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             return min(max(native, 1), preferred)
         }
 
-        @objc func handlePinch(_ recognizer: UIPinchGestureRecognizer) {
+        @objc fileprivate func handlePinch(_ recognizer: TimelinePinchGestureRecognizer) {
             guard let scrollView = recognizer.view as? UIScrollView else { return }
 
             updatePinch(state: recognizer.state, scale: recognizer.scale, in: scrollView)
@@ -1049,12 +1156,16 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
                 isUserInteracting = true
                 pinchStartPixelsPerSecond = parent.pixelsPerSecond
                 pinchAnchorTime = scrubTime(in: scrollView)
+                scrollView.panGestureRecognizer.isEnabled = false
+                if scale != 1 { applyPinchScale(scale, in: scrollView) }
             case .changed:
                 applyPinchScale(scale, in: scrollView)
             case .ended, .cancelled, .failed:
+                guard isPinching else { return }
                 isPinching = false
                 isUserInteracting = false
                 applyPinchScale(scale, in: scrollView)
+                scrollView.panGestureRecognizer.isEnabled = true
             default:
                 break
             }
@@ -1136,7 +1247,9 @@ struct TimelineScrollContainer<Content: View>: UIViewRepresentable {
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
-            false
+            guard let pinchRecognizer, let pan = scrollView?.panGestureRecognizer else { return false }
+            return (gestureRecognizer === pinchRecognizer && otherGestureRecognizer === pan)
+                || (gestureRecognizer === pan && otherGestureRecognizer === pinchRecognizer)
         }
     }
 }

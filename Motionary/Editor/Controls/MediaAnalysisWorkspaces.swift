@@ -279,6 +279,15 @@ struct AutoBeatsWorkspaceView: View {
                         }
                     }
 
+                    EditorWorkspaceCommandButton(
+                        title: "Add Haptics",
+                        systemImage: "waveform.path",
+                        isEnabled: !analysis.markers.isEmpty
+                    ) {
+                        viewModel.addHapticsFromSelectedBeats()
+                    }
+                    .accessibilityHint("Creates editable haptic clips from the analyzed beats.")
+
                     HStack(spacing: 8) {
                         EditorWorkspaceCommandButton(title: "Reanalyze", systemImage: "arrow.clockwise") {
                             viewModel.analyzeSelectedAudioBeats()

@@ -7,6 +7,34 @@ import Testing
 
 @MainActor
 struct LayerManagementTests {
+    @Test func videoLayerAudioMuteIsIndependentOfVisibility() throws {
+        let video = TimelineTrack(name: "Video", kind: .visual)
+        let model = EditorViewModel(
+            projectID: UUID(), projectStore: ProjectStore(),
+            initialContent: ProjectContent(editorProject: EditorProject(title: "Layers", tracks: [video]))
+        )
+        let initial = model.project
+
+        model.toggleLayerSourceAudioMuted(video.id)
+        #expect(model.timelineRenderSnapshot.tracks.first?.isSourceAudioMuted == true)
+        #expect(model.project.tracks.first?.isMuted == false)
+        #expect(model.project.renderInvalidation(comparedTo: initial).contains(.compositionTopology))
+
+        model.toggleLayerMuted(video.id)
+        let encoded = try JSONEncoder().encode(model.project)
+        let saved = try JSONDecoder().decode(EditorProject.self, from: encoded)
+        #expect(saved.tracks.first?.isSourceAudioMuted == true)
+        #expect(saved.tracks.first?.isMuted == true)
+
+        model.undo()
+        #expect(model.project.tracks.first?.isSourceAudioMuted == true)
+        #expect(model.project.tracks.first?.isMuted == false)
+        model.undo()
+        #expect(model.project.tracks.first?.isSourceAudioMuted == false)
+        model.redo()
+        #expect(model.project.tracks.first?.isSourceAudioMuted == true)
+    }
+
     @Test func layerMutePersistsAndIsUndoableWithoutRemovingClips() throws {
         let item = TextTimelineItem(name: "Title", text: "Hello", timelineStart: 0, duration: 2)
         let visual = TimelineTrack(name: "Title", kind: .text, items: [.text(item)])

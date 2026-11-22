@@ -1,6 +1,33 @@
 import Foundation
 
 extension EditorViewModel {
+    func addHapticsFromSelectedBeats() {
+        guard !isPerformingLongTask, case .media(let clip) = selectedTimelineItem,
+            clip.mediaType == .audio, clip.beatAnalysis?.markers.isEmpty == false
+        else { return }
+
+        let clips = BeatHapticArrangement.makeClips(for: clip, around: project.audibleHapticItems)
+        guard let first = clips.first, let last = clips.last else {
+            showConfirmation("No additional beat haptics fit this clip")
+            return
+        }
+
+        let before = project
+        var after = project
+        let track = after.tracks.firstIndex { track in
+            track.kind == .haptic && !track.isLocked && !track.isMuted && track.items.allSatisfy {
+                $0.timelineEnd <= first.timelineStart || $0.timelineStart >= last.timelineEnd
+            }
+        } ?? after.insertFreshTrack(kind: .haptic)
+        after.tracks[track].items.append(contentsOf: clips.map(TimelineItem.haptic))
+        after.tracks[track].sortItems()
+        after.renumberTracks()
+        commit(EditorCommandFactory.importMedia(
+            before: before, after: after, invalidation: [.timelineLayout, .persistence, .userInterface]
+        ))
+        showConfirmation("Beat haptics added")
+    }
+
     @discardableResult
     func addHaptic() -> UUID? {
         guard !isPerformingLongTask else { return nil }

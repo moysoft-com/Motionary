@@ -268,7 +268,7 @@ struct TimelineLongPressDragValue {
     let locationInWindow: CGPoint
 }
 
-private final class TimelineAccessibleInteractionView: UIView {
+final class TimelineAccessibleInteractionView: UIView {
     var onActivate: (() -> Bool)?
 
     override func accessibilityActivate() -> Bool {

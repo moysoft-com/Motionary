@@ -556,6 +556,7 @@ extension EditorProject {
         }
         tracks[index].kind = .undefined
         tracks[index].isMuted = false
+        tracks[index].isSourceAudioMuted = false
         tracks[index].isLocked = false
     }
 

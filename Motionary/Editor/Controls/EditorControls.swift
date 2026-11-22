@@ -31,6 +31,12 @@ struct CoreToolBar: View {
                 HStack(spacing: MotionaryDesign.Spacing.sm) {
                     if let selectedItem = viewModel.selectedTimelineItem {
                         selectedLayerTool(for: selectedItem)
+                        if hasPrimaryTool(for: selectedItem) {
+                            Divider()
+                                .frame(height: MotionaryDesign.Control.compactHeight)
+                                .overlay(MotionaryTheme.surfaceStrong)
+                        }
+                        selectedTools(for: selectedItem)
                     } else {
                         PhotosPicker(selection: $selectedMediaItems, matching: .any(of: [.images, .videos])) {
                             CoreToolButtonContent(systemName: "plus", title: "Media", isProminent: true)
@@ -38,6 +44,10 @@ struct CoreToolBar: View {
                         .buttonStyle(.plain)
                         .disabled(viewModel.isPerformingLongTask)
                         .accessibilityLabel("Import media")
+
+                        Divider()
+                            .frame(height: MotionaryDesign.Control.compactHeight)
+                            .overlay(MotionaryTheme.surfaceStrong)
 
                         ShapeToolMenu(viewModel: viewModel)
 
@@ -67,186 +77,24 @@ struct CoreToolBar: View {
                             isAudioFileImporterPresented: $isAudioFileImporterPresented
                         )
                     }
-
-                if viewModel.selectedTimelineItem != nil {
                     Divider()
                         .frame(height: MotionaryDesign.Control.compactHeight)
                         .overlay(MotionaryTheme.surfaceStrong)
 
-                    if isTextSelected {
-                        CoreToolButton(
-                            systemName: "textformat.size",
-                            title: "Type",
-                            isSelected: activePanel == .textType
-                        ) {
-                            openTextPanel(.textType)
-                        }
-                        CoreToolButton(
-                            systemName: "paintbrush",
-                            title: "Style",
-                            isSelected: activePanel == .textStyle
-                        ) {
-                            openTextPanel(.textStyle)
-                        }
-                        CoreToolButton(
-                            systemName: "sparkles",
-                            title: "Motion",
-                            isSelected: activePanel == .textMotion || activePanel == .textMotionGraph
-                        ) {
-                            openTextPanel(.textMotion)
-                        }
+                    CoreToolButton(
+                        systemName: "aspectratio",
+                        title: "Canvas",
+                        isSelected: activePanel == .canvas
+                    ) {
+                        propertyContextClipID = nil
+                        activePanel = activePanel == .canvas ? .timeline : .canvas
                     }
-
-                    if supportsTransform {
-                        CoreToolButton(
-                            systemName: propertyToolSystemName(for: .transform, fallback: "crop.rotate"),
-                            title: propertyToolTitle(for: .transform, fallback: "Transform"),
-                            isSelected: isPropertyToolSelected(.transform)
-                        ) {
-                            if activePanel == .graph, graphReturnPanel == .transform {
-                                viewModel.graphSegment = nil
-                                activePanel = .transform
-                                return
-                            }
-                            propertyContextClipID = viewModel.selectedTimelineItemID
-                            activePanel = activePanel == .transform ? .timeline : .transform
-                        }
-                    }
-
-                    if viewModel.selectedTimelineItem?.isHapticImpact != true {
-                        CoreToolButton(systemName: "scissors", title: "Split") {
-                            if let splitClipID = viewModel.splitSelectedClip(),
-                                activePanel.isPropertyPanel
-                            {
-                                propertyContextClipID = splitClipID
-                            }
-                        }
-                    }
-
-                    CoreToolButton(systemName: "trash", title: "Delete") {
-                        viewModel.deleteSelectedClip()
-                    }
-
-                    if canExtractAudioFromSelectedClip {
-                        CoreToolButton(
-                            systemName: "waveform.badge.plus",
-                            title: "Extract"
-                        ) {
-                            viewModel.extractAudioFromSelectedClip()
-                        }
-                        .accessibilityLabel("Extract audio")
-                    }
-
-                    if supportsSpeed {
-                        CoreToolButton(
-                            systemName: propertyToolSystemName(for: .speed, fallback: "speedometer"),
-                            title: propertyToolTitle(for: .speed, fallback: "Speed"),
-                            isSelected: isPropertyToolSelected(.speed)
-                        ) {
-                            openPropertyPanel(.speed)
-                        }
-                    }
-
-                    if case .adjustment = viewModel.selectedTimelineItem {
-                        CoreToolButton(
-                            systemName: "square.3.layers.3d",
-                            title: "Layers",
-                            isSelected: isPropertyToolSelected(.adjustmentTargets)
-                        ) {
-                            openPropertyPanel(.adjustmentTargets)
-                        }
-                    }
-
-                    if supportsMask {
-                        CoreToolButton(
-                            systemName: "circle.dashed",
-                            title: "Mask",
-                            isSelected: isPropertyToolSelected(.mask)
-                        ) {
-                            openPropertyPanel(.mask)
-                        }
-                    }
-
-                    if supportsBackgroundRemoval {
-                        CoreToolButton(
-                            systemName: "person.crop.square",
-                            title: "BG",
-                            isSelected: isPropertyToolSelected(.removeBackground)
-                        ) {
-                            openPropertyPanel(.removeBackground)
-                        }
-                    }
-
-                    if supportsBlend {
-                        CoreToolButton(
-                            systemName: "square.stack.3d.up.fill",
-                            title: "Blend",
-                            isSelected: isPropertyToolSelected(.blend)
-                        ) {
-                            openPropertyPanel(.blend)
-                        }
-                    }
-
-                    if supportsAutoBeats {
-                        CoreToolButton(
-                            systemName: "metronome",
-                            title: "Beats",
-                            isSelected: isPropertyToolSelected(.autoBeats)
-                        ) {
-                            openPropertyPanel(.autoBeats)
-                        }
-                    }
-
-                    if supportsVisualAdjustments {
-                        CoreToolButton(
-                            systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
-                            title: propertyToolTitle(for: .adjust, fallback: "Adjust"),
-                            isSelected: isPropertyToolSelected(.adjust)
-                        ) {
-                            openPropertyPanel(.adjust)
-                        }
-
-                        CoreToolButton(
-                            systemName: propertyToolSystemName(for: .effects, fallback: "sparkles.2"),
-                            title: propertyToolTitle(for: .effects, fallback: "Effects"),
-                            isSelected: isPropertyToolSelected(.effects)
-                        ) {
-                            openEffectsPanel()
-                        }
-                    }
-
-                    if hasAudioControls && !isAudioSelected {
-                        CoreToolButton(
-                            systemName: propertyToolSystemName(for: .audio, fallback: "speaker.wave.2"),
-                            title: propertyToolTitle(for: .audio, fallback: "Audio"),
-                            isSelected: isPropertyToolSelected(.audio)
-                        ) {
-                            openPropertyPanel(.audio)
-                        }
-                    }
-
-                    CoreToolButton(systemName: "plus.square.on.square", title: "Duplicate") {
-                        viewModel.duplicateSelectedClip()
-                    }
-                }
-
-                Divider()
-                    .frame(height: MotionaryDesign.Control.compactHeight)
-                    .overlay(MotionaryTheme.surfaceStrong)
-
-                CoreToolButton(
-                    systemName: "aspectratio",
-                    title: "Canvas",
-                    isSelected: activePanel == .canvas
-                ) {
-                    propertyContextClipID = nil
-                    activePanel = activePanel == .canvas ? .timeline : .canvas
-                }
-                .accessibilityLabel("Canvas settings")
+                    .accessibilityLabel("Canvas settings")
                 }
                 .padding(MotionaryDesign.Spacing.sm)
                 .id(Self.scrollStartID)
             }
+            .accessibilityIdentifier("motionary-editor-toolbar")
             .modifier(ToolbarScrollEdgeFade())
             .clipShape(RoundedRectangle(cornerRadius: MotionaryDesign.Radius.panel, style: .continuous))
             .motionaryGlass(cornerRadius: MotionaryDesign.Radius.panel)
@@ -282,12 +130,177 @@ struct CoreToolBar: View {
     }
 
     @ViewBuilder
+    private func selectedTools(for item: TimelineItem) -> some View {
+        // Clip actions shared by all or almost all item types.
+        CoreToolButton(systemName: "plus.square.on.square", title: "Duplicate") {
+            viewModel.duplicateSelectedClip()
+        }
+
+        CoreToolButton(systemName: "trash", title: "Delete") {
+            viewModel.deleteSelectedClip()
+        }
+
+        if !item.isHapticImpact {
+            CoreToolButton(systemName: "scissors", title: "Split") {
+                if let splitClipID = viewModel.splitSelectedClip(),
+                    activePanel.isPropertyPanel
+                {
+                    propertyContextClipID = splitClipID
+                }
+            }
+        }
+
+        // Tools shared by visual items, then tools shared by fewer types.
+        if supportsTransform {
+            CoreToolButton(
+                systemName: propertyToolSystemName(for: .transform, fallback: "crop.rotate"),
+                title: propertyToolTitle(for: .transform, fallback: "Transform"),
+                isSelected: isPropertyToolSelected(.transform)
+            ) {
+                openPropertyPanel(.transform)
+            }
+        }
+
+        if supportsMask {
+            CoreToolButton(
+                systemName: "circle.dashed",
+                title: "Mask",
+                isSelected: isPropertyToolSelected(.mask)
+            ) {
+                openPropertyPanel(.mask)
+            }
+        }
+
+        if supportsBlend {
+            CoreToolButton(
+                systemName: "square.stack.3d.up.fill",
+                title: "Blend",
+                isSelected: isPropertyToolSelected(.blend)
+            ) {
+                openPropertyPanel(.blend)
+            }
+        }
+
+        if supportsVisualAdjustments {
+            CoreToolButton(
+                systemName: propertyToolSystemName(for: .adjust, fallback: "slider.horizontal.3"),
+                title: propertyToolTitle(for: .adjust, fallback: "Adjust"),
+                isSelected: isPropertyToolSelected(.adjust)
+            ) {
+                openPropertyPanel(.adjust)
+            }
+        }
+
+        if supportsVisualAdjustments, item.kind != .adjustment {
+            CoreToolButton(
+                systemName: propertyToolSystemName(for: .effects, fallback: "sparkles.2"),
+                title: propertyToolTitle(for: .effects, fallback: "Effects"),
+                isSelected: isPropertyToolSelected(.effects)
+            ) {
+                openEffectsPanel()
+            }
+        }
+
+        if supportsSpeed {
+            CoreToolButton(
+                systemName: propertyToolSystemName(for: .speed, fallback: "speedometer"),
+                title: propertyToolTitle(for: .speed, fallback: "Speed"),
+                isSelected: isPropertyToolSelected(.speed)
+            ) {
+                openPropertyPanel(.speed)
+            }
+        }
+
+        if supportsBackgroundRemoval {
+            CoreToolButton(
+                systemName: "person.crop.square",
+                title: "BG",
+                isSelected: isPropertyToolSelected(.removeBackground)
+            ) {
+                openPropertyPanel(.removeBackground)
+            }
+        }
+
+        // Tools specific to one item type.
+        if hasAudioControls && !isAudioSelected {
+            CoreToolButton(
+                systemName: propertyToolSystemName(for: .audio, fallback: "speaker.wave.2"),
+                title: propertyToolTitle(for: .audio, fallback: "Audio"),
+                isSelected: isPropertyToolSelected(.audio)
+            ) {
+                openPropertyPanel(.audio)
+            }
+        }
+
+        if canExtractAudioFromSelectedClip {
+            CoreToolButton(
+                systemName: "waveform.badge.plus",
+                title: "Extract"
+            ) {
+                viewModel.extractAudioFromSelectedClip()
+            }
+            .accessibilityLabel("Extract audio")
+        }
+
+        if supportsAutoBeats {
+            CoreToolButton(
+                systemName: "metronome",
+                title: "Beats",
+                isSelected: isPropertyToolSelected(.autoBeats)
+            ) {
+                openPropertyPanel(.autoBeats)
+            }
+        }
+
+        if case .adjustment = item {
+            CoreToolButton(
+                systemName: "square.3.layers.3d",
+                title: "Layers",
+                isSelected: isPropertyToolSelected(.adjustmentTargets)
+            ) {
+                openPropertyPanel(.adjustmentTargets)
+            }
+        }
+
+        if isTextSelected {
+            CoreToolButton(
+                systemName: "textformat.size",
+                title: "Type",
+                isSelected: activePanel == .textType
+            ) {
+                openTextPanel(.textType)
+            }
+            CoreToolButton(
+                systemName: "paintbrush",
+                title: "Style",
+                isSelected: activePanel == .textStyle
+            ) {
+                openTextPanel(.textStyle)
+            }
+            CoreToolButton(
+                systemName: "sparkles",
+                title: "Motion",
+                isSelected: activePanel == .textMotion || activePanel == .textMotionGraph
+            ) {
+                openTextPanel(.textMotion)
+            }
+        }
+    }
+
+    private func hasPrimaryTool(for item: TimelineItem) -> Bool {
+        switch item {
+        case .media, .shape, .text, .adjustment, .haptic: true
+        case .caption, .compound: false
+        }
+    }
+
+    @ViewBuilder
     private func selectedLayerTool(for item: TimelineItem) -> some View {
         switch item {
         case .media(let media) where media.mediaType == .audio:
             CoreToolButton(
                 systemName: "speaker.wave.2",
-                title: "Edit",
+                title: "Audio",
                 isSelected: true
             ) {
                 openPropertyPanel(.audio)
@@ -309,7 +322,7 @@ struct CoreToolBar: View {
         case .shape:
             CoreToolButton(
                 systemName: "slider.horizontal.3",
-                title: "Edit",
+                title: "Shape",
                 isSelected: true
             ) {
                 propertyContextClipID = viewModel.selectedTimelineItemID
@@ -318,7 +331,7 @@ struct CoreToolBar: View {
         case .text:
             CoreToolButton(
                 systemName: "pencil",
-                title: "Edit",
+                title: "Text",
                 isSelected: true
             ) {
                 propertyContextClipID = viewModel.selectedTimelineItemID
@@ -326,8 +339,8 @@ struct CoreToolBar: View {
             }
         case .adjustment:
             CoreToolButton(
-                systemName: "slider.horizontal.3",
-                title: "Edit",
+                systemName: "sparkles.2",
+                title: "Effects",
                 isSelected: true
             ) {
                 openEffectsPanel()
@@ -335,7 +348,7 @@ struct CoreToolBar: View {
         case .haptic:
             CoreToolButton(
                 systemName: "waveform.path",
-                title: "Edit",
+                title: "Haptics",
                 isSelected: true
             ) {
                 openPropertyPanel(.haptic)

@@ -13,65 +13,50 @@ struct CanvasWorkspaceView: View {
             systemImage: "aspectratio"
         ) {
             VStack(spacing: 12) {
-                EditorWorkspaceCard(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Label("Format", systemImage: "rectangle.on.rectangle")
-                            .font(MotionaryDesign.Typography.controlTitleStrong)
-                        Spacer()
-                        Text(currentResolution)
-                            .font(MotionaryDesign.Typography.controlValue)
-                            .foregroundStyle(MotionaryTheme.textSecondary)
-                    }
+                HStack {
+                    Text("Format")
+                        .font(MotionaryDesign.Typography.controlTitle)
+                    Spacer()
+                    Text(currentResolution)
+                        .font(MotionaryDesign.Typography.controlValue)
+                        .foregroundStyle(MotionaryTheme.textSecondary)
+                }
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        CanvasFormatButton(
+                            title: "Original",
+                            aspectRatio: originalAspectRatio ?? currentAspectRatio,
+                            isSelected: isOriginalSelected,
+                            isEnabled: viewModel.canApplySelectedClipOriginalRatio
+                        ) {
+                            viewModel.setCanvasToSelectedClipOriginalRatio()
+                        }
+
+                        ForEach(CanvasRatioPreset.presets) { preset in
                             CanvasFormatButton(
-                                title: "Original",
-                                aspectRatio: originalAspectRatio ?? currentAspectRatio,
-                                isSelected: isOriginalSelected,
-                                isEnabled: viewModel.canApplySelectedClipOriginalRatio
+                                title: preset.title,
+                                aspectRatio: CGFloat(preset.width) / CGFloat(preset.height),
+                                isSelected: isSelected(preset)
                             ) {
-                                viewModel.setCanvasToSelectedClipOriginalRatio()
-                            }
-
-                            ForEach(CanvasRatioPreset.presets) { preset in
-                                CanvasFormatButton(
-                                    title: preset.title,
-                                    aspectRatio: CGFloat(preset.width) / CGFloat(preset.height),
-                                    isSelected: isSelected(preset)
-                                ) {
-                                    viewModel.setCanvasPreset(preset)
-                                }
+                                viewModel.setCanvasPreset(preset)
                             }
                         }
                     }
                 }
-
-                EditorWorkspaceCard(alignment: .leading, spacing: 10) {
-                    Label("Background", systemImage: "paintpalette")
-                        .font(MotionaryDesign.Typography.controlTitleStrong)
-
-                    HStack(spacing: 10) {
-                        ColorPicker(
-                            "Canvas background",
-                            selection: Binding(
-                                get: { viewModel.project.renderSettings.backgroundColor.swiftUIColor },
-                                set: { viewModel.setCanvasBackgroundColor(RGBAColor($0)) }
-                            ),
-                            supportsOpacity: false
-                        )
-                        .labelsHidden()
-
-                        Text("Canvas color")
-                            .font(MotionaryDesign.Typography.pillLabel)
-                        Spacer()
-                        EditorWorkspaceCapsuleIconButton(
-                            systemName: "arrow.counterclockwise",
-                            accessibilityLabel: "Reset canvas background"
-                        ) {
-                            viewModel.setCanvasBackgroundColor(.black)
-                        }
-                    }
+                HStack {
+                    Text("Background color")
+                        .font(MotionaryDesign.Typography.controlTitle)
+                    Spacer()
+                    ColorPicker(
+                        "Canvas background",
+                        selection: Binding(
+                            get: { viewModel.project.renderSettings.backgroundColor.swiftUIColor },
+                            set: { viewModel.setCanvasBackgroundColor(RGBAColor($0)) }
+                        ),
+                        supportsOpacity: false
+                    )
+                    .labelsHidden()
                 }
             }
         }
@@ -2851,23 +2836,21 @@ struct HorizontalScrubInteraction: UIViewRepresentable {
 
 struct SelectedLayerMiniTimeline: View {
     @ObservedObject var viewModel: EditorViewModel
-    @Binding var contextClipID: UUID?
+    let contextClipID: UUID?
     @Binding var pixelsPerSecond: CGFloat
     let activeSection: KeyframeSection?
     let activeEffectID: UUID?
     let graphSegment: KeyframeSegment?
 
     var body: some View {
-        if let contextClipID {
-            CoreTimelineView(
-                viewModel: viewModel, pixelsPerSecond: $pixelsPerSecond,
-                workspaceContext: TimelineWorkspaceContext(
-                    itemID: contextClipID, activeSection: activeSection,
-                    activeEffectID: activeEffectID, graphSegment: graphSegment,
-                    showsOnlySelectedTrack: true, viewModel: viewModel
-                )
+        CoreTimelineView(
+            viewModel: viewModel, pixelsPerSecond: $pixelsPerSecond,
+            workspaceContext: TimelineWorkspaceContext(
+                itemID: contextClipID, activeSection: activeSection,
+                activeEffectID: activeEffectID, graphSegment: graphSegment,
+                showsOnlySelectedTrack: true, viewModel: viewModel
             )
-        }
+        )
     }
 }
 

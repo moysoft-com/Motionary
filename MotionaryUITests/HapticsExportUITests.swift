@@ -14,7 +14,7 @@ final class HapticsExportUITests: XCTestCase {
         XCTAssertTrue(timelineItem("Haptic", in: app).waitForExistence(timeout: 10))
         attachScreenshot("Haptics in the timeline")
 
-        app.buttons["Edit"].firstMatch.tap()
+        app.scrollViews["motionary-editor-toolbar"].buttons["Haptics"].tap()
         let keyframe = app.buttons["Haptics keyframe"]
         XCTAssertTrue(keyframe.waitForExistence(timeout: 10))
         XCTAssertTrue(app.descendants(matching: .any)["motionary-property-scrubber-haptics.intensity"].exists)
@@ -63,7 +63,7 @@ final class HapticsExportUITests: XCTestCase {
         addHaptics.tap()
 
         XCTAssertTrue(timelineItem("Haptic", in: app).waitForExistence(timeout: 10))
-        app.buttons["Edit"].firstMatch.tap()
+        app.scrollViews["motionary-editor-toolbar"].buttons["Haptics"].tap()
         let pattern = app.buttons["Pattern"]
         XCTAssertTrue(pattern.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Haptics"].exists)

@@ -708,6 +708,7 @@ private struct PreviewTopology: Equatable {
                 id: $0.id,
                 kind: $0.kind,
                 isMuted: $0.isMuted,
+                isSourceAudioMuted: $0.isSourceAudioMuted,
                 items: $0.items.map { item in
                     let mediaID: MediaID?
                     let mediaType: ClipMediaType?
@@ -768,6 +769,7 @@ private struct PreviewTrackTopology: Equatable {
     let id: UUID
     let kind: TrackKind
     let isMuted: Bool
+    let isSourceAudioMuted: Bool
     let items: [PreviewItemTopology]
 }
 
@@ -1289,6 +1291,7 @@ final class CompositionRenderService {
                     guard mediaItem.sourceRange.duration > 0 else { continue }
                     try await insertVisualItem(
                         source: TimelineVisualSource(mediaItem),
+                        includesSourceAudio: !track.isSourceAudioMuted,
                         project: project,
                         mediaLookup: &mediaLookup,
                         remapDecoders: &remapDecoders,
@@ -1792,6 +1795,7 @@ final class CompositionRenderService {
 
     private func insertVisualItem(
         source: TimelineVisualSource,
+        includesSourceAudio: Bool = true,
         project: EditorProject,
         mediaLookup: inout CompositionMediaLookup,
         remapDecoders: inout [URL: [RemapDecoderLane]],
@@ -2130,10 +2134,9 @@ final class CompositionRenderService {
         )
         renderOrder += 1
 
-        let audioTracks = CompositionAudioPolicy.includesSourceAudio(for: source.mediaType)
-            ? metadata.audioTrack.map { [$0] } ?? []
-            : []
-        if let sourceAudioTrack = audioTracks.first,
+        if includesSourceAudio,
+            CompositionAudioPolicy.includesSourceAudio(for: source.mediaType),
+            let sourceAudioTrack = metadata.audioTrack,
             let compositionAudioTrack = composition.addMutableTrack(
                 withMediaType: .audio,
                 preferredTrackID: kCMPersistentTrackID_Invalid

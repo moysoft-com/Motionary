@@ -513,6 +513,7 @@ struct TimelineItemVisualFill: View {
                     pixelsPerSecond: pixelsPerSecond,
                     sampleWidth: sampleWidth,
                     sampleOffsetX: sampleOffsetX,
+                    timelineStart: item.timelineStart,
                     visibleTimelineRange: visibleTimelineRange
                 )
                 .overlay {
@@ -535,6 +536,7 @@ struct TimelineItemVisualFill: View {
                     pixelsPerSecond: pixelsPerSecond,
                     sampleWidth: sampleWidth,
                     sampleOffsetX: sampleOffsetX,
+                    timelineStart: item.timelineStart,
                     visibleTimelineRange: visibleTimelineRange
                 )
             } else {
@@ -630,6 +632,7 @@ struct TimelineClipFill: View {
     let pixelsPerSecond: CGFloat
     let sampleWidth: CGFloat?
     let sampleOffsetX: CGFloat
+    let timelineStart: Double
     var visibleTimelineRange: ClosedRange<Double>? = nil
 
     @Environment(\.displayScale) private var displayScale
@@ -642,13 +645,21 @@ struct TimelineClipFill: View {
             if clip.shape != nil {
                 Color.orange
             } else if clip.mediaType == .audio {
-                TimelineWaveformView(samples: activeWaveformSamples)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 5)
-                    .frame(width: sampleWidth ?? width, height: height)
-                    .offset(x: sampleOffsetX)
-                    .frame(width: width, height: height, alignment: .leading)
-                    .clipped()
+                Color.clear
+                    .frame(width: width, height: height)
+                    .overlay(alignment: .leading) {
+                        if let waveformLayout {
+                            TimelineWaveformView(
+                                samples: activeWaveformSamples,
+                                sampleRange: waveformLayout.sampleRange
+                            )
+                            .padding(.vertical, 5)
+                            .frame(width: waveformLayout.drawingRange.upperBound - waveformLayout.drawingRange.lowerBound,
+                                   height: height)
+                            .clipped()
+                            .offset(x: waveformLayout.drawingRange.lowerBound)
+                        }
+                    }
                     .task(id: waveformTaskID) {
                         let samples = await TimelineAudioWaveformLoader.samples(
                             for: clip,
@@ -681,6 +692,20 @@ struct TimelineClipFill: View {
             }
 
         }
+    }
+
+    private var waveformLayout: TimelineAudioWaveformLayout? {
+        let viewport = visibleTimelineRange.map {
+            let start = CGFloat($0.lowerBound - timelineStart) * pixelsPerSecond
+            let end = CGFloat($0.upperBound - timelineStart) * pixelsPerSecond
+            return start...end
+        } ?? 0...width
+        return TimelineAudioWaveformLayout(
+            clipWidth: width,
+            sampleWidth: sampleWidth ?? width,
+            sampleOffsetX: sampleOffsetX,
+            viewport: viewport
+        )
     }
 
     private var activeWaveformSamples: [CGFloat] {

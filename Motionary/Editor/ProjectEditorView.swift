@@ -356,10 +356,6 @@ struct ProjectEditorView: View {
     private func editorCanvas(geometry: GeometryProxy) -> some View {
         let availableHeight = max(geometry.size.height - geometry.safeAreaInsets.bottom - 12, 1)
         let activeKeyframeSection = activeTimelineKeyframeSection
-        let showsMiniTimeline =
-            (activePanel.keyframeSection != nil || activePanel == .graph)
-            && propertyContextTimelineItem != nil
-        let miniTimelineHeight: CGFloat = showsMiniTimeline ? 52 : 0
         let controlHeight: CGFloat = 42
         let previewRatio: CGFloat
         switch activePanel {
@@ -409,10 +405,10 @@ struct ProjectEditorView: View {
                 )
                 .frame(maxHeight: .infinity)
 
-                if showsMiniTimeline && !supportsSideWorkspace {
+                if activePanel != .timeline {
                     SelectedLayerMiniTimeline(
                         viewModel: viewModel,
-                        contextClipID: $propertyContextClipID,
+                        contextClipID: propertyContextTimelineItem?.id ?? viewModel.selectedTimelineItemID,
                         pixelsPerSecond: $miniTimelinePixelsPerSecond,
                         activeSection: activePanel == .graph
                             ? graphReturnPanel.keyframeSection
@@ -424,7 +420,7 @@ struct ProjectEditorView: View {
                             ? viewModel.graphSegment
                             : nil
                     )
-                    .frame(height: miniTimelineHeight)
+                    .frame(height: 52)
                 }
 
                 CoreToolBar(

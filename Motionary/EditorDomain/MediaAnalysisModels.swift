@@ -174,6 +174,11 @@ struct AudioSubbeat: Codable, Equatable, Sendable {
     var onsetTime: Double?
 }
 
+struct AudioOffbeatAccent: Codable, Equatable, Sendable {
+    let sourceTime: Double
+    let strength: Double
+}
+
 enum AudioBeatModelPrecision: String, Codable, Hashable, Sendable {
     case fp16
     case fp32
@@ -192,6 +197,7 @@ struct AudioBeatAnalysis: Codable, Equatable, Sendable {
     var confidence: Double
     var markers: [AudioBeatMarker]
     var subbeats: [AudioSubbeat]
+    var offbeatAccents: [AudioOffbeatAccent]
     var subbeatDivision: Int
     var method: AudioBeatMethod?
     var modelPrecision: AudioBeatModelPrecision?
@@ -203,6 +209,7 @@ struct AudioBeatAnalysis: Codable, Equatable, Sendable {
         confidence: Double,
         markers: [AudioBeatMarker],
         subbeats: [AudioSubbeat] = [],
+        offbeatAccents: [AudioOffbeatAccent] = [],
         subbeatDivision: Int = 0,
         method: AudioBeatMethod? = nil,
         modelPrecision: AudioBeatModelPrecision? = nil,
@@ -215,6 +222,9 @@ struct AudioBeatAnalysis: Codable, Equatable, Sendable {
             .filter { $0.sourceTime.isFinite }
             .sorted { $0.sourceTime < $1.sourceTime }
         self.subbeats = subbeats.filter { $0.sourceTime.isFinite }.sorted { $0.sourceTime < $1.sourceTime }
+        self.offbeatAccents = offbeatAccents
+            .filter { $0.sourceTime.isFinite && $0.sourceTime >= 0 && (0...1).contains($0.strength) }
+            .sorted { $0.sourceTime < $1.sourceTime }
         self.subbeatDivision = [2, 3, 4].contains(subbeatDivision) ? subbeatDivision : 0
         self.method = method
         self.modelPrecision = modelPrecision
@@ -226,7 +236,7 @@ struct AudioBeatAnalysis: Codable, Equatable, Sendable {
         case bpm
         case confidence
         case markers
-        case subbeats, subbeatDivision, method, modelPrecision
+        case subbeats, offbeatAccents, subbeatDivision, method, modelPrecision
         case sourceFingerprint
         case algorithmVersion
     }
@@ -238,6 +248,7 @@ struct AudioBeatAnalysis: Codable, Equatable, Sendable {
             confidence: try container.decodeIfPresent(Double.self, forKey: .confidence) ?? 0,
             markers: try container.decodeIfPresent([AudioBeatMarker].self, forKey: .markers) ?? [],
             subbeats: try container.decodeIfPresent([AudioSubbeat].self, forKey: .subbeats) ?? [],
+            offbeatAccents: try container.decodeIfPresent([AudioOffbeatAccent].self, forKey: .offbeatAccents) ?? [],
             subbeatDivision: try container.decodeIfPresent(Int.self, forKey: .subbeatDivision) ?? 0,
             method: try? container.decode(AudioBeatMethod.self, forKey: .method),
             modelPrecision: try? container.decode(AudioBeatModelPrecision.self, forKey: .modelPrecision),

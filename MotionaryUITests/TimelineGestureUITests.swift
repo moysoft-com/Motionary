@@ -116,10 +116,14 @@ final class TimelineGestureUITests: XCTestCase {
         app.launchArguments += ["--layer-mute-tests", "-AppleLanguages", "(en)"]
         app.launch()
         XCTAssertTrue(app.staticTexts["test-selection"].waitForExistence(timeout: 10))
-        let timeline = app.descendants(matching: .any)["editor-timeline"].firstMatch
-        let origin = app.coordinate(withNormalizedOffset: .zero)
-        let textTag = origin.withOffset(CGVector(dx: timeline.frame.minX + 40, dy: timeline.frame.minY + 60))
-        let audioTag = textTag.withOffset(CGVector(dx: 0, dy: 51))
+        let textTag = app.descendants(matching: .any)["timeline-track-00000000-0000-0000-0000-000000000065"].firstMatch
+        let audioTag = app.descendants(matching: .any)["timeline-track-00000000-0000-0000-0000-000000000066"].firstMatch
+        XCTAssertTrue(textTag.waitForExistence(timeout: 5))
+        XCTAssertTrue(audioTag.exists)
+
+        // Press the edges nearest the neighboring tag, where the touch targets can compete.
+        let textPoint = textTag.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92))
+        let audioPoint = audioTag.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08))
 
         func choose(_ title: String, on tag: XCUICoordinate) {
             tag.press(forDuration: 0.7)
@@ -128,19 +132,32 @@ final class TimelineGestureUITests: XCTestCase {
             action.tap()
         }
 
-        choose("Disable Layer", on: textTag)
-        choose("Enable Layer", on: textTag)
-        choose("Mute Layer", on: audioTag)
-        choose("Unmute Layer", on: audioTag)
+        choose("Disable Layer", on: textPoint)
+        choose("Enable Layer", on: textPoint)
+        choose("Mute Layer", on: audioPoint)
+        choose("Unmute Layer", on: audioPoint)
     }
 
     func testPinchDoesNotSelectAndTapWorksAfterwards() {
         let timeline = app.descendants(matching: .any)["editor-timeline"].firstMatch
+        let scrubStart = timeline.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        scrubStart.press(
+            forDuration: 0.01, thenDragTo: scrubStart.withOffset(CGVector(dx: -65, dy: 0)),
+            withVelocity: .slow, thenHoldForDuration: 0.25
+        )
+        let timeLabel = app.staticTexts["test-time"]
+        let zoomBefore = Double(timeLabel.value as? String ?? "") ?? 0
+        XCTAssertGreaterThan(zoomBefore, 0)
         timeline.pinch(withScale: 1.5, velocity: 1)
+        XCTAssertGreaterThan(Double(timeLabel.value as? String ?? "") ?? 0, zoomBefore)
         XCTAssertEqual(app.staticTexts["test-selection"].label, "none")
-        let frame = timeline.frame
-        app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: frame.midX + 120, dy: frame.minY + 60)).tap()
+        let item = app.buttons["timeline-item-\(firstID)"]
+        XCTAssertTrue(item.exists)
+        let visibleItem = item.frame.intersection(timeline.frame)
+        XCTAssertFalse(visibleItem.isEmpty)
+        app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(
+            dx: visibleItem.minX + min(16, visibleItem.width / 2), dy: visibleItem.midY
+        )).tap()
         XCTAssertEqual(app.staticTexts["test-selection"].label, firstID)
     }
 

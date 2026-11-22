@@ -330,6 +330,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
     var kind: TrackKind
     var items: [TimelineItem]
     var isMuted: Bool
+    var isSourceAudioMuted: Bool
     var isLocked: Bool
     private var pendingMigrationSources: [MediaID: ClipSource]
 
@@ -343,6 +344,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         kind: TrackKind,
         items: [TimelineItem] = [],
         isMuted: Bool = false,
+        isSourceAudioMuted: Bool = false,
         isLocked: Bool = false
     ) {
         self.id = id
@@ -350,6 +352,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         self.kind = kind
         self.items = items
         self.isMuted = isMuted
+        self.isSourceAudioMuted = isSourceAudioMuted
         self.isLocked = isLocked
         self.pendingMigrationSources = [:]
     }
@@ -360,6 +363,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         kind: TrackKind,
         clips: [TimelineClip],
         isMuted: Bool = false,
+        isSourceAudioMuted: Bool = false,
         isLocked: Bool = false
     ) {
         let migration = Self.migrateLegacyClips(clips)
@@ -369,6 +373,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
             kind: kind,
             items: migration.items,
             isMuted: isMuted,
+            isSourceAudioMuted: isSourceAudioMuted,
             isLocked: isLocked
         )
         pendingMigrationSources = migration.sources
@@ -381,6 +386,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         case clips
         case items
         case isMuted
+        case isSourceAudioMuted
         case isLocked
     }
 
@@ -390,6 +396,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         name = try container.decode(String.self, forKey: .name)
         kind = try container.decode(TrackKind.self, forKey: .kind)
         isMuted = try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false
+        isSourceAudioMuted = try container.decodeIfPresent(Bool.self, forKey: .isSourceAudioMuted) ?? false
         isLocked = try container.decodeIfPresent(Bool.self, forKey: .isLocked) ?? false
         pendingMigrationSources = [:]
         if let decodedItems = try container.decodeIfPresent([TimelineItem].self, forKey: .items) {
@@ -409,6 +416,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
         try container.encode(kind, forKey: .kind)
         try container.encode(items, forKey: .items)
         try container.encode(isMuted, forKey: .isMuted)
+        if isSourceAudioMuted { try container.encode(isSourceAudioMuted, forKey: .isSourceAudioMuted) }
         try container.encode(isLocked, forKey: .isLocked)
     }
 
@@ -418,6 +426,7 @@ struct TimelineTrack: Identifiable, Codable, Equatable {
             && lhs.kind == rhs.kind
             && lhs.items == rhs.items
             && lhs.isMuted == rhs.isMuted
+            && lhs.isSourceAudioMuted == rhs.isSourceAudioMuted
             && lhs.isLocked == rhs.isLocked
     }
 

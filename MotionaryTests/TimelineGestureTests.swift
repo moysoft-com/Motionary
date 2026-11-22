@@ -8,6 +8,24 @@ import UIKit
 @testable import Motionary
 
 struct TimelineGestureTests {
+    @Test func audioWaveformKeepsItsSamplesAnchoredWhenZoomingAndCropping() throws {
+        for scale in [CGFloat(1), 2, 4] {
+            let sampleWidth = 10_010 * scale
+            let sampleOffset = -1_000 * scale
+            let viewportStart = 4_000 * scale
+            let layout = try #require(TimelineAudioWaveformLayout(
+                clipWidth: 8_000 * scale,
+                sampleWidth: sampleWidth,
+                sampleOffsetX: sampleOffset,
+                viewport: viewportStart...(viewportStart + 400)
+            ))
+
+            #expect(layout.drawingRange == viewportStart..<(viewportStart + 400))
+            let midpoint = (layout.sampleRange.lowerBound + layout.sampleRange.upperBound) / 2
+            #expect(midpoint + layout.drawingRange.lowerBound == sampleOffset + sampleWidth / 2)
+        }
+    }
+
     @Test func movingOutAndBackDoesNotBecomeATap() {
         var intent = TimelineGestureIntent()
         intent.record(CGSize(width: 8, height: 0))
@@ -521,6 +539,30 @@ struct TimelineGestureTests {
         #expect(events.isEmpty)
         #expect(playback.isPlaying)
         #expect(!coordinator.isUserInteracting)
+    }
+
+    @Test func scrubPinchWaitsForTheSecondFingerToDrag() {
+        let start = TimelinePinchStart(
+            first: CGPoint(x: 40, y: 40), second: CGPoint(x: 140, y: 40),
+            requiresSecondFingerDrag: true
+        )
+        let scrubbing = CGPoint(x: 20, y: 40)
+        #expect(!start.canBegin(first: scrubbing, second: start.second))
+        #expect(!start.canBegin(first: scrubbing, second: CGPoint(x: 142, y: 41)))
+
+        let dragged = CGPoint(x: 150, y: 40)
+        #expect(start.canBegin(first: scrubbing, second: dragged))
+        #expect(abs(start.scale(first: scrubbing, second: dragged) - 1.3) < 0.001)
+    }
+
+    @Test func ordinaryPinchCanStartWithEitherFingerMoving() {
+        let start = TimelinePinchStart(
+            first: CGPoint(x: 40, y: 40), second: CGPoint(x: 140, y: 40),
+            requiresSecondFingerDrag: false
+        )
+        #expect(start.canBegin(first: CGPoint(x: 20, y: 40), second: start.second))
+        #expect(start.canBegin(first: start.first, second: CGPoint(x: 160, y: 40)))
+        #expect(!start.canBegin(first: CGPoint(x: 50, y: 40), second: CGPoint(x: 150, y: 40)))
     }
 
     @MainActor

@@ -36,7 +36,7 @@
 
         var body: some View {
             VStack(spacing: 20) {
-                TimelineGestureTestStatus(viewModel: viewModel)
+                TimelineGestureTestStatus(viewModel: viewModel, pixelsPerSecond: pixelsPerSecond)
                 CoreTimelineView(viewModel: viewModel, pixelsPerSecond: $pixelsPerSecond)
                     .frame(height: 300)
                 Button("Deselect") { viewModel.deselectTimeline() }
@@ -48,12 +48,14 @@
 
     private struct TimelineGestureTestStatus: View {
         let viewModel: EditorViewModel
+        let pixelsPerSecond: CGFloat
         @ObservedObject private var selection: SelectionState
         @ObservedObject private var timeline: TimelineState
         @ObservedObject private var playback: PlaybackState
 
-        init(viewModel: EditorViewModel) {
+        init(viewModel: EditorViewModel, pixelsPerSecond: CGFloat) {
             self.viewModel = viewModel
+            self.pixelsPerSecond = pixelsPerSecond
             _selection = ObservedObject(wrappedValue: viewModel.selectionState)
             _timeline = ObservedObject(wrappedValue: viewModel.timelineState)
             _playback = ObservedObject(wrappedValue: viewModel.playbackState)
@@ -73,7 +75,9 @@
                         } ?? -1)
                 ).accessibilityIdentifier("test-first-track-index")
                 Text(playback.isPlaying ? "playing" : "paused").accessibilityIdentifier("test-playback")
-                Text(String(format: "%.3f", playback.currentTime)).accessibilityIdentifier("test-time")
+                Text(String(format: "%.3f", playback.currentTime))
+                    .accessibilityIdentifier("test-time")
+                    .accessibilityValue(String(describing: pixelsPerSecond))
             }
             .font(.caption2)
         }
