@@ -280,6 +280,10 @@ extension EditorProject {
                                 return false
                             }(),
                             speedSignature: speedSignature,
+                            smoothMotionMode: {
+                                guard case .media(let media) = item, media.usesSmoothMotion else { return nil }
+                                return media.smoothMotionMode
+                            }(),
                             usesBackgroundRemoval: item.editableVisuals?.backgroundRemoval != nil,
                             backgroundRemovalArtifact: item.editableVisuals?.backgroundRemoval == nil
                                 ? nil
@@ -399,6 +403,7 @@ private struct RenderItemTopology: Equatable {
     let sourceRange: TimeRangeValue
     let hasShape: Bool
     let speedSignature: UInt64
+    let smoothMotionMode: SmoothMotionMode?
     let usesBackgroundRemoval: Bool
     let backgroundRemovalArtifact: BackgroundRemovalArtifact?
 }

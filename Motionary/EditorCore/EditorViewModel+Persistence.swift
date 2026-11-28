@@ -162,6 +162,7 @@ extension EditorViewModel {
         persistChanges: Bool = true,
         touchUpdatedAt: Bool = true,
         refreshTimeline: Bool = true,
+        previewSeekTime: Double? = nil,
         liveTimelineContent: Bool = false,
         _ mutation: (inout EditorProject) -> Void
     ) {
@@ -244,7 +245,8 @@ extension EditorViewModel {
             recordHistory: recordHistory,
             persistChanges: persistChanges,
             touchUpdatedAt: touchUpdatedAt,
-            refreshTimeline: refreshTimeline
+            refreshTimeline: refreshTimeline,
+            previewSeekTime: previewSeekTime
         )
     }
 
@@ -291,7 +293,8 @@ extension EditorViewModel {
         persistChanges: Bool = true,
         touchUpdatedAt: Bool = true,
         refreshTimeline: Bool = true,
-        affectsPreviewGeometry: Bool = true
+        affectsPreviewGeometry: Bool = true,
+        previewSeekTime: Double? = nil
     ) {
         var precedingInteractiveRenderInvalidation: EditorInvalidation = []
         var isTransientInteractiveEdit =
@@ -360,7 +363,7 @@ extension EditorViewModel {
                 invalidateTimelineCaches(scope)
             }
         }
-        updateCurrentTime(clampedTimelineTime(currentTime))
+        updateCurrentTime(clampedTimelineTime(previewSeekTime ?? currentTime))
         if refreshTimeline {
             if isTransientInteractiveEdit {
                 deferTimelineContentInvalidation(scope)
@@ -999,7 +1002,22 @@ extension EditorViewModel {
                 timeoutNanoseconds: 5_000_000_000,
                 frameAligned: true
             )
-            guard self.player === player,
+            var displayedFrame: CVPixelBuffer?
+            if didSeek == .completed, player.currentItem?.videoComposition != nil {
+                // A same-time seek may complete before the compositor has
+                // delivered this revision. Give its callback time to land.
+                for _ in 0..<8 {
+                    guard !Task.isCancelled, self.player === player,
+                        self.livePreviewFrameRefreshGeneration == generation,
+                        self.previewRenderSessionID == renderSessionID, self.previewGeneration == graphGeneration,
+                        !self.isPlaying, !self.isScrubbing, !self.pendingLivePreviewFrameRefresh
+                    else { break }
+                    displayedFrame = self.renderService.livePreviewState.cachedFrame(at: target, sessionID: renderSessionID)
+                    if displayedFrame != nil { break }
+                    try? await Task.sleep(for: .milliseconds(16))
+                }
+            }
+            guard !Task.isCancelled, self.player === player,
                 self.livePreviewFrameRefreshGeneration == generation
             else { return }
             self.livePreviewFrameRefreshInFlight = false
@@ -1019,23 +1037,21 @@ extension EditorViewModel {
                 )
                 return
             }
-            if didSeek == .completed {
-                // A seek can complete before the player layer presents its
-                // frame. Replace the held image with the current composed
-                // sample instead of exposing the temporarily empty layer.
-                if let frame = self.renderService.livePreviewState.cachedFrame(
-                    at: target, sessionID: renderSessionID)
-                {
-                    self.livePreviewPresentation.setFrame(frame, at: target)
-                    self.hasRenderedInitialPreviewFrame = true
-                } else if player.currentItem?.videoComposition == nil {
-                    self.livePreviewPresentation.frame = nil
+            if let displayedFrame {
+                self.livePreviewPresentation.setFrame(displayedFrame, at: target)
+                self.hasRenderedInitialPreviewFrame = true
+            } else if didSeek == .completed, player.currentItem?.videoComposition == nil {
+                self.livePreviewPresentation.frame = nil
+            } else if (didSeek == .completed || didSeek == .interrupted),
+                !self.pendingLivePreviewFrameRefresh, !self.isPreviewSeekInFlight,
+                self.canonicalPreviewFrameTime(self.currentTime) == target
+            {
+                if retryingBootstrap {
+                    self.schedulePreviewRecovery(reason: .compositorFailure, resumePlayback: false)
+                } else {
+                    self.pendingLivePreviewFrameRefresh = true
+                    self.issueLivePreviewFrameRefresh(retryingBootstrap: true)
                 }
-            } else if didSeek == .interrupted, !retryingBootstrap, !self.pendingLivePreviewFrameRefresh {
-                // A single interruption can coincide with AVFoundation
-                // installing a new frame provider. Give it one retry.
-                self.pendingLivePreviewFrameRefresh = true
-                self.issueLivePreviewFrameRefresh(retryingBootstrap: true)
                 return
             }
             guard self.pendingLivePreviewFrameRefresh,

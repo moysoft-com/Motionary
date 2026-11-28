@@ -51,6 +51,67 @@ struct PlayerFrameProbe {
 
 @Suite(.serialized)
 struct SourceTimingRenderTests {
+    @MainActor
+    @Test(arguments: SmoothMotionMode.allCases)
+    func smoothMotionProducesDistinctIntermediateFramesInPreviewAndExport(mode: SmoothMotionMode) async throws {
+        let url = try await makeVideo(width: 320, height: 192, movingMarker: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let source = ClipSource(url: url, mediaType: .video, originalDuration: 4,
+            naturalSize: CGSizeValue(width: 320, height: 192))
+        let legacy = TimelineClip(name: "Moving marker", source: source, timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 0.5))
+        let frameRate: Int32 = 120
+        var project = EditorProject(title: "Smooth Motion",
+            renderSettings: RenderSettings(width: 320, height: 192, frameRate: frameRate),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [legacy])])
+        guard case .media(var clip) = project.item(id: legacy.id) else {
+            Issue.record("Expected a video clip")
+            return
+        }
+        clip.usesSmoothMotion = true
+        clip.smoothMotionMode = mode
+        project.replaceItem(id: clip.id, with: .media(clip))
+        let recipe = clip.smoothMotionRecipe(frameRate: frameRate)
+        let prepared = try await SmoothMotion.prepare(source: url, recipe: recipe, progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: prepared) }
+        #expect(SmoothMotion.cachedURL(source: url, recipe: recipe) == prepared)
+        let export = try await VideoExportService().export(project: project,
+            settings: .recommended(for: project), progress: { _ in })
+        defer { try? FileManager.default.removeItem(at: export) }
+        let preview = try #require(try await CompositionRenderService(previewProxyStore: nil)
+            .preparePreview(for: project, quality: .balanced, invalidation: [.compositionTopology]))
+        let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
+        let times = [16, 18, 20].map { CMTime(value: Int64($0), timescale: frameRate) }
+        let bounds = CGRect(x: 0, y: 92, width: 320, height: 1)
+        let context = CIContext()
+        func markerPosition(_ image: CIImage) throws -> Int {
+            var pixels = [UInt8](repeating: 0, count: 320 * 4)
+            context.render(image, toBitmap: &pixels, rowBytes: 320 * 4,
+                bounds: bounds, format: .RGBA8, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+            return try #require((0..<320).first { pixels[$0 * 4] > 170 })
+        }
+        func verifyIntermediate(_ positions: [Int]) {
+            #expect(positions[0] < positions[1] && positions[1] < positions[2])
+        }
+
+        for assetURL in [prepared, export] {
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: assetURL))
+            generator.requestedTimeToleranceAfter = .zero
+            generator.requestedTimeToleranceBefore = .zero
+            var positions: [Int] = []
+            for time in times {
+                let frame = try await generator.image(at: time)
+                positions.append(try markerPosition(CIImage(cgImage: frame.image)))
+            }
+            verifyIntermediate(positions)
+        }
+        var positions: [Int] = []
+        for time in times {
+            positions.append(try await markerPosition(probe.image(at: time)))
+        }
+        verifyIntermediate(positions)
+    }
+
     @Test func timelineThumbnailRequestsSurviveMemoryPressure() async throws {
         let url = try await makeVideo()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -102,6 +163,56 @@ struct SourceTimingRenderTests {
         #expect(
             zip(actual, expected).allSatisfy { abs(Int($0) - Int($1)) < 8 },
             "Proxy color: \(actual), source \(expected)")
+    }
+
+    @MainActor
+    @Test func scrubProxyRendersAnIndependentSourceTimeWhilePlaybackKeepsTheOriginal() async throws {
+        let url = try await makeVideo(width: 960, height: 540)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("scrub-proxy-\(UUID())")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let metadata = try await MediaAssetCache.shared.metadata(for: url)
+        let writerStore = PreviewProxyStore(directory: directory)
+        _ = try #require(try await writerStore.prepare(source: metadata))
+        let service = CompositionRenderService(previewProxyStore: PreviewProxyStore(directory: directory),
+            proxiesOnlyForRemappedVideo: true)
+        let clip = TimelineClip(name: "Scrub source", source: ClipSource(
+            url: url, mediaType: .video, originalDuration: 4,
+            naturalSize: CGSizeValue(width: 960, height: 540)), timelineStart: 0,
+            sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let project = EditorProject(title: "Scrub source", renderSettings: RenderSettings(width: 480, height: 270),
+            tracks: [TimelineTrack(name: "Video", kind: .visual, clips: [clip])])
+        let sessionID = UUID()
+        let preview = try #require(try await service.preparePreview(for: project, quality: .balanced,
+            invalidation: [.compositionTopology], renderSessionID: sessionID))
+        let segmentURLs = preview.composition.tracks(withMediaType: .video)
+            .flatMap(\.segments).compactMap(\.sourceURL)
+        #expect(segmentURLs.contains(url))
+        let probe = PlayerFrameProbe(asset: preview.composition, videoComposition: preview.videoComposition)
+        let initial = CMTime(value: 15, timescale: 30)
+        _ = try await probe.image(at: initial)
+        for _ in 0..<200 {
+            if LiveRemapProxyRegistry.proxy(for: url) != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        _ = try #require(LiveRemapProxyRegistry.proxy(for: url))
+        service.livePreviewState.setScrubbing(true)
+        service.livePreviewState.setInteractiveQualityOverride(true)
+        let target = 2.5
+        let frame: CVPixelBuffer? = await withCheckedContinuation { continuation in
+            if !service.livePreviewState.renderPausedFrame(at: target, sessionID: sessionID,
+                completion: { continuation.resume(returning: $0) })
+            {
+                continuation.resume(returning: nil)
+            }
+        }
+        let image = CIImage(cvPixelBuffer: try #require(frame))
+        let color = pixel(try #require(CIContext().createCGImage(image, from: image.extent)))
+        #expect(Int(color[2]) > Int(color[0]) + 100)
+        #expect(probe.player.currentTime() == initial)
+        #expect(service.livePreviewState.cachedFrame(at: target, sessionID: sessionID, allowsScrubFrames: false) == nil)
     }
 
     @MainActor
@@ -1097,7 +1208,7 @@ struct SourceTimingRenderTests {
         return bytes
     }
 
-    private func makeVideo(width: Int = 160, height: Int = 96) async throws -> URL {
+    private func makeVideo(width: Int = 160, height: Int = 96, movingMarker: Bool = false) async throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("timing-\(UUID()).mov")
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let input = AVAssetWriterInput(
@@ -1127,7 +1238,11 @@ struct SourceTimingRenderTests {
             let frame = try #require(buffer)
             let color = index == 0 ? CIColor.white : colors[index / 30]
             let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-            let image = CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 20, height: 12))
+            let image = movingMarker
+                ? CIImage(color: .white).cropped(to: CGRect(x: 20 + (index % 20) * 8,
+                    y: height / 2 - 20, width: 36, height: 40))
+                    .composited(over: CIImage(color: .black).cropped(to: bounds))
+                : CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 20, height: 12))
                 .composited(
                     over: CIImage(color: .black).cropped(
                         to: CGRect(x: width - 20, y: height - 12, width: 20, height: 12))

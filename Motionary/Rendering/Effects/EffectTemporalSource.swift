@@ -17,6 +17,20 @@ struct EffectTemporalSource: Sendable {
     var depthSourceRevision: String?
     var remapVideo: RemapVideoSource? = nil
     var remapMatte: RemapVideoSource? = nil
+    var smoothMotion: PreparedSmoothMotion? = nil
+
+    var activeSmoothMotion: PreparedSmoothMotion? {
+        guard let smoothMotion, smoothMotion.recipe.speedMap == speedMap else { return nil }
+        return smoothMotion
+    }
+
+    func preparedImage(at time: Double, quality: RenderQualityProfile) throws -> CIImage? {
+        do {
+            return try activeSmoothMotion?.image(at: time, quality: quality)
+        } catch where quality != .export {
+            return nil
+        }
+    }
 
     func remappedImage(at clipTime: Double, quality: RenderQualityProfile,
                        matte: Bool = false) throws -> CIImage? {
@@ -35,8 +49,6 @@ struct EffectTemporalSource: Sendable {
                 duration: CMTime(seconds: sourceDuration, preferredTimescale: 60_000)
             )]
             : videoSampleRanges
-        let image = try EffectTemporalFrameStore.shared.image(url: url, time: sourceTime,
-            size: extent.size, quality: quality, videoSampleRanges: sampleRanges, sourceRevision: depthSourceRevision)
         func fit(_ image: CIImage, orientation: CGAffineTransform) -> CIImage {
             // Apply exactly the same Core Image orientation as decoder buffers.
             // ImageGenerator's preferred-track rotation uses a different space.
@@ -48,7 +60,14 @@ struct EffectTemporalSource: Sendable {
                 .transformed(by: CGAffineTransform(translationX: extent.minX, y: extent.minY))
                 .cropped(to: extent)
         }
-        var fitted = fit(image, orientation: sourceOrientation)
+        var fitted: CIImage
+        if let prepared = try preparedImage(at: clipTime, quality: quality) {
+            fitted = fit(prepared, orientation: .identity)
+        } else {
+            let image = try EffectTemporalFrameStore.shared.image(url: url, time: sourceTime,
+                size: extent.size, quality: quality, videoSampleRanges: sampleRanges, sourceRevision: depthSourceRevision)
+            fitted = fit(image, orientation: sourceOrientation)
+        }
         if applyCutout, let settings = backgroundRemoval {
             let matte: CIImage?
             if settings.requiresForegroundMatte {
@@ -65,6 +84,22 @@ struct EffectTemporalSource: Sendable {
     }
 }
 
+struct PreparedSmoothMotion: Sendable {
+    let recipe: SmoothMotionRecipe
+    let video: RemapVideoSource
+    let sourceTransform: CGAffineTransform
+
+    func image(at clipTime: Double, quality: RenderQualityProfile) throws -> CIImage {
+        // The cached video starts at the first project frame inside the clip.
+        // Snap tiny floating-point errors at exact frame boundaries.
+        let rate = Double(recipe.frameRate)
+        let position = (clipTime - recipe.firstFrameOffset) * rate
+        let frame = abs(position - position.rounded()) < 0.000_01 ? position.rounded() : position
+        return try video.image(at: frame / rate, quality: quality, usesLiveProxy: quality == .interactive)
+            .transformed(by: sourceTransform)
+    }
+}
+
 /// The display decoder can read an all-intra proxy while temporal effects
 /// continue to address the original source. Both share the authored time map.
 struct RemapVideoSource: Sendable {
@@ -75,14 +110,18 @@ struct RemapVideoSource: Sendable {
     var sourceOffset = 0.0
     var liveProxySourceURL: URL? = nil
 
-    func image(at sourceTime: Double, quality: RenderQualityProfile) throws -> CIImage {
+    var hasLiveProxy: Bool {
+        liveProxySourceURL.flatMap { LiveRemapProxyRegistry.proxy(for: $0) } != nil
+    }
+
+    func image(at sourceTime: Double, quality: RenderQualityProfile, usesLiveProxy: Bool = true) throws -> CIImage {
         guard rawSize.width > 0, rawSize.height > 0 else {
             throw MetalRenderingError.sourceFrameUnavailable
         }
         let requested = CMTime(seconds: sourceTime - sourceOffset, preferredTimescale: 60_000)
         let last = max(timeRange.start, timeRange.end - CMTime(value: 1, timescale: 60_000))
         let target = min(max(requested, timeRange.start), last)
-        if quality != .export, let liveProxySourceURL,
+        if usesLiveProxy, quality != .export, let liveProxySourceURL,
             let proxy = LiveRemapProxyRegistry.proxy(for: liveProxySourceURL),
             proxy.size.width > 0, proxy.size.height > 0
         {

@@ -55,7 +55,7 @@ final class LiveRemapProxy: @unchecked Sendable {
         if let entry = decoders[key], entry.owner === owner { return entry.decoder }
         decoders = decoders.filter { $0.value.owner != nil }
         let decoder = RemapFrameDecoder(asset: asset, track: track, range: range,
-                                        rawSize: size, frameRate: frameRate)
+                                        rawSize: size, frameRate: frameRate, isAllIntra: true)
         decoders[key] = DecoderEntry(owner: owner, decoder: decoder)
         return decoder
     }
@@ -113,7 +113,7 @@ actor PreviewProxyStore {
             FileManager.default.fileExists(atPath: source.asset.url.path)
         else { return nil }
         let values = try source.asset.url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        let identity = "v4-960-yuv-color|\(bitsPerPixelFrame)|\(source.asset.url.path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+        let identity = "v5-960-source-time|\(bitsPerPixelFrame)|\(source.asset.url.path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)"
         let key = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         // Match the compositor's maximum preview resolution. Decoding 720 px
         // and then enlarging it to a 960 px preview discards visible detail.
@@ -147,12 +147,15 @@ actor PreviewProxyStore {
     /// Composition preparation may use a completed proxy, but never waits for
     /// a whole asset to transcode. The original source is immediately usable.
     /// Warmups are deduplicated, and installed player items stay immutable.
-    func availableProxy(source: CachedMediaAsset) async throws -> PreviewVideoProxy? {
+    func availableProxy(source: CachedMediaAsset, scrubOnly: Bool = false) async throws -> PreviewVideoProxy? {
         guard await supportsPreviewProxy(source: source),
             let (key, proxy) = try request(for: source) else { return nil }
+        if scrubOnly, max(proxy.originalSize.width, proxy.originalSize.height) < 960 { return nil }
         LiveRemapProxyRegistry.invalidate(source.asset.url, unlessIdentity: key)
-        if let cached = await cachedProxy(key: key, proxy: proxy, source: source) { return cached }
-        if warming.insert(key).inserted {
+        let cached = await cachedProxy(key: key, proxy: proxy, source: source)
+        if LiveRemapProxyRegistry.proxy(for: source.asset.url)?.identity != key,
+            warming.insert(key).inserted
+        {
             Task(priority: .utility) {
                 defer { warming.remove(key) }
                 do {
@@ -180,7 +183,7 @@ actor PreviewProxyStore {
                 catch { AppLogger.rendering.debug("Background preview proxy unavailable: \(error.localizedDescription, privacy: .public)") }
             }
         }
-        return nil
+        return scrubOnly ? nil : cached
     }
 
     func prepare(source: CachedMediaAsset) async throws -> PreviewVideoProxy? {
@@ -194,11 +197,12 @@ actor PreviewProxyStore {
         let queue = queue
         let bitsPerPixelFrame = bitsPerPixelFrame
         let task = Task<PreviewVideoProxy, Error> {
-            let fps = try await track.load(.nominalFrameRate)
+            let (fps, timeScale) = try await track.load(.nominalFrameRate, .naturalTimeScale)
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 queue.async {
                     do {
-                        try Self.transcode(source: source, track: track, target: proxy.encodedSize, fps: fps, bitsPerPixelFrame: bitsPerPixelFrame, to: partial)
+                        try Self.transcode(source: source, track: track, target: proxy.encodedSize,
+                            fps: fps, timeScale: timeScale, bitsPerPixelFrame: bitsPerPixelFrame, to: partial)
                         if FileManager.default.fileExists(atPath: url.path) {
                             try? FileManager.default.removeItem(at: partial)
                         } else {
@@ -235,7 +239,7 @@ actor PreviewProxyStore {
     }
 
     private nonisolated static func transcode(source: CachedMediaAsset, track: AVAssetTrack,
-                                             target: CGSize, fps: Float, bitsPerPixelFrame: Double, to url: URL) throws {
+        target: CGSize, fps: Float, timeScale: CMTimeScale, bitsPerPixelFrame: Double, to url: URL) throws {
         let reader = try AVAssetReader(asset: source.asset)
         // Keep YUV excursions until Core Image performs color matching; an
         // intermediate 8-bit RGB decode clips them in the source gamut.
@@ -265,6 +269,7 @@ actor PreviewProxyStore {
             ]
         ])
         input.expectsMediaDataInRealTime = false
+        input.mediaTimeScale = timeScale
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey as String: Int(target.width),

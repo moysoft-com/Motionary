@@ -62,6 +62,70 @@ private final class PlaybackStartProbe: AVPlayer, @unchecked Sendable {
 
 @Suite(.serialized)
 struct PreviewRebuildTests {
+    @Test(.timeLimit(.minutes(1)))
+    func previewOpensBeforePendingAudioAndReceivesTheReadyCallback() async throws {
+        let (completion, worker) = AsyncStream<Void>.makeStream()
+        let (ready, callback) = AsyncStream<Void>.makeStream()
+        let work = Task { () throws -> Int in
+            for await _ in completion { return 1 }
+            throw CancellationError()
+        }
+        defer {
+            worker.finish()
+            callback.finish()
+            work.cancel()
+        }
+        let preparation = PreviewAudioPreparation(deadline: .now + .milliseconds(20), onReady: {
+            callback.yield(())
+            callback.finish()
+        })
+        #expect(try await preparation.wait(for: work) == nil)
+        worker.yield(())
+        var readiness = ready.makeAsyncIterator()
+        #expect(await readiness.next() != nil)
+    }
+
+    @MainActor
+    @Test func reopenedDenseReverseCurveBuildsAnEditablePreviewWithPCM() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let url = try makeSilentAudioFile()
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: PreviewRetimedAudio.directory(for: url))
+        }
+        let clip = TimelineClip(name: "Dense remap", source: ClipSource(
+            url: url, mediaType: .audio, originalDuration: 1),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 1))
+        var project = model.project
+        project.tracks.append(TimelineTrack(name: "Audio", kind: .audio, clips: [clip]))
+        project.synchronizeMediaLibrary()
+        var map = SpeedMap.constant
+        var remap = try #require(TimeRemap(sourceDuration: 1, timelineDuration: 1))
+        for index in 1..<40 {
+            let time = Double(index) / 40
+            remap.setSourceTime(index.isMultiple(of: 2) ? 0.025 : 0.975, at: time, tolerance: 0.000_001)
+        }
+        map.timeRemap = remap
+        project.setSpeedMap(for: clip.id, speedMap: map)
+        let reopened = try JSONDecoder().decode(EditorProject.self, from: JSONEncoder().encode(project))
+        let render = model.renderService
+        var items: [AVCompositionTrack] = []
+        for _ in 0..<5 {
+            let preview = try #require(try await render.preparePreview(for: reopened, quality: .balanced,
+                invalidation: [.compositionTopology]))
+            #expect(preview.videoComposition != nil)
+            items = preview.composition.tracks(withMediaType: .audio)
+            if !items.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(150))
+        }
+        let audio = try #require(items.first)
+        let segment = try #require(audio.segments.first(where: { !$0.isEmpty }))
+        #expect(audio.segments.filter { !$0.isEmpty }.count == 1)
+        #expect(segment.sourceURL?.deletingLastPathComponent() == PreviewRetimedAudio.directory(for: url))
+        #expect(abs(audio.timeRange.duration.seconds - 1) < 0.001)
+    }
+
     @MainActor
     @Test func playbackWaitsForAudioSessionBeforeStartingTheSharedClock() async {
         let model = makeGeneratedLayerViewModel()
@@ -2309,6 +2373,111 @@ struct PreviewRebuildTests {
         #expect(!viewModel.pendingLivePreviewFrameRefresh)
         #expect(!viewModel.livePreviewFrameRefreshInFlight)
         #expect(viewModel.undoStack.isEmpty)
+    }
+
+    @MainActor
+    @Test func playbackRetriesAnInterruptedSeekAfterAnEdit() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let player = ControlledSeekPlayer()
+        player.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        model.player = player
+        model.preparePlaybackAudio = {}
+        let start = model.startPreparedPlayback(player, seekTo: 0.2)
+        defer { start.cancel() }
+        for _ in 0..<200 where player.pendingSeekCount < 1 { try await Task.sleep(for: .milliseconds(2)) }
+        try #require(player.pendingSeekCount == 1)
+        player.completeSeek(at: 0, finished: false)
+        for _ in 0..<200 where player.pendingSeekCount < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        try #require(player.pendingSeekCount == 2)
+        #expect(player.playCalls == 0)
+        player.completeSeek(at: 1, finished: true)
+        await start.value
+        #expect(player.playCalls == 1)
+    }
+
+    @MainActor
+    @Test func pausedPreviewRetriesAnAcknowledgedSeekThatProducedNoFrame() async throws {
+        let model = makeGeneratedLayerViewModel()
+        defer { model.stop() }
+        let session = model.previewRenderSessionID
+        let preview = try #require(try await model.renderService.preparePreview(
+            for: model.project, quality: .balanced, invalidation: [.compositionTopology],
+            renderSessionID: session))
+        let item = AVPlayerItem(asset: preview.composition)
+        item.videoComposition = try #require(preview.videoComposition)
+        let player = ControlledSeekPlayer()
+        player.replaceCurrentItem(with: item)
+        model.player = player
+        model.updateCurrentTime(0.2)
+        var buffer: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32BGRA, nil, &buffer) == kCVReturnSuccess)
+        let held = try #require(buffer)
+        model.livePreviewPresentation.setFrame(held, at: 0)
+
+        model.scheduleLivePreviewFrameRefresh()
+        for _ in 0..<200 where player.pendingSeekCount < 1 { try await Task.sleep(for: .milliseconds(2)) }
+        try #require(player.pendingSeekCount == 1)
+        player.completeSeek(at: 0, finished: true)
+        for _ in 0..<200 where player.pendingSeekCount < 2 { try await Task.sleep(for: .milliseconds(2)) }
+        try #require(player.pendingSeekCount == 2)
+        #expect(model.livePreviewPresentation.frame === held)
+
+        var result: CVPixelBuffer?
+        #expect(CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32BGRA, nil, &result) == kCVReturnSuccess)
+        let fresh = try #require(result)
+        let state = model.renderService.livePreviewState
+        let target = model.canonicalPreviewFrameTime(model.currentTime)
+        state.cacheFrame(fresh, at: target, sessionID: session, revision: state.snapshot().revision)
+        player.completeSeek(at: 1, finished: true)
+        await model.livePreviewSeekTask?.value
+        #expect(model.livePreviewPresentation.frame === fresh)
+        #expect(!model.livePreviewFrameRefreshInFlight)
+        #expect(model.previewRecoveryAttemptCount == 0)
+    }
+
+    @MainActor
+    @Test func committingConstantSpeedIssuesOneRebuildAtTheAnchoredPlayhead() {
+        let clip = TimelineClip(name: "Speed", source: ClipSource(
+            url: URL(fileURLWithPath: "/tmp/constant-speed.mov"), mediaType: .video, originalDuration: 4),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let model = makeViewModel(clip: clip)
+        defer { model.stop() }
+        model.selectTimelineItem(clip.id, trackID: model.project.tracks[0].id)
+        model.updateCurrentTime(1.5)
+        let generation = model.previewGeneration
+
+        #expect(model.setSelectedConstantSpeed(0.5))
+        #expect(model.previewGeneration == generation + 1)
+        #expect(model.currentTime == 3)
+        #expect(model.undoStack.count == 1)
+    }
+
+    @MainActor
+    @Test func movingTimeRemapKeyframeUsesLiveMappingUntilCommit() throws {
+        let clip = TimelineClip(name: "Remap", source: ClipSource(
+            url: URL(fileURLWithPath: "/tmp/time-remapping.mov"), mediaType: .video, originalDuration: 4),
+            timelineStart: 0, sourceRange: TimeRangeValue(start: 0, duration: 4))
+        let model = makeViewModel(clip: clip)
+        defer { model.stop() }
+        var speedMap = SpeedMap.constant
+        var remap = try #require(TimeRemap(sourceDuration: 4, timelineDuration: 4))
+        remap.setSourceTime(2.5, at: 1, tolerance: 0.001)
+        speedMap.timeRemap = remap
+        model.project.setSpeedMap(for: clip.id, speedMap: speedMap)
+        model.selectTimelineItem(clip.id, trackID: model.project.tracks[0].id)
+        let generation = model.previewGeneration
+
+        #expect(model.moveTimelineKeyframes(itemID: clip.id, section: .speed, effectID: nil,
+            from: 1, to: 1.5, interactive: true))
+        let live = model.renderService.livePreviewState.snapshot().override(for: clip.id)?.speedMap
+        #expect(live?.sourceTime(at: 1.5, sourceDuration: 4) == 2.5)
+        #expect(model.previewGeneration == generation)
+        #expect(model.rebuildTask == nil)
+
+        model.finishInteractiveEdit()
+        #expect(model.previewGeneration == generation + 1)
+        #expect(model.undoStack.count == 1)
     }
 
     @MainActor

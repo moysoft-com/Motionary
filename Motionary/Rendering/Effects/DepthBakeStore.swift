@@ -137,7 +137,8 @@ final class DepthBakeStore: @unchecked Sendable {
         let yLength = max(hypot(transform.c, transform.d), 0.000001)
         let orientation = [transform.a / xLength, transform.b / xLength, transform.c / yLength, transform.d / yLength]
             .map { String(format: "%.5f", Double($0)) }.joined(separator: ",")
-        let rawKey = Self.hash(Data("\(sourceIdentity)|\(orientation)".utf8))
+        let preparedSource = source.activeSmoothMotion.map { "|\($0.video.url.lastPathComponent)" } ?? ""
+        let rawKey = Self.hash(Data("\(sourceIdentity)|\(orientation)\(preparedSource)".utf8))
         let rawDirectory = directory.appendingPathComponent(rawKey, isDirectory: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -244,7 +245,8 @@ final class DepthBakeStore: @unchecked Sendable {
                 let time = min(Double(index) / Self.rate, max(0, track.duration - 0.0001))
                 let sourceTime = track.source.sourceStart
                     + track.source.speedMap.sourceTime(at: time, sourceDuration: track.source.sourceDuration)
-                let ticks = CMTime(seconds: max(sourceTime, 0), preferredTimescale: 60_000).value
+                let cacheTime = track.source.activeSmoothMotion != nil ? time : sourceTime
+                let ticks = CMTime(seconds: max(cacheTime, 0), preferredTimescale: 60_000).value
                 let file = track.rawDirectory.appendingPathComponent("\(ticks).lzfse")
                 let key = file.path as NSString
                 if let cached = rawSamples.object(forKey: key) { return Array(cached as Data) }

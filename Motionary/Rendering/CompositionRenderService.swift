@@ -193,6 +193,11 @@ struct RenderClipDescriptor: @unchecked Sendable {
 
     var isAdjustmentLayer: Bool { role == .adjustment }
 
+    var canRenderScrubWithoutPlayer: Bool {
+        trackID == kCMPersistentTrackID_Invalid
+            || (backgroundMaskTrackID == nil && temporalSource?.remapVideo?.hasLiveProxy == true)
+    }
+
     init(
         trackID: CMPersistentTrackID,
         backgroundMaskTrackID: CMPersistentTrackID?,
@@ -740,6 +745,10 @@ private struct PreviewTopology: Equatable {
                             if case .media(let media) = item { return media.speedMap.topologySignature }
                             return 0
                         }(),
+                        smoothMotionMode: {
+                            guard case .media(let media) = item, media.usesSmoothMotion else { return nil }
+                            return media.smoothMotionMode
+                        }(),
                         preservesRetimedPitch: {
                             guard case .media(let media) = item else { return false }
                             return !media.pitchFollowsSpeed && (media.speedMap.hasVariableSpeed
@@ -784,6 +793,7 @@ private struct PreviewItemTopology: Equatable {
     let sourceRange: TimeRangeValue?
     let hasShape: Bool
     let speedSignature: UInt64
+    let smoothMotionMode: SmoothMotionMode?
     let preservesRetimedPitch: Bool
     let usesBackgroundRemoval: Bool
     let backgroundRemovalArtifact: BackgroundRemovalArtifact?
@@ -812,6 +822,7 @@ private struct TimelineVisualSource {
     let timelineDuration: Double
     let speedMap: SpeedMap
     let pitchFollowsSpeed: Bool
+    let smoothMotionMode: SmoothMotionMode?
     let visuals: TimelineItemVisuals
     let shape: ClipShape?
 
@@ -825,6 +836,7 @@ private struct TimelineVisualSource {
         timelineDuration = item.timelineDuration
         speedMap = item.speedMap
         pitchFollowsSpeed = item.pitchFollowsSpeed
+        smoothMotionMode = item.usesSmoothMotion && item.canUseSmoothMotion ? item.smoothMotionMode : nil
         visuals = item.visuals
         shape = nil
     }
@@ -839,6 +851,7 @@ private struct TimelineVisualSource {
         timelineDuration = item.sourceRange.duration
         speedMap = .constant
         pitchFollowsSpeed = false
+        smoothMotionMode = nil
         visuals = item.visuals
         shape = item.shape
     }
@@ -971,7 +984,8 @@ final class CompositionRenderService {
         quality: PreviewQuality,
         invalidation: EditorInvalidation,
         renderSessionID: UUID = UUID(),
-        displayPixelSize: CGSize? = nil
+        displayPixelSize: CGSize? = nil,
+        onAudioReady: (@Sendable () -> Void)? = nil
     ) async throws -> PreparedPreview? {
         if !invalidation.intersection([.previewFrame, .compositionTopology]).isEmpty {
             livePreviewState.invalidateComposedFrames()
@@ -1026,7 +1040,15 @@ final class CompositionRenderService {
                 renderSessionID: renderSessionID,
                 usesPreviewProxies: true,
                 reusableRemapSources: previewGraph?.renderDescriptors.compactMap { $0.temporalSource?.remapVideo } ?? [],
-                displayPixelSize: displayPixelSize
+                displayPixelSize: displayPixelSize,
+                previewAudio: PreviewAudioPreparation(
+                    deadline: .now + .milliseconds(750), onReady: { [weak self] in
+                        Task { @MainActor in
+                            guard let self, self.previewPreparationGeneration == preparationGeneration
+                                || self.previewGraph?.topology == topology else { return }
+                            onAudioReady?()
+                        }
+                    })
             )
             try Task.checkCancellation()
             guard preparationGeneration == previewPreparationGeneration else {
@@ -1255,7 +1277,8 @@ final class CompositionRenderService {
         usesPreviewProxies: Bool = false,
         reusableRemapSources: [RemapVideoSource] = [],
         displayPixelSize: CGSize? = nil,
-        depthCacheDirectory: URL? = nil
+        depthCacheDirectory: URL? = nil,
+        previewAudio: PreviewAudioPreparation? = nil
     ) async throws -> RenderedComposition {
         let composition = AVMutableComposition()
         var mediaLookup = CompositionMediaLookup(cache: assetCache)
@@ -1296,8 +1319,10 @@ final class CompositionRenderService {
                         project: project,
                         mediaLookup: &mediaLookup,
                         remapDecoders: &remapDecoders,
-                        proxyStore: usesPreviewProxies && (!proxiesOnlyForRemappedVideo || mediaItem.speedMap.timeRemap != nil) ? previewProxyStore : nil,
+                        proxyStore: usesPreviewProxies ? previewProxyStore : nil,
+                        proxyForScrubbingOnly: proxiesOnlyForRemappedVideo && mediaItem.speedMap.timeRemap == nil,
                         previewVideoTracks: previewVideoTracks,
+                        previewAudio: previewAudio,
                         frameRate: renderSettings.frameRate,
                         composition: composition,
                         visualTrackIDs: &visualTrackIDs,
@@ -1457,7 +1482,7 @@ final class CompositionRenderService {
                     inserted = try await insertRetimedTrack(
                         sourceTrack: sourceAudioTrack, sourceURL: metadata.asset.url,
                         compositionTrack: compositionAudioTrack, sourceRange: mediaItem.sourceRange,
-                        timelineStart: mediaItem.timelineStart, speedMap: mediaItem.speedMap)
+                        timelineStart: mediaItem.timelineStart, speedMap: mediaItem.speedMap, previewAudio: previewAudio)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
@@ -1487,8 +1512,7 @@ final class CompositionRenderService {
             }
         }
 
-        if livePreviewState != nil {
-            var coldSecondsRemaining = 45.0
+        if let previewAudio {
             for item in project.tracks.lazy.flatMap(\.items) {
                 guard case .media(let clip) = item,
                     let id = audioTrackIDs[clip.id], let track = composition.track(withTrackID: id),
@@ -1498,15 +1522,24 @@ final class CompositionRenderService {
                 let isRetimed = !isUnretimed(clip.speedMap, sourceDuration: clip.sourceRange.duration)
                 guard needsSeekablePCM || isRetimed else { continue }
 
+                let prepared: Bool
                 do {
-                    try await PreviewRetimedAudio.prepare(track: track, clipID: clip.id, source: source,
+                    prepared = try await PreviewRetimedAudio.prepare(track: track, clipID: clip.id, source: source,
                         pitch: clip.pitchFollowsSpeed || !isRetimed ? .varispeed : .timeDomain,
-                        needsSeekablePCM: needsSeekablePCM, coldSecondsRemaining: &coldSecondsRemaining)
+                        preparation: previewAudio)
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
-                    // The authored composition edits still play if the device cannot cache PCM.
                     AppLogger.media.debug("Preview PCM audio cache unavailable: \(error.localizedDescription, privacy: .public)")
+                    prepared = false
+                }
+                if isRetimed && !prepared {
+                    // Until PCM is ready, let the picture and other tracks
+                    // play. Feeding the pending rate edits to AVPlayer can
+                    // reproduce the same decoder stall during the first seek.
+                    composition.removeTrack(track)
+                    audioTrackIDs.removeValue(forKey: clip.id)
+                    audioParameters.removeAll { $0.trackID == id }
                 }
             }
         }
@@ -1809,7 +1842,9 @@ final class CompositionRenderService {
         mediaLookup: inout CompositionMediaLookup,
         remapDecoders: inout [URL: [RemapDecoderLane]],
         proxyStore: PreviewProxyStore? = nil,
+        proxyForScrubbingOnly: Bool = false,
         previewVideoTracks: PreviewVideoTrackPool? = nil,
+        previewAudio: PreviewAudioPreparation? = nil,
         frameRate: Int32,
         composition: AVMutableComposition,
         visualTrackIDs: inout [UUID: CMPersistentTrackID],
@@ -1936,7 +1971,7 @@ final class CompositionRenderService {
         var sourcePixelTransform = CGAffineTransform.identity
         if source.mediaType == .video, let proxyStore {
             do {
-                if let proxy = try await proxyStore.availableProxy(source: metadata) {
+                if let proxy = try await proxyStore.availableProxy(source: metadata, scrubOnly: proxyForScrubbingOnly) {
                     videoMetadata = try await mediaLookup.metadata(for: proxy.url)
                     sourcePixelTransform = proxy.sourcePixelTransform
                 }
@@ -1954,7 +1989,47 @@ final class CompositionRenderService {
             return
         }
 
-        let samplesSourceTime = source.mediaType == .video && source.speedMap.timeRemap != nil
+        let normalizedTransform = VideoSourceGeometry.normalizedTransform(
+            naturalSize: metadata.naturalSize ?? .zero, transform: metadata.preferredTransform)
+        var preparedMotion: PreparedSmoothMotion?
+        if let mode = source.smoothMotionMode {
+            let recipe = SmoothMotionRecipe(sourceRange: source.sourceRange, speedMap: source.speedMap,
+                timelineStart: source.timelineStart, frameRate: frameRate, mode: mode)
+            if let url = SmoothMotion.cachedURL(source: mediaAsset.url, recipe: recipe,
+                allowsPreviousVersion: sourceAvailabilityPolicy == .omitUnavailable)
+            {
+                do {
+                    let motion = try await mediaLookup.metadata(for: url)
+                    if let track = motion.videoTrack, let size = motion.naturalSize, let originalSize = metadata.naturalSize,
+                        size.width > 0, size.height > 0 {
+                        let range = try await track.load(.timeRange)
+                        if range.duration > .zero {
+                            if let proxyStore, max(size.width, size.height) > 960 {
+                                _ = try? await proxyStore.availableProxy(source: motion, scrubOnly: true)
+                            }
+                            preparedMotion = PreparedSmoothMotion(recipe: recipe, video: RemapVideoSource(
+                                url: url, rawSize: size, timeRange: range,
+                                decoder: RemapFrameDecoder(asset: motion.asset, track: track, range: range,
+                                    rawSize: size, frameRate: Float(frameRate), isAllIntra: true),
+                                liveProxySourceURL: proxyStore == nil ? nil : url),
+                                sourceTransform: CGAffineTransform(scaleX: originalSize.width / size.width,
+                                    y: originalSize.height / size.height).concatenating(normalizedTransform))
+                        }
+                    }
+                    if preparedMotion == nil && sourceAvailabilityPolicy == .required {
+                        throw SmoothMotionError.processingFailed
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    if sourceAvailabilityPolicy == .required { throw error }
+                    AppLogger.rendering.warning("Smooth Motion cache unavailable: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+        let samplesSourceTime = source.mediaType == .video
+            && (source.speedMap.timeRemap != nil || preparedMotion != nil
+                || (previewAudio != nil && source.speedMap.constantSpeed != 1))
         let usesSharedTrack = previewVideoTracks != nil && source.mediaType == .video
             && !samplesSourceTime && source.speedMap.constantSpeed == 1
         let compositionVideoTrack: AVMutableCompositionTrack?
@@ -2026,14 +2101,12 @@ final class CompositionRenderService {
                 remapVideo: RemapVideoSource(
                     url: videoMetadata.asset.url, rawSize: rawSize, timeRange: videoRange,
                     decoder: decoder,
-                    liveProxySourceURL: source.speedMap.timeRemap != nil && proxyStore != nil
-                        && videoMetadata.asset.url == metadata.asset.url ? metadata.asset.url : nil))
+                    liveProxySourceURL: proxyStore != nil && videoMetadata.asset.url == metadata.asset.url
+                        ? metadata.asset.url : nil),
+                smoothMotion: preparedMotion)
         }
 
-        let sourceTransform = sourcePixelTransform.concatenating(VideoSourceGeometry.normalizedTransform(
-            naturalSize: metadata.naturalSize ?? .zero,
-            transform: metadata.preferredTransform
-        ))
+        let sourceTransform = sourcePixelTransform.concatenating(normalizedTransform)
         sourceTransforms[source.id] = sourceTransform
         let visuals = source.visuals
         var backgroundMaskTrackID: CMPersistentTrackID?
@@ -2156,7 +2229,7 @@ final class CompositionRenderService {
                 inserted = try await insertRetimedTrack(
                     sourceTrack: sourceAudioTrack, sourceURL: metadata.asset.url,
                     compositionTrack: compositionAudioTrack, sourceRange: source.sourceRange,
-                    timelineStart: source.timelineStart, speedMap: source.speedMap)
+                    timelineStart: source.timelineStart, speedMap: source.speedMap, previewAudio: previewAudio)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -2190,7 +2263,8 @@ final class CompositionRenderService {
         compositionTrack: AVMutableCompositionTrack,
         sourceRange: TimeRangeValue,
         timelineStart: Double,
-        speedMap: SpeedMap
+        speedMap: SpeedMap,
+        previewAudio: PreviewAudioPreparation? = nil
     ) async throws -> Bool {
         guard let remap = speedMap.timeRemap, remap.hasVariableSpeed else {
             let requestedRange = CMTimeRange(
@@ -2236,7 +2310,15 @@ final class CompositionRenderService {
         let mediaRange = try await sourceTrack.load(.timeRange)
         let reversed: (url: URL, track: AVAssetTrack, duration: Double)?
         if remap.hasReverse {
-            let url = try await ReversedAudioStore.shared.reversedURL(for: sourceURL, track: sourceTrack, range: mediaRange)
+            let url: URL
+            if let previewAudio {
+                guard let prepared = try await ReversedAudioStore.shared.previewURL(
+                    for: sourceURL, track: sourceTrack, range: mediaRange, preparation: previewAudio)
+                else { return false }
+                url = prepared
+            } else {
+                url = try await ReversedAudioStore.shared.reversedURL(for: sourceURL, track: sourceTrack, range: mediaRange)
+            }
             try Task.checkCancellation()
             let asset = AVURLAsset(url: url)
             guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
@@ -2519,6 +2601,8 @@ final class CompositionRenderService {
                     }
                     var temporalSource = input.temporalSources[mediaItem.id]
                     temporalSource?.speedMap = mediaItem.speedMap
+                    let start = temporalSource?.smoothMotion == nil ? mediaItem.timelineStart
+                        : CMTime(seconds: mediaItem.timelineStart, preferredTimescale: 600).seconds
                     descriptors.append(
                         RenderClipDescriptor(
                             trackID: trackID,
@@ -2528,7 +2612,7 @@ final class CompositionRenderService {
                             stillImageURL: stillImageURL,
                             stillImageCacheIdentity: stillImageCacheIdentity,
                             clipID: mediaItem.id,
-                            timelineStart: mediaItem.timelineStart,
+                            timelineStart: start,
                             duration: mediaItem.timelineDuration,
                             sourceTransform: sourceTransforms[mediaItem.id] ?? .identity,
                             backgroundMaskSourceTransform: backgroundMaskTransforms[mediaItem.id] ?? .identity,

@@ -318,8 +318,8 @@ final class LivePreviewRenderState: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// A single decoded frame set is reused only at its original timeline time
-    /// and composition session. Scrubbing/playback continue through AVFoundation.
+    /// Reuses the installed frame renderer. Player buffers are valid only at
+    /// their original timeline time; scrub proxies can supply other times.
     func renderPausedFrame(at time: Double, sessionID: UUID,
                            isCancelled: @escaping @Sendable () -> Bool = { false },
                            completion: @escaping (CVPixelBuffer?) -> Void) -> Bool {
@@ -646,6 +646,7 @@ struct FrameRenderPlan: @unchecked Sendable {
     let failurePolicy: RenderFailurePolicy
     let livePreviewState: LivePreviewRenderState?
     let livePreviewSnapshot: LivePreviewRenderSnapshot?
+    let usesScrubProxies: Bool
 
     private var previewEffectScale: CGFloat {
         guard quality != .export, let limit = livePreviewSnapshot?.screenRecordingEffectDimension else { return 1 }
@@ -659,7 +660,7 @@ struct FrameRenderPlan: @unchecked Sendable {
 
     // Recording-quality playback frames are valid until the recording budget changes.
     var isScrubFrame: Bool {
-        effectScale < previewEffectScale
+        usesScrubProxies || effectScale < previewEffectScale
     }
 
     private func scaleForEffectDimension(_ limit: CGFloat) -> CGFloat {
@@ -680,7 +681,8 @@ struct FrameRenderPlan: @unchecked Sendable {
         quality: RenderQualityProfile,
         failurePolicy: RenderFailurePolicy,
         livePreviewState: LivePreviewRenderState? = nil,
-        livePreviewSnapshot: LivePreviewRenderSnapshot? = nil
+        livePreviewSnapshot: LivePreviewRenderSnapshot? = nil,
+        usesScrubProxies: Bool = false
     ) {
         self.renderSize = renderSize
         self.renderScale = renderScale
@@ -702,6 +704,7 @@ struct FrameRenderPlan: @unchecked Sendable {
         self.failurePolicy = failurePolicy
         self.livePreviewState = livePreviewState
         self.livePreviewSnapshot = livePreviewSnapshot ?? livePreviewState?.snapshot()
+        self.usesScrubProxies = usesScrubProxies
     }
 }
 
@@ -709,7 +712,8 @@ enum RenderPlanCompiler {
     static func compile(
         _ instruction: MotionaryVideoCompositionInstruction,
         quality: RenderQualityProfile? = nil,
-        failurePolicy: RenderFailurePolicy? = nil
+        failurePolicy: RenderFailurePolicy? = nil,
+        usesScrubProxies: Bool = false
     ) -> FrameRenderPlan {
         let livePreviewSnapshot = instruction.livePreviewState?.snapshot()
         return FrameRenderPlan(
@@ -728,7 +732,8 @@ enum RenderPlanCompiler {
                     : instruction.qualityProfile),
             failurePolicy: failurePolicy ?? instruction.failurePolicy,
             livePreviewState: instruction.livePreviewState,
-            livePreviewSnapshot: livePreviewSnapshot
+            livePreviewSnapshot: livePreviewSnapshot,
+            usesScrubProxies: usesScrubProxies
         )
     }
 }

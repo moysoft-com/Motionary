@@ -279,12 +279,20 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                     [weak self, weak cachedInstruction = instruction] time, sessionID, isCancelled, completion in
                                     guard let self, let instruction = cachedInstruction,
                                         instruction.renderSessionID == sessionID,
-                                        time.isFinite, time >= 0,
-                                        abs(time - CMTimeGetSeconds(frameTime)) < 0.000_01
-                                            || instruction.activeClips(at: time).allSatisfy({
-                                                $0.trackID == kCMPersistentTrackID_Invalid
-                                            })
+                                        time.isFinite, time >= 0
                                     else { return false }
+                                    let reusesPlayerFrames = abs(time - CMTimeGetSeconds(frameTime)) < 0.000_01
+                                    let usesScrubProxies: Bool
+                                    if reusesPlayerFrames {
+                                        usesScrubProxies = false
+                                    } else {
+                                        let isScrubbing = instruction.livePreviewState?.snapshot().isScrubbing == true
+                                        let playerClips = instruction.activeClips(at: time)
+                                            .filter { $0.trackID != kCMPersistentTrackID_Invalid }
+                                        usesScrubProxies = !playerClips.isEmpty
+                                        guard !usesScrubProxies || (isScrubbing && playerClips.allSatisfy(\.canRenderScrubWithoutPlayer))
+                                        else { return false }
+                                    }
                                     let frameRate = CMTimeScale((1 / instruction.frameDuration).rounded())
                                     let frame = time * Double(frameRate)
                                     let targetTime = abs(frame.rounded() - frame) < 0.000_001
@@ -301,11 +309,11 @@ final class MotionaryVideoCompositor: NSObject, AVVideoCompositing {
                                             self.isCurrent(cachedGeneration),
                                             let destination = renderContext.newPixelBuffer()
                                         else { liveFinisher.finish { completion(nil) }; return }
-                                        let livePlan = RenderPlanCompiler.compile(instruction)
+                                        let livePlan = RenderPlanCompiler.compile(instruction, usesScrubProxies: usesScrubProxies)
                                         renderer.renderAsync(
                                             plan: livePlan,
                                             compositionTime: targetTime,
-                                            sourceFrame: { cachedSources[$0] },
+                                            sourceFrame: { reusesPlayerFrames ? cachedSources[$0] : nil },
                                             destination: destination,
                                             isCancelled: {
                                                 liveFinisher.isFinished || isCancelled() || !self.isCurrent(cachedGeneration)

@@ -1,9 +1,16 @@
 @preconcurrency import AVFoundation
 import Foundation
+import VideoToolbox
+import os
 
 /// Reads native video buffers for arbitrary source times. A small window of
 /// preceding frames makes backward playback use sequential decoder reads.
 final class RemapFrameDecoder: @unchecked Sendable {
+    struct Sample {
+        let buffer: CVPixelBuffer
+        let time: CMTime
+    }
+
     private struct Frame {
         let buffer: CVPixelBuffer
         let start: CMTime
@@ -15,6 +22,8 @@ final class RemapFrameDecoder: @unchecked Sendable {
         var output: AVAssetReaderTrackOutput?
         var frames: [Frame] = []
         var lastRequested: CMTime?
+        var intraReader: IntraFrameReader?
+        var intraReaderFailed = false
 
         deinit { reader?.cancelReading() }
     }
@@ -34,19 +43,27 @@ final class RemapFrameDecoder: @unchecked Sendable {
     private let historyCount: Int
     private let historyDuration: CMTime
     private let forwardPreroll: CMTime
+    private let forwardReadLimit: CMTime
     private let historyCost: Int
+    private let pixelFormat: OSType
+    private let isAllIntra: Bool
 
-    init(asset: AVURLAsset, track: AVAssetTrack, range: CMTimeRange, rawSize: CGSize, frameRate: Float) {
+    init(asset: AVURLAsset, track: AVAssetTrack, range: CMTimeRange, rawSize: CGSize, frameRate: Float,
+        pixelFormat: OSType = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, isAllIntra: Bool = false) {
         self.asset = asset
         self.track = track
         self.range = range
-        let estimatedBytes = max(rawSize.width * rawSize.height * 1.5, 1)
+        self.pixelFormat = pixelFormat
+        self.isAllIntra = isAllIntra
+        let bytesPerPixel = pixelFormat == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ? 3.0 : 1.5
+        let estimatedBytes = max(rawSize.width * rawSize.height * bytesPerPixel, 1)
         historyCount = Int(min(max((28 * 1024 * 1024) / estimatedBytes, 3), 20))
         historyCost = Int(estimatedBytes) * historyCount
         historyDuration = CMTime(
             seconds: Double(historyCount - 1) / Double(max(frameRate, 24)),
             preferredTimescale: 60_000)
         forwardPreroll = CMTime(seconds: 2 / Double(max(frameRate, 24)), preferredTimescale: 60_000)
+        forwardReadLimit = isAllIntra ? CMTimeMultiply(forwardPreroll, multiplier: 2) : CMTime(value: 1, timescale: 3)
     }
 
     deinit { Self.sessions.removeObject(forKey: key) }
@@ -56,36 +73,51 @@ final class RemapFrameDecoder: @unchecked Sendable {
     }
 
     func frame(at requested: CMTime) throws -> CVPixelBuffer {
+        if isAllIntra, let buffer = lock.withLock({ () -> CVPixelBuffer? in
+            let state = readerSession()
+            guard !state.intraReaderFailed else { return nil }
+            let reader = state.intraReader ?? IntraFrameReader(asset: asset, track: track, pixelFormat: pixelFormat)
+            state.intraReader = reader
+            do {
+                return try reader.frame(at: requested)
+            } catch {
+                state.intraReader = nil
+                state.intraReaderFailed = true
+                return nil
+            }
+        }) {
+            return buffer
+        }
+        return try samples(at: requested).current.buffer
+    }
+
+    func samples(at requested: CMTime) throws -> (current: Sample, next: Sample?) {
         lock.lock()
         defer { lock.unlock() }
-        let session: ReaderSession
-        if let cached = Self.sessions.object(forKey: key) {
-            session = cached
-        } else {
-            session = ReaderSession()
-            Self.sessions.setObject(session, forKey: key, cost: historyCost)
-        }
+        let session = readerSession()
         let movingBackward = session.lastRequested.map { requested < $0 } ?? false
         session.lastRequested = requested
-        if let frame = session.frames.last(where: {
+        if let index = session.frames.lastIndex(where: {
             $0.start == requested || ($0.start < requested && $0.end.map { requested < $0 } == true)
         }) {
-            return frame.buffer
+            let frame = session.frames[index]
+            let next = index + 1 < session.frames.count ? session.frames[index + 1] : nil
+            return (sample(frame), next.map(sample))
         }
         let canContinue =
             session.reader?.status == .reading
             && session.frames.last.map {
-                requested >= $0.start && requested - $0.start <= CMTime(value: 1, timescale: 3)
+                requested >= $0.start && requested - $0.start <= forwardReadLimit
             } == true
         if !canContinue {
             // A large forward scrub does not need an entire reverse history.
             // Keep a short preroll so non-frame-aligned requests still select
             // the preceding sample; retain the larger window for reverse.
-            let preroll = movingBackward ? historyDuration : forwardPreroll
+            let preroll = movingBackward && !isAllIntra ? historyDuration : forwardPreroll
             try startReader(at: max(range.start, requested - preroll), in: session)
         }
         guard var output = session.output else { throw MetalRenderingError.sourceFrameUnavailable }
-        var canRetryWithHistory = !movingBackward && forwardPreroll < historyDuration
+        var canRetryWithHistory = (!movingBackward || isAllIntra) && forwardPreroll < historyDuration
         while let sample = output.copyNextSampleBuffer() {
             guard let buffer = sample.imageBuffer, sample.presentationTimeStamp.isNumeric else { continue }
             let start = sample.presentationTimeStamp
@@ -108,14 +140,28 @@ final class RemapFrameDecoder: @unchecked Sendable {
             }
             session.frames.append(Frame(buffer: buffer, start: start))
             if session.frames.count > historyCount { session.frames.removeFirst() }
-            if start == requested { return buffer }
-            if start > requested { return previous?.buffer ?? buffer }
+            if start == requested { return (Sample(buffer: buffer, time: start), nil) }
+            if start > requested {
+                let next = Sample(buffer: buffer, time: start)
+                return previous.map { (self.sample($0), next) } ?? (next, nil)
+            }
         }
         if session.reader?.status == .completed, let last = session.frames.last {
             session.frames[session.frames.count - 1].end = range.end
-            return last.buffer
+            return (sample(last), nil)
         }
         throw session.reader?.error ?? MetalRenderingError.sourceFrameUnavailable
+    }
+
+    private func sample(_ frame: Frame) -> Sample {
+        Sample(buffer: frame.buffer, time: frame.start)
+    }
+
+    private func readerSession() -> ReaderSession {
+        if let cached = Self.sessions.object(forKey: key) { return cached }
+        let session = ReaderSession()
+        Self.sessions.setObject(session, forKey: key, cost: historyCost)
+        return session
     }
 
     private func startReader(at start: CMTime, in session: ReaderSession) throws {
@@ -126,8 +172,9 @@ final class RemapFrameDecoder: @unchecked Sendable {
         let output = AVAssetReaderTrackOutput(
             track: track,
             outputSettings: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-                kCVPixelBufferMetalCompatibilityKey as String: true
+                kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
             ])
         output.alwaysCopiesSampleData = false
         guard reader.canAdd(output) else { throw MetalRenderingError.sourceFrameUnavailable }
@@ -135,5 +182,82 @@ final class RemapFrameDecoder: @unchecked Sendable {
         guard reader.startReading() else { throw reader.error ?? MetalRenderingError.sourceFrameUnavailable }
         session.reader = reader
         session.output = output
+    }
+}
+
+/// All-intra cache files can decode one compressed sample in a persistent
+/// session. Recreating an AVAssetReader for each scrub jump is much slower.
+private final class IntraFrameReader {
+    private let generator: AVSampleBufferGenerator
+    private let track: AVAssetTrack
+    private let pixelFormat: OSType
+    private var session: VTDecompressionSession?
+    private var lastFrame: (time: CMTime, buffer: CVPixelBuffer)?
+
+    init(asset: AVURLAsset, track: AVAssetTrack, pixelFormat: OSType) {
+        generator = AVSampleBufferGenerator(asset: asset, timebase: nil)
+        self.track = track
+        self.pixelFormat = pixelFormat
+    }
+
+    deinit {
+        if let session { VTDecompressionSessionInvalidate(session) }
+    }
+
+    func frame(at time: CMTime) throws -> CVPixelBuffer? {
+        guard let cursor = track.makeSampleCursor(presentationTimeStamp: time) else {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
+        let sampleTime = cursor.presentationTimeStamp
+        let duration = cursor.currentSampleDuration
+        // A cursor can be approximate in an irregular edit. Use the reader
+        // fallback if the identified frame does not cover this exact time.
+        guard sampleTime.isNumeric, sampleTime <= time,
+            sampleTime == time || (duration.isNumeric && time < sampleTime + duration)
+        else { return nil }
+        if let lastFrame, lastFrame.time == sampleTime { return lastFrame.buffer }
+
+        let request = AVSampleBufferRequest(start: cursor)
+        request.maxSampleCount = 1
+        let sample = try generator.makeSampleBuffer(for: request)
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
+            as? [[String: Any]]
+        guard attachments?.first?[kCMSampleAttachmentKey_NotSync as String] as? Bool != true,
+            let format = sample.formatDescription, CMSampleBufferMakeDataReady(sample) == noErr else {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
+        let decoder = try decoder(for: format)
+        let output = OSAllocatedUnfairLock(uncheckedState: nil as CVPixelBuffer?)
+        let status = VTDecompressionSessionDecodeFrame(decoder, sampleBuffer: sample, flags: [], infoFlagsOut: nil) {
+            status, _, image, _, _ in
+            if status == noErr { output.withLockUnchecked { $0 = image } }
+        }
+        guard status == noErr, let buffer = output.withLockUnchecked({ $0 }) else {
+            throw MetalRenderingError.sourceFrameUnavailable
+        }
+        lastFrame = (sampleTime, buffer)
+        return buffer
+    }
+
+    private func decoder(for format: CMFormatDescription) throws -> VTDecompressionSession {
+        if let session {
+            if VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: format) {
+                return session
+            }
+            VTDecompressionSessionInvalidate(session)
+            self.session = nil
+        }
+        var decoder: VTDecompressionSession?
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: pixelFormat,
+            kCVPixelBufferMetalCompatibilityKey as String: true,
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: String]()
+        ]
+        let status = VTDecompressionSessionCreate(allocator: nil, formatDescription: format,
+            decoderSpecification: nil, imageBufferAttributes: attributes as CFDictionary,
+            outputCallback: nil, decompressionSessionOut: &decoder)
+        guard status == noErr, let decoder else { throw MetalRenderingError.sourceFrameUnavailable }
+        session = decoder
+        return decoder
     }
 }

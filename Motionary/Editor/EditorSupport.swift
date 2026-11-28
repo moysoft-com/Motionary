@@ -90,7 +90,7 @@ struct EditorBusyOverlay: View {
     }
 
     private var overlayDelay: UInt64 {
-        viewModel.isInitialPreviewLoadBlocking ? 180_000_000 : 650_000_000
+        return viewModel.isInitialPreviewLoadBlocking ? 180_000_000 : 650_000_000
     }
 }
 

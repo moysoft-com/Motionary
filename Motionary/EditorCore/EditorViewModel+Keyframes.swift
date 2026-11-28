@@ -991,13 +991,8 @@ extension EditorViewModel {
                 }
             }
         } else if section == .speed {
-            mutateProject(rebuild: !interactive, recordHistory: !interactive, persistChanges: !interactive, touchUpdatedAt: !interactive) { project in
-                guard let location = project.itemLocation(id: itemID),
-                      !project.tracks[location.track].isLocked,
-                      case .media(var media) = project.tracks[location.track].items[location.item] else { return }
-                media.speedMap.timeRemap?.moveKeyframe(from: from, to: destination)
-                project.tracks[location.track].items[location.item] = .media(media)
-            }
+            guard moveSelectedTimeRemapKeyframe(for: itemID, from: from, to: destination, interactive: interactive)
+            else { return false }
         } else if selectedTextItem != nil {
             updateSelectedText(interactive: interactive) { text in
                 if section == .effects {
@@ -1041,8 +1036,8 @@ extension EditorViewModel {
             }
         }
         refreshGraphSegmentAfterKeyframeMove(itemID: itemID, section: section, from: from, to: destination)
-        if interactive && section != .haptics && section != .mask {
-            scheduleInteractivePreviewRebuild(invalidation: section == .speed ? [.previewFrame, .compositionTopology, .audioMix] : (section == .audio ? [.audioMix] : [.previewFrame]))
+        if interactive && section != .haptics && section != .mask && section != .speed {
+            scheduleInteractivePreviewRebuild(invalidation: section == .audio ? [.audioMix] : [.previewFrame])
         }
         return true
     }

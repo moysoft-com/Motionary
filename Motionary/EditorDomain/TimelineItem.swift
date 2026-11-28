@@ -12,6 +12,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
     var visuals: TimelineItemVisuals
     var speedMap: SpeedMap
     var pitchFollowsSpeed: Bool
+    var usesSmoothMotion: Bool
+    var smoothMotionMode: SmoothMotionMode
     var linkGroupID: UUID?
     var beatAnalysis: AudioBeatAnalysis?
 
@@ -33,6 +35,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         visuals: TimelineItemVisuals = TimelineItemVisuals(),
         speedMap: SpeedMap = .constant,
         pitchFollowsSpeed: Bool = false,
+        usesSmoothMotion: Bool = false,
+        smoothMotionMode: SmoothMotionMode = .frameGen,
         linkGroupID: UUID? = nil,
         beatAnalysis: AudioBeatAnalysis? = nil
     ) {
@@ -49,6 +53,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
             self.speedMap = speedMap
         }
         self.pitchFollowsSpeed = pitchFollowsSpeed
+        self.usesSmoothMotion = usesSmoothMotion
+        self.smoothMotionMode = smoothMotionMode
         self.linkGroupID = linkGroupID
         self.beatAnalysis = beatAnalysis
     }
@@ -63,6 +69,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
         case visuals
         case speedMap
         case pitchFollowsSpeed
+        case usesSmoothMotion
+        case smoothMotionMode
         case linkGroupID
         case beatAnalysis
     }
@@ -80,6 +88,8 @@ struct MediaTimelineItem: Identifiable, Codable, Equatable, Sendable {
                 ?? TimelineItemVisuals(),
             speedMap: try container.decodeIfPresent(SpeedMap.self, forKey: .speedMap) ?? .constant,
             pitchFollowsSpeed: try container.decodeIfPresent(Bool.self, forKey: .pitchFollowsSpeed) ?? false,
+            usesSmoothMotion: try container.decodeIfPresent(Bool.self, forKey: .usesSmoothMotion) ?? false,
+            smoothMotionMode: try container.decodeIfPresent(SmoothMotionMode.self, forKey: .smoothMotionMode) ?? .frameGen,
             linkGroupID: try container.decodeIfPresent(UUID.self, forKey: .linkGroupID),
             beatAnalysis: try container.decodeIfPresent(AudioBeatAnalysis.self, forKey: .beatAnalysis)
         )
@@ -593,6 +603,8 @@ extension TimelineItem {
                 updated.speedMap = .constant(speed: previous.speedMap.constantSpeed)
             }
             updated.pitchFollowsSpeed = previous.pitchFollowsSpeed
+            updated.usesSmoothMotion = updated.mediaType == .video && previous.usesSmoothMotion
+            updated.smoothMotionMode = previous.smoothMotionMode
             updated.linkGroupID = previous.linkGroupID
             updated.visuals.blendMode = previous.visuals.blendMode
             updated.visuals.blendIntensity = previous.visuals.blendIntensity

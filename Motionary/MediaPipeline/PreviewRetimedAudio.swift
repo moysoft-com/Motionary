@@ -1,6 +1,49 @@
 @preconcurrency import AVFoundation
 import CryptoKit
 
+/// Audio proxies are optional during preview setup. Unstructured waiters
+/// let the editor move on even if AVFoundation is blocked inside a reader.
+struct PreviewAudioPreparation: Sendable {
+    let deadline: ContinuousClock.Instant
+    let onReady: (@Sendable () -> Void)?
+
+    func wait<Value: Sendable>(for work: Task<Value, Error>) async throws -> Value? {
+        let (results, continuation) = AsyncStream<Result<Value?, Error>>.makeStream(bufferingPolicy: .bufferingOldest(1))
+        Task {
+            let result = await work.result.map(Optional.some)
+            if case .success = result {
+                switch continuation.yield(result) {
+                case .dropped, .terminated: onReady?()
+                case .enqueued: break
+                @unknown default: break
+                }
+            } else {
+                continuation.yield(result)
+            }
+            continuation.finish()
+        }
+        let timeout = Task {
+            do {
+                try await ContinuousClock().sleep(until: deadline)
+                continuation.yield(.success(nil))
+                continuation.finish()
+            } catch is CancellationError {
+                return
+            } catch {
+                continuation.finish()
+            }
+        }
+        defer {
+            timeout.cancel()
+            continuation.finish()
+        }
+        var iterator = results.makeAsyncIterator()
+        guard let result = await iterator.next() else { throw CancellationError() }
+        try Task.checkCancellation()
+        return try result.get()
+    }
+}
+
 /// AVPlayer schedules a separate rate change for each edit in a speed curve.
 /// Render those edits once, with their authored pitch, so playback and seeking
 /// only have to start a single PCM stream. The same representation lets
@@ -23,7 +66,6 @@ enum PreviewRetimedAudio {
         return folder
     }()
     private static let warmups = Warmups()
-    private static let foregroundWriter = Writer()
 
     static func directory(for source: URL) -> URL {
         root.appendingPathComponent(digest(source.standardizedFileURL.path), isDirectory: true)
@@ -34,11 +76,9 @@ enum PreviewRetimedAudio {
     }
 
     static func prepare(track: AVMutableCompositionTrack, clipID: UUID, source: URL, pitch: AVAudioTimePitchAlgorithm,
-                        needsSeekablePCM: Bool, coldSecondsRemaining: inout Double) async throws {
+                        preparation: PreviewAudioPreparation) async throws -> Bool {
         let populated = track.segments.filter { !$0.isEmpty }
-        guard let first = populated.first, let last = populated.last,
-            needsSeekablePCM || populated.contains(where: { $0.timeMapping.source.duration != $0.timeMapping.target.duration })
-        else { return }
+        guard let first = populated.first, let last = populated.last else { return true }
         let range = CMTimeRange(start: first.timeMapping.target.start, end: last.timeMapping.target.end)
         let values = try source.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         var key = "complete-tail|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(pitch.rawValue)"
@@ -66,38 +106,13 @@ enum PreviewRetimedAudio {
         if !FileManager.default.fileExists(atPath: file.path) {
             try audio.validateSegments(segments)
             audio.segments = segments
-            // A composition track can advertise a default mono format even
-            // for a stereo source. Read the actual asset's channel layout.
-            guard let sourceURL = first.sourceURL else { throw CocoaError(.fileReadCorruptFile) }
-            let asset = AVURLAsset(url: sourceURL)
-            guard let original = try await asset.loadTrack(withTrackID: first.sourceTrackID),
-                let description = try await original.load(.formatDescriptions).first
-            else { throw CocoaError(.fileReadCorruptFile) }
-            let encoded = AVAudioFormat(cmAudioFormatDescription: description)
-            // A mono AAC core may carry parametric stereo. Asking the decoder
-            // for stereo preserves both channels even when Core Media exposes
-            // only the core format in the track description.
-            let isAAC = [kAudioFormatMPEG4AAC, kAudioFormatMPEG4AAC_HE, kAudioFormatMPEG4AAC_HE_V2]
-                .contains(encoded.streamDescription.pointee.mFormatID)
-            let format = isAAC && encoded.channelCount == 1
-                ? AVAudioFormat(standardFormatWithSampleRate: max(48_000, encoded.sampleRate), channels: 2) ?? encoded
-                : encoded
-            guard format.sampleRate > 0, format.channelCount > 0
-            else { throw CocoaError(.fileReadCorruptFile) }
-            guard let snapshot = local.copy() as? AVComposition,
+            guard let sourceURL = first.sourceURL, let snapshot = local.copy() as? AVComposition,
                 let input = snapshot.track(withTrackID: audio.trackID)
             else { throw CocoaError(.fileReadCorruptFile) }
-            let job = RenderJob(composition: snapshot, track: input, pitch: pitch, format: format,
-                                duration: range.duration, file: file)
-            // Curve-only audio can use native edits while the cache warms.
-            // Extracted movie audio needs its sample-addressable stream on
-            // the first playback, which may start with a seek.
-            guard needsSeekablePCM || range.duration.seconds <= coldSecondsRemaining else {
-                await warmups.enqueue(job, for: clipID)
-                return
-            }
-            coldSecondsRemaining = max(0, coldSecondsRemaining - range.duration.seconds)
-            try await foregroundWriter.materialize(job)
+            let job = RenderJob(composition: snapshot, track: input, pitch: pitch,
+                sourceURL: sourceURL, sourceTrackID: first.sourceTrackID, duration: range.duration, file: file)
+            let work = await warmups.enqueue(job, for: clipID)
+            guard try await preparation.wait(for: work) != nil else { return false }
         }
         let asset = AVURLAsset(url: file)
         guard let pcm = try await asset.loadTracks(withMediaType: .audio).first else { throw CocoaError(.fileReadCorruptFile) }
@@ -115,6 +130,7 @@ enum PreviewRetimedAudio {
         try track.validateSegments(replacement)
         try Task.checkCancellation()
         track.segments = replacement
+        return true
     }
 
     /// Only immutable AVFoundation objects from the private snapshot cross executors.
@@ -122,47 +138,105 @@ enum PreviewRetimedAudio {
         let composition: AVComposition
         let track: AVCompositionTrack
         let pitch: AVAudioTimePitchAlgorithm
-        let format: AVAudioFormat
+        let sourceURL: URL
+        let sourceTrackID: CMPersistentTrackID
         let duration: CMTime
         let file: URL
     }
 
     /// Repeated edits to a long clip should warm only its latest mapping.
     private actor Warmups {
-        private let writer = Writer()
-        private var pending: [UUID: (url: URL, task: Task<Void, Never>)] = [:]
+        private var pending: [UUID: (id: UUID, url: URL, task: Task<URL, Error>)] = [:]
+        private var tail: (id: UUID, task: Task<URL, Error>)?
 
-        func enqueue(_ job: RenderJob, for clipID: UUID) {
-            guard pending[clipID]?.url != job.file else { return }
+        func enqueue(_ job: RenderJob, for clipID: UUID) -> Task<URL, Error> {
+            if let pending = pending[clipID], pending.url == job.file { return pending.task }
             pending[clipID]?.task.cancel()
-            let task = Task(priority: .utility) {
-                try? await writer.materialize(job)
-                if pending[clipID]?.url == job.file, !Task.isCancelled { pending[clipID] = nil }
+            let id = UUID()
+            let previous = tail?.task
+            let task = Task.detached(priority: .utility) {
+                _ = await previous?.result
+                try Task.checkCancellation()
+                try await materialize(job)
+                return job.file
             }
-            pending[clipID] = (job.file, task)
+            tail = (id, task)
+            pending[clipID] = (id, job.file, task)
+            Task {
+                _ = await task.result
+                if pending[clipID]?.id == id { pending[clipID] = nil }
+                if tail?.id == id { tail = nil }
+            }
+            return task
         }
     }
 
-    private actor Writer {
-        func materialize(_ job: RenderJob) throws {
-            try Task.checkCancellation()
-            let file = job.file
-            guard !FileManager.default.fileExists(atPath: file.path) else { return }
-            let folder = file.deletingLastPathComponent()
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let estimatedBytes = job.duration.seconds * max(48_000, job.format.sampleRate)
-                * Double(job.format.channelCount) * 4
-            if let capacity = try? folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity,
-                estimatedBytes > Double(capacity) {
-                throw CocoaError(.fileWriteOutOfSpace)
-            }
-            let temporary = folder.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf")
-            defer { try? FileManager.default.removeItem(at: temporary) }
-            try write(composition: job.composition, track: job.track, pitch: job.pitch, format: job.format,
-                      duration: job.duration, to: temporary)
-            do { try FileManager.default.moveItem(at: temporary, to: file) }
-            catch where FileManager.default.fileExists(atPath: file.path) { /* Already published by the other queue. */ }
+    private static func materialize(_ job: RenderJob) async throws {
+        try Task.checkCancellation()
+        let file = job.file
+        guard !FileManager.default.fileExists(atPath: file.path) else { return }
+        let format = try await sourceFormat(for: job)
+        let folder = file.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let estimatedBytes = job.duration.seconds * max(48_000, format.sampleRate)
+            * Double(format.channelCount) * 4
+        if let capacity = try? folder.resourceValues(forKeys: [.volumeAvailableCapacityKey]).volumeAvailableCapacity,
+            estimatedBytes > Double(capacity) {
+            throw CocoaError(.fileWriteOutOfSpace)
         }
+        let temporary = folder.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let edits = job.track.segments.filter { !$0.isEmpty }
+        let hasExtremeRate = edits.contains {
+            let pace = $0.timeMapping.source.duration.seconds / $0.timeMapping.target.duration.seconds
+            return pace < 0.25 || pace > 4
+        }
+        let requiresDirectMapping = edits.count > 32
+            || (hasExtremeRate && (edits.count > 1 || job.pitch == .varispeed))
+        var usedNativePitch = false
+        if !requiresDirectMapping {
+            let candidate = folder.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf")
+            defer { try? FileManager.default.removeItem(at: candidate) }
+            let budget = min(max(job.duration.seconds * 0.1, 3), 20)
+            let work = Task.detached(priority: .utility) {
+                defer { if Task.isCancelled { try? FileManager.default.removeItem(at: candidate) } }
+                try write(composition: job.composition, track: job.track, pitch: job.pitch, format: format,
+                    duration: job.duration, to: candidate)
+                return candidate
+            }
+            defer { work.cancel() }
+            let wait = PreviewAudioPreparation(deadline: .now + .seconds(budget), onReady: nil)
+            if (try? await wait.wait(for: work)) != nil {
+                try FileManager.default.moveItem(at: candidate, to: temporary)
+                usedNativePitch = true
+            }
+        }
+        try Task.checkCancellation()
+        if !usedNativePitch {
+            try await PreviewMappedAudio.write(edits: edits, format: format, duration: job.duration, to: temporary)
+        }
+        try Task.checkCancellation()
+        do { try FileManager.default.moveItem(at: temporary, to: file) }
+        catch where FileManager.default.fileExists(atPath: file.path) { /* Another build published the cache. */ }
+    }
+
+    private static func sourceFormat(for job: RenderJob) async throws -> AVAudioFormat {
+        // Read the original layout. A composition track can report mono
+        // even when the AAC decoder produces parametric stereo.
+        let asset = AVURLAsset(url: job.sourceURL)
+        guard let original = try await asset.loadTrack(withTrackID: job.sourceTrackID),
+            let description = try await original.load(.formatDescriptions).first
+        else { throw CocoaError(.fileReadCorruptFile) }
+        let encoded = AVAudioFormat(cmAudioFormatDescription: description)
+        guard encoded.sampleRate > 0, encoded.channelCount > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        let isAAC = [kAudioFormatMPEG4AAC, kAudioFormatMPEG4AAC_HE, kAudioFormatMPEG4AAC_HE_V2]
+            .contains(encoded.streamDescription.pointee.mFormatID)
+        if isAAC, encoded.channelCount == 1,
+            let stereo = AVAudioFormat(standardFormatWithSampleRate: max(48_000, encoded.sampleRate), channels: 2)
+        {
+            return stereo
+        }
+        return encoded
     }
 
     private static func write(composition: AVComposition, track: AVCompositionTrack,

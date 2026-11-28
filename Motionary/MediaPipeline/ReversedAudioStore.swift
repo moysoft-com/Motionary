@@ -9,13 +9,25 @@ actor ReversedAudioStore {
 
     private var pending: [URL: Task<Void, Error>] = [:]
 
-    func reversedURL(for url: URL, track: AVAssetTrack, range: CMTimeRange) async throws -> URL {
+    func previewURL(for url: URL, track: AVAssetTrack, range: CMTimeRange,
+                    preparation: PreviewAudioPreparation) async throws -> URL? {
+        let file = try destination(for: url, trackID: track.trackID)
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+        let work = Task { try await reversedURL(for: url, track: track, range: range) }
+        return try await preparation.wait(for: work)
+    }
+
+    private func destination(for url: URL, trackID: CMPersistentTrackID) throws -> URL {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let identity =
-            "\(url.path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(track.trackID)"
+            "\(url.path)|\(values.fileSize ?? 0)|\(values.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(trackID)"
         let digest = SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
         let directory = URL.cachesDirectory.appendingPathComponent("MotionaryReversedAudio-v1", isDirectory: true)
-        let destination = directory.appendingPathComponent(digest).appendingPathExtension("caf")
+        return directory.appendingPathComponent(digest).appendingPathExtension("caf")
+    }
+
+    func reversedURL(for url: URL, track: AVAssetTrack, range: CMTimeRange) async throws -> URL {
+        let destination = try destination(for: url, trackID: track.trackID)
         if FileManager.default.fileExists(atPath: destination.path) { return destination }
         if let task = pending[destination] {
             try await task.value

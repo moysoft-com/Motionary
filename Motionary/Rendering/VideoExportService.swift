@@ -167,6 +167,8 @@ struct VideoExportService {
         )
         try validateRenderingAvailability(for: project)
 
+        let preparationWeight = try await prepareSmoothMotion(
+            for: project, frameRate: settings.frameRate, progress: progress)
         let rendered = try await renderService.makeComposition(
             for: project,
             renderSettings: outputRenderSettings
@@ -190,13 +192,37 @@ struct VideoExportService {
                 rendered: rendered,
                 settings: settings,
                 outputURL: outputURL,
-                progress: progress
+                progress: { progress(preparationWeight + $0 * (1 - preparationWeight)) }
             )
             return outputURL
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             throw error
         }
+    }
+
+    private func prepareSmoothMotion(
+        for project: EditorProject, frameRate: Int32, progress: @escaping @Sendable (Double) -> Void
+    ) async throws -> Double {
+        let pending = project.tracks.lazy.filter { !$0.isMuted && $0.kind == .visual }
+            .flatMap(\.items).compactMap { item -> (URL, SmoothMotionRecipe)? in
+                guard case .media(let media) = item, media.usesSmoothMotion, media.canUseSmoothMotion,
+                    let url = project.mediaLibrary[media.mediaID]?.url
+                else { return nil }
+                let recipe = media.smoothMotionRecipe(frameRate: frameRate)
+                return SmoothMotion.cachedURL(source: url, recipe: recipe) == nil ? (url, recipe) : nil
+            }
+        let jobs = Array(pending)
+        guard !jobs.isEmpty else { return 0 }
+        let preparationWeight = 0.25
+        for (index, (url, recipe)) in jobs.enumerated() {
+            try Task.checkCancellation()
+            _ = try await SmoothMotion.prepare(source: url, recipe: recipe) { fraction in
+                progress(preparationWeight * (Double(index) + fraction) / Double(jobs.count))
+            }
+            progress(preparationWeight * Double(index + 1) / Double(jobs.count))
+        }
+        return preparationWeight
     }
 
     func validateRenderingAvailability(for project: EditorProject) throws {

@@ -20,6 +20,8 @@ extension EditorViewModel {
         rebuildTask = nil
         previewRecoveryTask?.cancel()
         previewRecoveryTask = nil
+        previewAudioRefreshTask?.cancel()
+        previewAudioRefreshTask = nil
         cancelInteractivePreviewRebuild()
         replacePreviewPlayer(with: nil)
         renderService.livePreviewState.setInteractiveQualityOverride(false)
@@ -69,6 +71,7 @@ extension EditorViewModel {
     }
 
     func stop() {
+        previewIsSuspended = true
         hapticPlayback.detach()
         workspaceScrollOwners.removeAll()
         workspacePersistencePending = false
@@ -107,6 +110,8 @@ extension EditorViewModel {
         rebuildTask = nil
         previewRecoveryTask?.cancel()
         previewRecoveryTask = nil
+        previewAudioRefreshTask?.cancel()
+        previewAudioRefreshTask = nil
         stopPlaybackWatchdog()
         scrubSeekTask?.cancel()
         scrubSeekTask = nil
@@ -114,6 +119,7 @@ extension EditorViewModel {
         importTask = nil
         exportTask?.cancel()
         exportTask = nil
+        smoothMotionJobID = nil
         analysisTask?.cancel()
         analysisTask = nil
         analysisState = nil
@@ -181,6 +187,13 @@ extension EditorViewModel {
     }
 
     func cancelLongRunningTask() {
+        if analysisState?.kind == .smoothMotion {
+            smoothMotionJobID = nil
+            analysisTask?.cancel()
+            analysisTask = nil
+            analysisState = nil
+            return
+        }
         if let effectID = depthPreparationEffectID, depthPreparationProgress != nil {
             cancelledDepthPreparationID = depthPreparationID
             depthPreparationID = nil
@@ -362,13 +375,25 @@ extension EditorViewModel {
             let target = time ?? (needsInitialPosition || self.playbackNeedsSeekAfterNavigation
                 ? self.livePreviewPresentationTime(self.clampedPlayableTime(self.currentTime)) : nil)
             if let target {
-                let result = await self.boundedSeek(
+                var result = await self.boundedSeek(
                     player: player, to: target, toleranceBefore: .zero,
                     toleranceAfter: .zero, timeoutNanoseconds: 5_000_000_000
                 )
                 guard self.ownsPlaybackStart(for: player, generation: generation) else { return }
+                if result == .interrupted {
+                    result = await self.boundedSeek(
+                        player: player, to: target, toleranceBefore: .zero,
+                        toleranceAfter: .zero, timeoutNanoseconds: 5_000_000_000
+                    )
+                    guard self.ownsPlaybackStart(for: player, generation: generation) else { return }
+                }
                 guard result == .completed else {
-                    if result == .timedOut { self.schedulePreviewRecovery(reason: .seekTimeout, resumePlayback: true) }
+                    if result != .superseded {
+                        self.schedulePreviewRecovery(
+                            reason: result == .timedOut ? .seekTimeout : .compositorFailure,
+                            resumePlayback: true
+                        )
+                    }
                     return
                 }
                 self.playbackNeedsSeekAfterMixUpdate = false

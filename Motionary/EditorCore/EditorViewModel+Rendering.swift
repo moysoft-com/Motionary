@@ -294,7 +294,10 @@ extension EditorViewModel {
                 quality: requestedPreviewQuality == .interactive ? .balanced : requestedPreviewQuality,
                 invalidation: invalidation,
                 renderSessionID: UUID(),
-                displayPixelSize: previewDisplayPixelSize
+                displayPixelSize: previewDisplayPixelSize,
+                onAudioReady: { [weak self] in
+                    Task { @MainActor in self?.schedulePreparedAudioRefresh() }
+                }
             )
             guard !Task.isCancelled, generation == previewGeneration else { return }
             // A user may seek while the preview graph is being prepared. The
@@ -331,6 +334,9 @@ extension EditorViewModel {
                         pendingPlaybackResumeAfterPreviewRebuild = true
                         isPlaying = false
                     }
+                    // Clear descriptor-backed overrides before the new
+                    // composition can submit its first frame.
+                    clearPendingLiveVisualOverrides()
                 }
                 if replacesPlayer {
                     let item = AVPlayerItem(asset: prepared.composition)
@@ -357,9 +363,6 @@ extension EditorViewModel {
                 // Replacing AVPlayerItem.audioMix is a live operation. Seeking
                 // for an audio-only change interrupts playback and performs
                 // unnecessary video decode/compositing work.
-                if requiresPlayerSynchronization {
-                    clearPendingLiveVisualOverrides()
-                }
                 if updatesAudio, !isPlaying, !pendingPlaybackResumeAfterPreviewRebuild {
                     scratchAudio.prepare(item: player?.currentItem, duration: prepared.duration, at: seekTime)
                 }
@@ -478,6 +481,29 @@ extension EditorViewModel {
     private func updatePreviewProgress(_ progress: Double, generation: Int) {
         guard generation == previewGeneration else { return }
         previewProgress = max(previewProgress, progress)
+    }
+
+    private func schedulePreparedAudioRefresh() {
+        guard !previewIsSuspended, previewAudioRefreshTask == nil else { return }
+        previewAudioRefreshTask = Task { [weak self] in
+            defer {
+                if !Task.isCancelled { self?.previewAudioRefreshTask = nil }
+            }
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(180)) }
+                catch { return }
+                guard let self, !self.previewIsSuspended else { return }
+                // Audio may finish in the middle of an edit or playback.
+                // Replacing the player item then would interrupt the gesture.
+                guard !self.isPlaying, !self.isScrubbing, !self.isRenderingPreview,
+                    !self.playbackState.isStartingPlayback, self.rebuildTask == nil,
+                    self.interactiveEditSnapshot == nil, self.workspaceScrollOwners.isEmpty
+                else { continue }
+                self.schedulePreviewRebuild(seekTo: self.currentTime, delay: false,
+                    invalidation: [.previewFrame, .compositionTopology, .audioMix])
+                return
+            }
+        }
     }
 
     func replacePreviewPlayer(with item: AVPlayerItem?, preservingFrame: Bool = false) {

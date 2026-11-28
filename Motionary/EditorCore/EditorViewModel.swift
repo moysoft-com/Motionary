@@ -7,11 +7,13 @@ import SwiftUI
 enum EditorAnalysisKind: String, Equatable {
     case backgroundRemoval
     case audioBeats
+    case smoothMotion
 
     var title: String {
         switch self {
         case .backgroundRemoval: "Removing background"
         case .audioBeats: "Analyzing beats"
+        case .smoothMotion: "Preparing Smooth Motion"
         }
     }
 }
@@ -197,6 +199,7 @@ final class EditorViewModel: ObservableObject {
     var previewPlaybackStatusObservation: NSKeyValueObservation?
     var previewItemNotificationObservers: [NSObjectProtocol] = []
     var previewRecoveryTask: Task<Void, Never>?
+    var previewAudioRefreshTask: Task<Void, Never>?
     var playbackWatchdogTask: Task<Void, Never>?
     var effectRenderDiagnosticsHandlerToken: UUID?
     var wasPlayingBeforeScrub = false
@@ -216,6 +219,7 @@ final class EditorViewModel: ObservableObject {
     var importTask: Task<Void, Never>?
     var exportTask: Task<Void, Never>?
     var analysisTask: Task<Void, Never>?
+    var smoothMotionJobID: UUID?
     var toastTask: Task<Void, Never>?
     var autosaveTask: Task<Void, Never>?
     var projectPosterTask: Task<Void, Never>?

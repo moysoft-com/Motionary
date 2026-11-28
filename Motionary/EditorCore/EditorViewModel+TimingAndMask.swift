@@ -18,14 +18,8 @@ extension EditorViewModel {
             item.speedMap.timeRemap == nil,
             currentTime >= item.timelineStart, currentTime < item.timelineEnd
         else { return nil }
-        beginInteractiveSpeedEdit()
-        return SpeedEditSession(itemID: item.id)
-    }
-
-    private func beginInteractiveSpeedEdit() {
-        player?.pause()
-        isPlaying = false
         beginInteractiveEdit()
+        return SpeedEditSession(itemID: item.id)
     }
 
     @discardableResult
@@ -70,7 +64,7 @@ extension EditorViewModel {
 
     func beginSelectedTimeRemapEdit(itemID: UUID) -> TimeRemapEditSession? {
         guard let (item, time) = selectedTimeRemapContext, item.id == itemID else { return nil }
-        beginInteractiveSpeedEdit()
+        beginInteractiveEdit()
         let keyframeTime = item.timelineStart + time
         if abs(currentTime - keyframeTime) > 0.000_001 {
             seek(to: keyframeTime)
@@ -103,6 +97,14 @@ extension EditorViewModel {
         updateSelectedSpeedMap(interactive: interactive, preserveSourceTime: false) { item in
             var map = item.speedMap
             map.timeRemap?.setInterpolation(interpolation, at: startTime)
+            return map
+        }
+    }
+
+    func moveSelectedTimeRemapKeyframe(for itemID: UUID, from: Double, to: Double, interactive: Bool) -> Bool {
+        updateSelectedSpeedMap(itemID: itemID, interactive: interactive, preserveSourceTime: false) { item in
+            var map = item.speedMap
+            map.timeRemap?.moveKeyframe(from: from, to: to)
             return map
         }
     }
@@ -168,12 +170,10 @@ extension EditorViewModel {
             currentItem.mediaType == .video || currentItem.mediaType == .audio
         else { return false }
 
-        if isPlaying {
-            player?.pause()
-            isPlaying = false
-        }
         if interactive {
             beginInteractiveEdit()
+        } else {
+            pausePlaybackForEditing()
         }
 
         let anchoredSourceTime: Double?
@@ -211,7 +211,11 @@ extension EditorViewModel {
 
         let retimingChanged = abs(durationDelta) > 0.000_001
             || updatedItem.speedMap.topologySignature != currentItem.speedMap.topologySignature
-        applyTimingAndMaskMutation(interactive: interactive) { project in
+        let anchoredTime = anchoredSourceTime.map {
+            updatedItem.timelineStart
+                + updatedItem.speedMap.timelineTime(at: $0, sourceDuration: updatedItem.sourceRange.duration)
+        }
+        applyTimingAndMaskMutation(interactive: interactive, previewSeekTime: anchoredTime) { project in
             guard let currentLocation = project.itemLocation(id: itemID) else { return }
             project.tracks[currentLocation.track].items[currentLocation.item] = .media(updatedItem)
             if self.isRippleEditingEnabled, abs(durationDelta) > 0.000_001 {
@@ -228,14 +232,6 @@ extension EditorViewModel {
                 project.tracks[currentLocation.track].sortItems()
             }
         }
-        if let anchoredSourceTime, retimingChanged {
-            let anchoredTime = updatedItem.timelineStart
-                + updatedItem.speedMap.timelineTime(
-                    at: anchoredSourceTime,
-                    sourceDuration: updatedItem.sourceRange.duration
-                )
-            updateCurrentTime(clampedTimelineTime(anchoredTime))
-        }
         if interactive, retimingChanged,
             updatedItem.mediaType == .video, updatedItem.speedMap.timeRemap != nil
         {
@@ -246,11 +242,6 @@ extension EditorViewModel {
             scheduleLivePreviewFrameRefresh()
         } else if interactive, retimingChanged, updatedItem.speedMap.timeRemap == nil {
             scheduleInteractivePreviewRebuild(
-                invalidation: [.previewFrame, .compositionTopology, .audioMix]
-            )
-        } else if !interactive, anchoredSourceTime != nil, retimingChanged {
-            schedulePreviewRebuild(
-                seekTo: currentTime,
                 invalidation: [.previewFrame, .compositionTopology, .audioMix]
             )
         }
@@ -398,6 +389,7 @@ extension EditorViewModel {
 
     private func applyTimingAndMaskMutation(
         interactive: Bool = false,
+        previewSeekTime: Double? = nil,
         _ mutation: @escaping (inout EditorProject) -> Void
     ) {
         mutateProject(
@@ -405,10 +397,11 @@ extension EditorViewModel {
             recordHistory: !interactive,
             persistChanges: !interactive,
             touchUpdatedAt: !interactive,
+            previewSeekTime: interactive ? nil : previewSeekTime,
             mutation
         )
         if interactive {
-            updateCurrentTime(clampedTimelineTime(currentTime))
+            updateCurrentTime(clampedTimelineTime(previewSeekTime ?? currentTime))
         }
     }
 }

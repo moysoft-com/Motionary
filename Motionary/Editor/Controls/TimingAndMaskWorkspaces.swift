@@ -201,6 +201,9 @@ private struct ConstantSpeedWorkspaceView: View {
                         viewModel.setSelectedTimeRemapEnabled(enabled)
                     }
 
+                    if item.mediaType == .video {
+                        SmoothMotionControl(viewModel: viewModel, item: item, isEditable: isEditable)
+                    }
                     TimingWorkspaceOptions(viewModel: viewModel, item: item, isEnabled: isEnabled)
                 }
             }
@@ -280,6 +283,9 @@ private struct TimeRemapWorkspaceView: View {
                         viewModel.setSelectedTimeRemapEnabled(enabled)
                     }
 
+                    if item.mediaType == .video {
+                        SmoothMotionControl(viewModel: viewModel, item: item, isEditable: isEditable)
+                    }
                     TimingWorkspaceOptions(viewModel: viewModel, item: item, isEnabled: isEnabled)
                 }
             }
